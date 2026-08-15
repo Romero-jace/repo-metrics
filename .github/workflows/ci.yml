@@ -44,14 +44,54 @@ jobs:
       - name: Test
         run: go test ./... -race
 
-      # The two cross-checks against the real Go toolchain are opt-in: they need
-      # a genuine coverage profile or -json stream handed to them through
-      # REPO_METRICS_TEST_PROFILE and REPO_METRICS_TEST_JSON, which CI has no
-      # reason to produce, so both skip here. Running them anyway keeps them
-      # compiling, so they cannot quietly rot into tests that no longer build
-      # and that nobody notices until the day someone needs them.
-      - name: Opt-in cross-checks compile
-        run: go test ./... -run 'TestAgainstGoToolCover|TestTestJSONAgainstRealStream' -v
+      # The two cross-checks against the real Go toolchain are opt-in: they skip
+      # unless handed a genuine coverage profile or -json stream through
+      # REPO_METRICS_TEST_PROFILE and REPO_METRICS_TEST_JSON. So CI produces a
+      # real pair here and actually runs them.
+      #
+      # This step used to run them by name with nothing set, on the theory that
+      # it kept them from rotting into code that no longer builds. It did not
+      # earn its place: the -race run above compiles them already, so all that
+      # step could report was two skips and a green check.
+      #
+      # cmd/repo-metrics is in the selection because it has no test files, which
+      # is what makes go emit the "[no test files]" marker the JSON cross-check
+      # counts. Without it that assertion compares zero against zero.
+      #
+      # Honest about the scope: this exercises the wiring and the parser's
+      # agreement with go tool cover on a real profile. It is one package's
+      # worth of coverage, not a repo-scale -coverpkg=./... profile where the
+      # same block appears once per test binary, which is the case the
+      # dedup logic exists for. Widening the profile is the obvious next move if
+      # this proves cheap.
+      - name: Produce real toolchain artifacts
+        # Both artifacts go to the runner's temp dir rather than the workspace,
+        # so nothing here can be mistaken for a checked-in file or picked up by
+        # a later step that globs the tree.
+        #
+        # The -json stream has to land in a file, so a failure here would show
+        # an empty log. Replay the file before failing.
+        run: |
+          go test ./internal/collect/golang/ ./cmd/repo-metrics/ \
+            -coverpkg=./internal/collect/golang/... \
+            -coverprofile=${{ runner.temp }}/coverage.out \
+            -json > ${{ runner.temp }}/test-stream.json \
+            || { cat ${{ runner.temp }}/test-stream.json; exit 1; }
+
+      - name: Cross-check the parsers against the real toolchain
+        env:
+          REPO_METRICS_TEST_PROFILE: ${{ runner.temp }}/coverage.out
+          # go tool cover -func reads the source the profile names, so it has to
+          # run where the module resolves.
+          REPO_METRICS_TEST_PROFILE_DIR: ${{ github.workspace }}
+          REPO_METRICS_TEST_JSON: ${{ runner.temp }}/test-stream.json
+        # -count=1 is load-bearing, not a habit. These two tests read their
+        # inputs from paths named in the environment, and the test cache was
+        # observed serving a PASS from an earlier run against a different
+        # profile: it reported the old numbers and never opened the new files.
+        # A cross-check that can pass without looking at the artifact is the
+        # same do-nothing step this one replaced.
+        run: go test -count=1 ./internal/collect/golang/ -run 'TestAgainstGoToolCover|TestTestJSONAgainstRealStream' -v
 
       - name: Lint
         uses: golangci/golangci-lint-action@v8

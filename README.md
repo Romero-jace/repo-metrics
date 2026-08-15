@@ -44,18 +44,27 @@ annotated with what it does and what happens if you leave it out.
 Then you run it on whatever schedule you like:
 
 ```sh
-repo-metrics collect                             # one pass, then exits
-repo-metrics report --window 168h --out report.md
+repo-metrics collect                          # one pass, then exits
+repo-metrics report --window 7d --out report.md
 ```
 
-Durations use Go's syntax, which has no day unit, so a week is `168h`.
+`--window` takes Go's duration syntax plus a `d` suffix for days, so `7d`,
+`168h`, and `1d12h` all work. The duration fields in the config file are
+stricter: `window:`, `timeout:`, and `max_age:` go through Go's
+`time.ParseDuration`, whose largest unit is the hour, so a week there has to be
+written `168h` and `7d` is a load error.
 
 There is no daemon. `collect` does one pass and exits, so cron or launchd owns
 the cadence and you can always just run it by hand:
 
 ```
-0 6 * * *  repo-metrics collect && repo-metrics report --out /srv/report.md
+0 6 * * *  repo-metrics collect ; repo-metrics report --out /srv/report.md
 ```
+
+That is a `;` and not an `&&` on purpose. `collect` exits 1 when any single repo
+failed, which is the design: it keeps going so one unreachable repo does not
+cost you the other nine. Chaining with `&&` would let that one repo cancel the
+report you actually wanted.
 
 [`examples/`](examples/) has a ready-made launchd agent for macOS and the
 equivalent crontab line for Linux.
@@ -82,8 +91,14 @@ because it is measuring the thing the headline is actually about.
 
 There is a size floor on top of that, `min_statements`, default 20. Tiny packages
 are left out of the ranking entirely rather than trusted to sort themselves to the
-bottom. They still show up in the appendix, so nothing is hidden, it just does not
-get to lead.
+bottom.
+
+Left out means left out: there is no appendix, and a small package whose coverage
+merely moved is not named anywhere in the report. It is not ignored, though. Its
+statements still count toward its repo's coverage number in the per-repo table,
+which is where the headline figure comes from, and if it was added or deleted it
+is still listed among the packages that came and went. The floor applies to the
+"which package is why" ranking and to nothing else.
 
 ## Design notes
 

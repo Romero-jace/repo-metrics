@@ -11,7 +11,33 @@ make check     # build, vet, test, lint, in that order
 ```
 
 `make check` is the pre-commit gate. Run it and paste the output in the pull
-request rather than saying it passed. CI runs the same four steps.
+request rather than saying it passed.
+
+CI runs those same four steps in the same order and then some, so a green
+`make check` is necessary and not sufficient. Two differences are worth knowing
+before a red CI surprises you:
+
+- `make test` is `go test ./...`. CI runs `go test ./... -race`, so a data race
+  fails there and passes here. If you touched anything concurrent, run
+  `GOWORK=off go test ./... -race` yourself first.
+- CI also produces a real coverage profile and a real `go test -json` stream and
+  runs the two opt-in cross-check tests against them. Those tests skip in
+  `make test`, which has nothing to hand them. To run them locally, point them
+  at artifacts you made:
+
+  ```sh
+  GOWORK=off go test ./internal/collect/golang/ ./cmd/repo-metrics/ \
+    -coverpkg=./internal/collect/golang/... \
+    -coverprofile=/tmp/coverage.out -json > /tmp/test-stream.json
+  REPO_METRICS_TEST_PROFILE=/tmp/coverage.out \
+  REPO_METRICS_TEST_PROFILE_DIR=$PWD \
+  REPO_METRICS_TEST_JSON=/tmp/test-stream.json \
+    GOWORK=off go test -count=1 ./internal/collect/golang/ \
+    -run 'TestAgainstGoToolCover|TestTestJSONAgainstRealStream' -v
+  ```
+
+  `-count=1` matters: the test cache will otherwise hand back a pass from a run
+  against a different profile.
 
 Individual targets are `build`, `test`, `vet`, `lint`, `fmt`, `tidy`, `clean`.
 

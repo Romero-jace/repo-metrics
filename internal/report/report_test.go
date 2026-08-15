@@ -36,6 +36,12 @@ const (
 	repoQuiet  = "quietrepo"
 	repoFresh  = "freshrepo"
 	repoBroken = "brokenrepo"
+	// repoUnseen is configured but has never been collected. It is named so
+	// that it shares no substring with the template's own "not collected" and
+	// "never" wording, which a row assertion has to be able to tell apart.
+	repoUnseen = "unseenrepo"
+	// repoUpgraded changed toolchain without moving enough to be a mover.
+	repoUpgraded = "upgradedrepo"
 )
 
 // fixedNow pins GeneratedAt. Using the wall clock would make the determinism
@@ -195,6 +201,35 @@ func repoRow(t *testing.T, md, name string) string {
 	return ""
 }
 
+// jsonRepoRows renders the JSON and returns its repos array keyed by name,
+// still decoded as map[string]any. Decoding into View instead would round-trip
+// a Go nil back into a Go nil and prove nothing about what goes over the wire,
+// which is where a downstream consumer reads it.
+func jsonRepoRows(t *testing.T, rep delta.Report) map[string]map[string]any {
+	t.Helper()
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(mustJSON(t, rep)), &doc); err != nil {
+		t.Fatalf("decoding the rendered json: %v", err)
+	}
+	repos, ok := doc["repos"].([]any)
+	if !ok {
+		t.Fatalf("json has no repos array, got %T", doc["repos"])
+	}
+	byName := make(map[string]map[string]any, len(repos))
+	for _, r := range repos {
+		row, ok := r.(map[string]any)
+		if !ok {
+			t.Fatalf("repos entry is %T, want an object", r)
+		}
+		name, ok := row["name"].(string)
+		if !ok {
+			t.Fatalf("repos entry has no name: %v", row)
+		}
+		byName[name] = row
+	}
+	return byName
+}
+
 func findRepoView(t *testing.T, repos []report.RepoView, name string) report.RepoView {
 	t.Helper()
 	for _, r := range repos {
@@ -267,6 +302,17 @@ var signedNumber = regexp.MustCompile(`[+\-][0-9]`)
 // carries a collection date. An ISO date is full of hyphens and none of them
 // mean "went down".
 var timestamp = regexp.MustCompile(`\d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC`)
+
+// fromToPct matches the "90.0% to 40.0%" phrasing that describes a package
+// moving between two measurements. Only a package present in both snapshots
+// may be described that way: a deleted or brand-new one has one figure, and
+// pairing it with the zero on the other side invents a move.
+var fromToPct = regexp.MustCompile(`[0-9]+\.[0-9]% to [0-9]+\.[0-9]%`)
+
+// zeroPct matches a coverage figure of exactly zero. The leading guard is what
+// keeps it from also matching the tail of a real figure: "30.0% covered"
+// contains the characters 0.0% and is not a zero.
+var zeroPct = regexp.MustCompile(`(^|[^0-9])0\.0%`)
 
 // TestNoBaselineIsNeverRenderedAsADelta is the one that matters most here. A
 // first run that prints "+0.0 pts" claims it measured no change when it measured
@@ -403,27 +449,7 @@ func checkIntPtr(t *testing.T, label string, got, want *int) {
 // would round-trip a Go nil back into a Go nil and prove nothing about what
 // actually goes over the wire, which is where a downstream consumer reads it.
 func TestJSONWireShape(t *testing.T) {
-	var doc map[string]any
-	if err := json.Unmarshal([]byte(mustJSON(t, fullReport())), &doc); err != nil {
-		t.Fatalf("decoding the rendered json: %v", err)
-	}
-	repos, ok := doc["repos"].([]any)
-	if !ok {
-		t.Fatalf("json has no repos array, got %T", doc["repos"])
-	}
-
-	byName := make(map[string]map[string]any, len(repos))
-	for _, r := range repos {
-		row, ok := r.(map[string]any)
-		if !ok {
-			t.Fatalf("repos entry is %T, want an object", r)
-		}
-		name, ok := row["name"].(string)
-		if !ok {
-			t.Fatalf("repos entry has no name: %v", row)
-		}
-		byName[name] = row
-	}
+	byName := jsonRepoRows(t, fullReport())
 
 	for _, field := range []string{"coverage_delta_points", "tests_delta"} {
 		fresh, ok := byName[repoFresh]
@@ -456,6 +482,39 @@ func TestJSONWireShape(t *testing.T) {
 	if got := byName[repoMover]["has_baseline"]; got != true {
 		t.Errorf("%s has_baseline: got %v, want true", repoMover, got)
 	}
+
+	// The third pairing of those two fields, and the one a consumer is most
+	// likely to get wrong: a repo with plenty of history whose latest run came
+	// back with nothing. has_baseline is true, so a consumer that reads it as
+	// "the deltas are populated" would chart a cliff. There is still nothing to
+	// compare against, so both deltas stay null.
+	crashed := jsonRepoRows(t, delta.Compute([]delta.Input{{
+		Repo:        store.Repo{ID: 8, Name: "crashedrepo", Path: "/repos/crashedrepo"},
+		Head:        snap(81, 8, "go1.26.5", store.StatusFailed, "coverage profile was stale"),
+		Base:        snap(80, 8, "go1.26.5", store.StatusOK, ""),
+		BaseMetrics: metrics(cov(pkgAlpha, 72, 100), []store.Metric{testCount(pkgAlpha, 40)}),
+	}}, options(), fixedNow()))["crashedrepo"]
+	if crashed == nil {
+		t.Fatalf("crashedrepo is missing from the json entirely")
+	}
+	if got := crashed["has_baseline"]; got != true {
+		t.Fatalf("fixture is wrong: crashedrepo has history, so has_baseline should be true, got %v", got)
+	}
+	if got := crashed["status"]; got != string(store.StatusFailed) {
+		t.Fatalf("fixture is wrong: crashedrepo should be failed, got %v", got)
+	}
+	if got, present := crashed["has_snapshot"]; !present || got != true {
+		t.Errorf("crashedrepo did run, it just came back empty, so has_snapshot should be true: got %v (present=%v)", got, present)
+	}
+	for _, field := range []string{"coverage_delta_points", "tests_delta"} {
+		v, present := crashed[field]
+		if !present {
+			t.Errorf("crashedrepo: %s is absent from the json; a consumer cannot tell an absent delta from a key it forgot to read", field)
+		}
+		if v != nil {
+			t.Errorf("crashedrepo has a baseline but its latest run collected nothing, so %s must be null, got %v", field, v)
+		}
+	}
 }
 
 // TestPackageChurnIsNotARegression guards the first embarrassment this tool
@@ -475,22 +534,61 @@ func TestPackageChurnIsNotARegression(t *testing.T) {
 		t.Errorf("added package %s is not listed under the churn heading:\n%s", pkgNew, churn)
 	}
 
-	for _, line := range linesMentioning(md, pkgGone) {
-		// "95.0% to 0.0%" is the misleading phrasing: the package did not drop
-		// to zero coverage, it stopped existing.
-		if strings.Contains(line, "to 0.0%") {
-			t.Errorf("removed package %s is described as a coverage collapse:\n%s", pkgGone, line)
+	moved := sectionAfter(md, "## What moved")
+
+	// This is the control for the two assertions after it. fromToPct has to
+	// match the phrasing the template really uses for a package that moved,
+	// or "the removed package's line does not look like that" would pass
+	// because nothing in the report looks like that, which is how a guard ends
+	// up asserting a substring the template can never emit under any input.
+	changed := linesMentioning(moved, pkgAlpha)
+	if len(changed) == 0 {
+		t.Fatalf("%s exists in both snapshots and moved, so it should be named as a culprit:\n%s", pkgAlpha, moved)
+	}
+	for _, line := range changed {
+		if !fromToPct.MatchString(line) {
+			t.Fatalf("%s moved between two snapshots, so its line should read as a from-to coverage move, and the rest of this test is meaningless if it does not:\n%s", pkgAlpha, line)
 		}
 	}
-	for _, line := range linesMentioning(md, pkgNew) {
-		if strings.Contains(line, "0.0% to ") {
-			t.Errorf("added package %s is described as if it improved from zero:\n%s", pkgNew, line)
+
+	// A package that was deleted did not drop to zero coverage, it stopped
+	// existing, and one that has just appeared did not climb from zero. Keying
+	// on the from-to shape rather than on one literal ("to 0.0%") means a
+	// reworded version of the same mistake still fails.
+	gone := linesMentioning(moved, pkgGone)
+	if len(gone) == 0 {
+		t.Fatalf("removed package %s is not named as a culprit at all:\n%s", pkgGone, moved)
+	}
+	for _, line := range gone {
+		if fromToPct.MatchString(line) {
+			t.Errorf("removed package %s is described as a coverage move between two figures, but it only has one:\n%s", pkgGone, line)
+		}
+		if zeroPct.MatchString(line) {
+			t.Errorf("removed package %s is quoted at 0.0%% coverage, which is a number nobody measured:\n%s", pkgGone, line)
+		}
+		if !strings.Contains(line, "gone") {
+			t.Errorf("removed package %s is not identified as removed, so its contribution figure reads as a regression:\n%s", pkgGone, line)
+		}
+	}
+
+	arrived := linesMentioning(moved, pkgNew)
+	if len(arrived) == 0 {
+		t.Fatalf("added package %s is not named as a culprit at all:\n%s", pkgNew, moved)
+	}
+	for _, line := range arrived {
+		if fromToPct.MatchString(line) {
+			t.Errorf("added package %s is described as a coverage move between two figures, but it had no earlier one:\n%s", pkgNew, line)
+		}
+		if zeroPct.MatchString(line) {
+			t.Errorf("added package %s is quoted at 0.0%% before it existed, which reads as an improvement from nothing:\n%s", pkgNew, line)
+		}
+		if !strings.Contains(line, "new") {
+			t.Errorf("added package %s is not identified as new, so its contribution figure reads as an improvement:\n%s", pkgNew, line)
 		}
 	}
 
 	// The reader has to be able to tell which state each culprit is in, or the
 	// contribution figure next to it is unreadable.
-	moved := sectionAfter(md, "## What moved")
 	for pkg, marker := range map[string]string{pkgGone: "gone", pkgNew: "new"} {
 		var found bool
 		for _, line := range strings.Split(moved, "\n") {
@@ -629,6 +727,78 @@ func TestFailedCollectionAfterAGoodOneInventsNoCliff(t *testing.T) {
 	t.Logf("crashed repo full report:\n%s", md)
 }
 
+// TestNeverCollectedRepoIsNotPublishedAsHealthy is the third repo state, after
+// measured and failed: configured, but never collected at all. Nothing has ever
+// run against it, so every count on it is a Go zero value. Publishing those as
+// status ok says the repo sits at 0.0% coverage with no untested packages,
+// which is a measurement nobody took and is indistinguishable from a repo that
+// really is at zero.
+func TestNeverCollectedRepoIsNotPublishedAsHealthy(t *testing.T) {
+	rep := delta.Compute([]delta.Input{{
+		Repo: store.Repo{ID: 7, Name: repoUnseen, Path: "/repos/unseenrepo"},
+	}}, options(), fixedNow())
+
+	built := report.Build(rep)
+	view := findRepoView(t, built.Repos, repoUnseen)
+
+	if view.HasSnapshot {
+		t.Errorf("%s has never been collected, but the view says it has a snapshot", repoUnseen)
+	}
+	if view.Status == string(store.StatusOK) {
+		t.Errorf("%s has never been collected, so calling it %q publishes a health verdict nobody measured", repoUnseen, store.StatusOK)
+	}
+	if view.Status != report.StatusNotCollected {
+		t.Errorf("%s status: got %q, want %q", repoUnseen, view.Status, report.StatusNotCollected)
+	}
+	if view.CoverageDeltaPoints != nil || view.TestsDelta != nil {
+		t.Errorf("%s has nothing to compare, but the view publishes deltas: coverage=%v tests=%v",
+			repoUnseen, view.CoverageDeltaPoints, view.TestsDelta)
+	}
+	if len(view.Culprits) != 0 || len(view.AddedPackages) != 0 || len(view.RemovedPackages) != 0 {
+		t.Errorf("%s has no snapshot, but the view publishes package findings: culprits=%d added=%v removed=%v",
+			repoUnseen, len(view.Culprits), view.AddedPackages, view.RemovedPackages)
+	}
+	if len(built.Movers) != 0 {
+		t.Errorf("%s has no snapshot, so it cannot have moved, but it leads the report: %v", repoUnseen, built.Movers)
+	}
+
+	// The markdown is where a human forms the impression, so the row has to
+	// read the same way a failed collection does.
+	md := mustMarkdown(t, rep)
+	row := repoRow(t, md, repoUnseen)
+	if strings.Contains(row, "0.0%") {
+		t.Errorf("%s was never collected, so its row must not quote a coverage figure:\n%s", repoUnseen, row)
+	}
+	if strings.Contains(row, " pts") {
+		t.Errorf("%s was never collected, so its row must not quote a change in points:\n%s", repoUnseen, row)
+	}
+	if !strings.Contains(row, "not collected") {
+		t.Errorf("%s was never collected, but its row does not say so:\n%s", repoUnseen, row)
+	}
+	if !strings.Contains(row, "never") {
+		t.Errorf("%s has no collection date, so its row should say never:\n%s", repoUnseen, row)
+	}
+
+	// And the JSON, since a consumer charting coverage_pct needs a field to key
+	// the blank off before it plots a zero.
+	wire := jsonRepoRows(t, rep)[repoUnseen]
+	if wire == nil {
+		t.Fatalf("%s is missing from the json entirely", repoUnseen)
+	}
+	if got, present := wire["has_snapshot"]; !present || got != false {
+		t.Errorf("%s has_snapshot: got %v (present=%v), want false", repoUnseen, got, present)
+	}
+	if got := wire["status"]; got == string(store.StatusOK) {
+		t.Errorf("%s status went over the wire as %q, so a consumer reads it as a healthy repo at zero", repoUnseen, got)
+	}
+	for _, field := range []string{"coverage_delta_points", "tests_delta"} {
+		if v := wire[field]; v != nil {
+			t.Errorf("%s has nothing to compare, so %s must be null, got %v", repoUnseen, field, v)
+		}
+	}
+	t.Logf("never collected repo report:\n%s", md)
+}
+
 // TestEnvChangeIsCalledOut covers the toolchain-change branch, which otherwise
 // only ever runs in production.
 func TestEnvChangeIsCalledOut(t *testing.T) {
@@ -636,6 +806,48 @@ func TestEnvChangeIsCalledOut(t *testing.T) {
 	moved := sectionAfter(md, "## What moved")
 	if !strings.Contains(moved, "different toolchains") {
 		t.Errorf("%s changed toolchain between snapshots but the report does not say so:\n%s", repoMover, moved)
+	}
+}
+
+// TestEnvChangeIsCalledOutForARepoThatDidNotMove is the half the movers section
+// cannot cover. A repo whose toolchain changed but whose coverage moved less
+// than the reporting threshold never appears under "what moved", so a warning
+// that only renders there leaves its delta looking like a plain code change.
+// The delta is exactly as untrustworthy as a big mover's.
+func TestEnvChangeIsCalledOutForARepoThatDidNotMove(t *testing.T) {
+	rep := delta.Compute([]delta.Input{{
+		Repo:        store.Repo{ID: 6, Name: repoUpgraded, Path: "/repos/upgradedrepo"},
+		Head:        snap(61, 6, "go1.26.5", store.StatusOK, ""),
+		HeadMetrics: metrics(cov(pkgAlpha, 50, 100), []store.Metric{testCount(pkgAlpha, 4)}),
+		Base:        snap(60, 6, "go1.25.1", store.StatusOK, ""),
+		BaseMetrics: metrics(cov(pkgAlpha, 50, 100), []store.Metric{testCount(pkgAlpha, 4)}),
+	}}, options(), fixedNow())
+
+	built := report.Build(rep)
+	view := findRepoView(t, built.Repos, repoUpgraded)
+	if !view.EnvChanged {
+		t.Fatalf("fixture is wrong: %s is supposed to have changed toolchain", repoUpgraded)
+	}
+	if !view.HasBaseline {
+		t.Fatalf("fixture is wrong: %s is supposed to have a baseline", repoUpgraded)
+	}
+	if len(built.Movers) != 0 {
+		t.Fatalf("fixture is wrong: %s is supposed to sit below the mover threshold, got movers %v", repoUpgraded, built.Movers)
+	}
+
+	md := mustMarkdown(t, rep)
+	if strings.Contains(sectionAfter(md, "## What moved"), repoUpgraded) {
+		t.Fatalf("fixture is wrong: %s should not be in the movers section:\n%s", repoUpgraded, md)
+	}
+
+	row := repoRow(t, md, repoUpgraded)
+	if !strings.Contains(row, "toolchain") {
+		t.Errorf("%s changed toolchain and its row shows a delta anyway, with no warning on it:\n%s\nfull report:\n%s", repoUpgraded, row, md)
+	}
+	// A marker nobody can read is not a warning, so the report has to say what
+	// it means somewhere.
+	if !strings.Contains(md, "not code") {
+		t.Errorf("the report marks %s but never explains what the marker means:\n%s", repoUpgraded, md)
 	}
 }
 
@@ -659,8 +871,46 @@ func TestEmptyReport(t *testing.T) {
 	if err := json.Unmarshal([]byte(mustJSON(t, rep)), &doc); err != nil {
 		t.Fatalf("decoding the rendered json for an empty report: %v", err)
 	}
-	if got := doc["repos"]; got == nil {
-		t.Error("empty report json has a null repos field; an empty list is the honest answer")
+	// All three lists, not just repos. A quiet week is the most common week
+	// there is, and a null here crashes any consumer that reads .length before
+	// it looks at the contents.
+	for _, field := range []string{"repos", "movers", "problems"} {
+		if _, ok := doc[field].([]any); !ok {
+			t.Errorf("empty report json has %s = %v (%T); an empty list is the honest answer and the only one a consumer can iterate", field, doc[field], doc[field])
+		}
 	}
 	t.Logf("empty report:\n%s", md)
+}
+
+// TestWindowReadsCorrectlyBelowADay covers the reporting window's own prose. A
+// sub-day window is a real setting, and rounding it to "0 days" tells the
+// reader each repo was compared against right now.
+func TestWindowReadsCorrectlyBelowADay(t *testing.T) {
+	for _, tc := range []struct {
+		window time.Duration
+		want   string
+	}{
+		{7 * 24 * time.Hour, "7 days"},
+		{24 * time.Hour, "1 day"},
+		// Rounded to a whole day this is 1, and the noun has to follow the
+		// rounded number rather than the raw one.
+		{30 * time.Hour, "1 day"},
+		{12 * time.Hour, "12 hours"},
+		{time.Hour, "1 hour"},
+		{90 * time.Minute, "2 hours"},
+		{45 * time.Minute, "45 minutes"},
+		{time.Minute, "1 minute"},
+	} {
+		opts := options()
+		opts.Window = tc.window
+		md := mustMarkdown(t, delta.Compute(nil, opts, fixedNow()))
+
+		want := "about " + tc.want + " back"
+		if !strings.Contains(md, want) {
+			t.Errorf("window %s: report does not say %q. First line of the body:\n%s", tc.window, want, strings.SplitN(md, "\n", 4)[2])
+		}
+		if strings.Contains(md, "about 0 days back") {
+			t.Errorf("window %s rendered as zero days, which reads as comparing against right now", tc.window)
+		}
+	}
 }

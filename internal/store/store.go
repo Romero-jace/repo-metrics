@@ -179,6 +179,10 @@ func (s *Store) InsertSnapshot(ctx context.Context, snap Snapshot, metrics []Met
 
 // LatestSnapshot returns the most recent usable snapshot for a repo, or nil if
 // there is none. Failed snapshots are skipped because they carry no numbers.
+//
+// Nil from here means "no numbers", which is not the same as "never ran": a repo
+// whose every collection failed also gets nil. Use LatestSnapshotAny when the
+// caller has to tell those two apart.
 func (s *Store) LatestSnapshot(ctx context.Context, repoID int64) (*Snapshot, error) {
 	return s.querySnapshot(ctx, `
 		SELECT id, repo_id, collected_at, git_sha, git_branch, git_dirty, env, status, error, duration_ms
@@ -187,6 +191,27 @@ func (s *Store) LatestSnapshot(ctx context.Context, repoID int64) (*Snapshot, er
 		ORDER BY collected_at DESC
 		LIMIT 1`,
 		repoID, string(StatusFailed))
+}
+
+// LatestSnapshotAny returns the most recent snapshot for a repo whatever its
+// status, or nil only when the repo has never been collected at all.
+//
+// This does not replace LatestSnapshot and must not be used to pick a head or a
+// baseline for the delta: a failed run stores no metrics, so comparing against
+// one reports a total coverage cliff this week and a full recovery next week,
+// neither of which happened. It exists so a caller can say "every run failed"
+// instead of "never ran", which are opposite instructions to the reader.
+func (s *Store) LatestSnapshotAny(ctx context.Context, repoID int64) (*Snapshot, error) {
+	// The id tiebreak matters: two runs can land in the same collected_at, and
+	// without it SQLite is free to return either, so the same database would
+	// report a repo as failed or as ok depending on the query plan.
+	return s.querySnapshot(ctx, `
+		SELECT id, repo_id, collected_at, git_sha, git_branch, git_dirty, env, status, error, duration_ms
+		FROM snapshots
+		WHERE repo_id = ?
+		ORDER BY collected_at DESC, id DESC
+		LIMIT 1`,
+		repoID)
 }
 
 // SnapshotAtOrBefore returns the most recent usable snapshot for a repo taken

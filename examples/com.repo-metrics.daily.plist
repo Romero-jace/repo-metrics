@@ -11,14 +11,42 @@
 	     "collect and then report" without handing the pair to a shell. This is
 	     the one place a shell string is the right answer.
 
+	     The two commands are separated by ";" and deliberately not by "&&".
+	     collect exits 1 whenever any single repo failed, which is the design:
+	     it keeps going so one unreachable repo does not cost you the other
+	     nine (see runCollect in internal/cli/collect.go, which tallies failed
+	     repos and returns an error at the end, and main.go, which turns that
+	     into exit status 1). Chained with "&&", that same deliberate exit code
+	     would cancel the report entirely because one repo out of ten was down,
+	     which is the exact opposite of the promise. With ";" the report always
+	     renders from whatever did collect. Please do not "fix" this back.
+
+	     The price of ";" is that the job's status is now report's alone, so a
+	     collect failure shows up in the error log rather than in launchctl
+	     print. That log is what StandardErrorPath below is for.
+
 	     Absolute paths everywhere on purpose: a launchd agent gets a minimal
 	     PATH, and it does not expand ~ or $HOME anywhere in this file. -->
 	<key>ProgramArguments</key>
 	<array>
 		<string>/bin/sh</string>
 		<string>-c</string>
-		<string>/usr/local/bin/repo-metrics collect --config /srv/repo-metrics/repo-metrics.yaml &amp;&amp; /usr/local/bin/repo-metrics report --config /srv/repo-metrics/repo-metrics.yaml --window 168h --out /srv/repo-metrics/report.md</string>
+		<string>/usr/local/bin/repo-metrics collect --config /srv/repo-metrics/repo-metrics.yaml ; /usr/local/bin/repo-metrics report --config /srv/repo-metrics/repo-metrics.yaml --window 168h --out /srv/repo-metrics/report.md</string>
 	</array>
+
+	<!-- launchd starts the job with a minimal PATH of /usr/bin:/bin:/usr/sbin:/sbin,
+	     not the one your shell profile builds. The per-repo command in the
+	     config runs as a child of this job, so it inherits this environment and
+	     not yours: a config whose command starts with "go" fails every night
+	     with "executable file not found" unless go's directory is listed here.
+	     The entries below cover the official Go pkg install and both Homebrew
+	     prefixes. Add wherever your toolchain actually lives, and use literal
+	     absolute paths, because launchd expands neither ~ nor $HOME. -->
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/usr/local/go/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
 
 	<!-- launchd starts jobs in / , and the database path plus any relative path
 	     in the config resolve against the working directory. Without this, a

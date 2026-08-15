@@ -72,6 +72,14 @@ func runReport(ctx context.Context, args []string, stdout, stderr io.Writer) err
 // Every configured repo gets an entry even if it has never been collected. A
 // repo that quietly drops out of the report is exactly how a broken cron job
 // goes unnoticed for a month, which is the failure this tool exists to catch.
+//
+// A repo whose every run failed is the sharper version of that. LatestSnapshot
+// skips failed rows, so it comes back nil and such a repo would otherwise reach
+// the renderer with no head at all, indistinguishable from one that has never
+// been collected: no status, no time, no error text, nothing to act on. It is
+// the repo the reader most needs to see, and it would arrive looking like the
+// least interesting one. The failed row is attached as the head instead, which
+// is what carries the status, the time of the last attempt, and what broke.
 func reportInputs(
 	ctx context.Context,
 	st *store.Store,
@@ -106,6 +114,21 @@ func reportInputs(
 			return nil, err
 		}
 		if head == nil {
+			// No usable snapshot. Either the repo has never been collected, in
+			// which case there is genuinely nothing to say about it, or every
+			// run failed, in which case the failed row is the finding.
+			//
+			// No baseline is fetched for a failed head on purpose. A failed run
+			// stored no metrics, so a delta against a real baseline is the
+			// baseline measured against zero: the repo would clear the mover
+			// threshold on a fabricated cliff and lead the report as the week's
+			// biggest drop, which is really just a crashed test command.
+			last, err := st.LatestSnapshotAny(ctx, repo.ID)
+			if err != nil {
+				_, _ = fmt.Fprintf(stderr, "%s: %v\n", repo.Name, err)
+				return nil, err
+			}
+			in.Head = last
 			inputs = append(inputs, in)
 			continue
 		}

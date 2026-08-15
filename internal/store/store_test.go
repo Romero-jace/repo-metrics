@@ -249,6 +249,90 @@ func TestLatestSnapshotIgnoresFailed(t *testing.T) {
 	}
 }
 
+// "Every run failed" and "never ran" both come back as nil from LatestSnapshot,
+// and they call for opposite actions: go fix your build, versus go run collect.
+// LatestSnapshotAny is what tells them apart.
+func TestLatestSnapshotAnyKeepsFailedRows(t *testing.T) {
+	st := openTemp(t)
+	ctx := context.Background()
+	broken := mustRepo(t, st, "broken", "/broken")
+	never := mustRepo(t, st, "never", "/never")
+
+	bad := at(2026, time.August, 15, 12, 0, 0, 0)
+	if _, err := st.InsertSnapshot(ctx, store.Snapshot{
+		RepoID: broken, CollectedAt: bad, Status: store.StatusFailed, Error: "boom",
+	}, nil); err != nil {
+		t.Fatalf("insert failed: %v", err)
+	}
+
+	got, err := st.LatestSnapshotAny(ctx, broken)
+	if err != nil {
+		t.Fatalf("LatestSnapshotAny: %v", err)
+	}
+	if got == nil {
+		t.Fatal("LatestSnapshotAny dropped the failed row, so a broken repo reads as one that never ran")
+	}
+	if got.Status != store.StatusFailed {
+		t.Errorf("Status: got %q, want %q", got.Status, store.StatusFailed)
+	}
+	if !got.CollectedAt.Equal(bad) {
+		t.Errorf("CollectedAt: got %s, want %s", got.CollectedAt, bad)
+	}
+	if got.Error != "boom" {
+		t.Errorf("Error: got %q, want the recorded failure text", got.Error)
+	}
+
+	// The other half of the distinction: a repo with no rows at all still
+	// reports nothing, so callers cannot mistake it for a failing one.
+	none, err := st.LatestSnapshotAny(ctx, never)
+	if err != nil {
+		t.Fatalf("LatestSnapshotAny: %v", err)
+	}
+	if none != nil {
+		t.Errorf("want nil for a repo that has never been collected, got %+v", none)
+	}
+
+	// LatestSnapshot's own contract is unchanged, since delta baseline selection
+	// depends on failed rows staying out of it.
+	usable, err := st.LatestSnapshot(ctx, broken)
+	if err != nil {
+		t.Fatalf("LatestSnapshot: %v", err)
+	}
+	if usable != nil {
+		t.Errorf("LatestSnapshot must still skip failed rows, got %+v", usable)
+	}
+}
+
+// A failed run and an ok run can land in the same collected_at, so the newest
+// row has to be picked deterministically or the same database reports a repo as
+// broken or as healthy depending on the query plan.
+func TestLatestSnapshotAnyBreaksTimestampTiesByID(t *testing.T) {
+	st := openTemp(t)
+	ctx := context.Background()
+	repoID := mustRepo(t, st, "svc", "/svc")
+
+	same := at(2026, time.August, 15, 12, 0, 0, 0)
+	if _, err := st.InsertSnapshot(ctx, store.Snapshot{
+		RepoID: repoID, CollectedAt: same, Status: store.StatusOK,
+	}, nil); err != nil {
+		t.Fatalf("insert ok: %v", err)
+	}
+	last, err := st.InsertSnapshot(ctx, store.Snapshot{
+		RepoID: repoID, CollectedAt: same, Status: store.StatusFailed, Error: "boom",
+	}, nil)
+	if err != nil {
+		t.Fatalf("insert failed: %v", err)
+	}
+
+	got, err := st.LatestSnapshotAny(ctx, repoID)
+	if err != nil {
+		t.Fatalf("LatestSnapshotAny: %v", err)
+	}
+	if got == nil || got.ID != last {
+		t.Errorf("got %+v, want the last-written row %d", got, last)
+	}
+}
+
 // Baseline selection is "most recent usable snapshot at or before the cutoff".
 // The boundary is inclusive, and a partial snapshot still carries numbers so it
 // counts; a failed one does not.

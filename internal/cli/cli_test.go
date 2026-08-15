@@ -92,6 +92,41 @@ func repoByName(t *testing.T, st *store.Store, name string) store.Repo {
 	return store.Repo{}
 }
 
+// rowFor returns the single output line whose first field is name.
+//
+// Asserting with strings.Contains over the whole of stdout cannot fail when a
+// row carries another row's numbers, which is exactly the mix-up worth catching
+// in a table that has one line per repo. Binding each value to its own row is
+// what makes the assertion mean anything.
+func rowFor(t *testing.T, out, name string) string {
+	t.Helper()
+	var found string
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 0 && fields[0] == name {
+			if found != "" {
+				t.Fatalf("more than one row for %q in:\n%s", name, out)
+			}
+			found = line
+		}
+	}
+	if found == "" {
+		t.Fatalf("no row for %q in:\n%s", name, out)
+	}
+	return found
+}
+
+// wantInRow asserts every want appears on the one row belonging to name.
+func wantInRow(t *testing.T, out, name string, wants ...string) {
+	t.Helper()
+	row := rowFor(t, out, name)
+	for _, want := range wants {
+		if !strings.Contains(row, want) {
+			t.Errorf("want %q on the %s row, got %q", want, name, row)
+		}
+	}
+}
+
 // coverageTotals mirrors what the report does: sum first, divide once.
 func coverageTotals(metrics []store.Metric) (covered, total int) {
 	for _, m := range metrics {
@@ -191,6 +226,50 @@ func TestInitWritesAConfigThatLoads(t *testing.T) {
 	}
 }
 
+// The starter config has to agree with the defaults the tool itself applies.
+// When the two are written out separately, changing a default leaves every
+// freshly generated config quietly saying something the tool no longer means.
+//
+// This is a drift guard rather than a reproduction: the literals it replaced
+// happened to match the defaults on the day they were written, so it holds
+// either way today and only earns its keep the next time a default moves.
+func TestInitWritesTheRealDefaults(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "repo-metrics.yaml")
+
+	if _, stderr, err := runCLI(t, "init", "--config", path); err != nil {
+		t.Fatalf("init: %v (stderr: %s)", err, stderr)
+	}
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("the config init wrote does not load: %v", err)
+	}
+
+	if cfg.Database != config.DefaultDatabase {
+		t.Errorf("database = %q, want the default %q", cfg.Database, config.DefaultDatabase)
+	}
+	if time.Duration(cfg.Window) != config.DefaultWindow {
+		t.Errorf("window = %s, want the default %s", cfg.Window, config.DefaultWindow)
+	}
+	if cfg.MinStatements != config.DefaultMinStatements {
+		t.Errorf("min_statements = %d, want the default %d", cfg.MinStatements, config.DefaultMinStatements)
+	}
+	if cfg.MinRepoDelta != config.DefaultMinRepoDelta {
+		t.Errorf("min_repo_delta = %v, want the default %v", cfg.MinRepoDelta, config.DefaultMinRepoDelta)
+	}
+
+	// The window has to be spelled in a unit the config loader understands.
+	// time.ParseDuration tops out at hours, so a "7d" written here would be a
+	// load error even though --window takes one.
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading back: %v", err)
+	}
+	if strings.Contains(string(contents), "window: 7d") {
+		t.Error("the window is written in days, which config.Load cannot parse")
+	}
+}
+
 func TestInitRefusesToClobber(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "repo-metrics.yaml")
@@ -279,9 +358,10 @@ func TestCollectContinuesPastAFailingRepo(t *testing.T) {
 	if err == nil {
 		t.Error("want an error so the exit status is 1 when a repo failed")
 	}
-	if !strings.Contains(stdout, "broken") || !strings.Contains(stdout, "failed") {
-		t.Errorf("want the failing repo reported on stdout, got %q", stdout)
-	}
+	// Bound to the row, not to stdout as a whole: with two repos in the run, a
+	// loose Contains passes when "failed" is sitting on the healthy repo's line.
+	wantInRow(t, stdout, "broken", "failed")
+	wantInRow(t, stdout, "healthy", "ok", "60.0%")
 	if !strings.Contains(stderr, "broken") {
 		t.Errorf("want a diagnostic for the failing repo on stderr, got %q", stderr)
 	}
@@ -297,15 +377,35 @@ func TestCollectContinuesPastAFailingRepo(t *testing.T) {
 	}
 
 	// The failed run is recorded too, so that repos can tell "it broke" apart
-	// from "it never ran". LatestSnapshot skips it because it carries no
-	// numbers, which is why this asserts on the repo row instead.
+	// from "it never ran".
+	//
+	// Asserting only that LatestSnapshot comes back nil would not show that:
+	// nil is also what a repo collect never wrote a row for returns, so the
+	// assertion would hold just as well if collect had silently stored nothing.
+	// LatestSnapshotAny is what proves the row is really there.
 	broke := repoByName(t, st, "broken")
-	failed, err := st.LatestSnapshot(context.Background(), broke.ID)
+	failed, err := st.LatestSnapshotAny(context.Background(), broke.ID)
 	if err != nil {
 		t.Fatalf("latest snapshot: %v", err)
 	}
-	if failed != nil {
-		t.Errorf("a failed snapshot should not be usable as a head, got %+v", failed)
+	if failed == nil {
+		t.Fatal("collect recorded nothing for the broken repo, so nothing downstream can report it as failing")
+	}
+	if failed.Status != store.StatusFailed {
+		t.Errorf("status = %q, want %q", failed.Status, store.StatusFailed)
+	}
+	if failed.Error == "" {
+		t.Error("a failed snapshot with no error text tells the reader nothing about what broke")
+	}
+
+	// And it still must not be usable as a head or a baseline, since it carries
+	// no numbers.
+	usable, err := st.LatestSnapshot(context.Background(), broke.ID)
+	if err != nil {
+		t.Fatalf("latest snapshot: %v", err)
+	}
+	if usable != nil {
+		t.Errorf("a failed snapshot should not be usable as a head, got %+v", usable)
 	}
 }
 
@@ -541,6 +641,101 @@ func TestReportJSONAndOutFile(t *testing.T) {
 	}
 }
 
+// A repo whose every collection failed is the one the reader most needs to see,
+// and it used to be the one hardest to spot: LatestSnapshot skips failed rows,
+// so the repo reached the renderer with no head at all and came out looking
+// like a pristine repo sitting at 0.0 percent, collected never.
+//
+// The assertions are against the json rather than the markdown prose so that
+// they pin the values this command puts into the report, not the wording the
+// template happens to use around them.
+func TestReportMarksARepoWhoseEveryRunFailed(t *testing.T) {
+	dir := t.TempDir()
+	// Ingest mode with no profile at the configured path, so collection fails
+	// and the only row this repo ever gets is a failed one.
+	broken := repoDir(t, dir, "broken", "")
+	healthy := repoDir(t, dir, "healthy", sampleProfile)
+	dbPath := filepath.Join(dir, "metrics.db")
+
+	cfgPath := writeConfig(t, dir, fmt.Sprintf("database: %q\nrepos:\n%s%s",
+		dbPath,
+		ingestRepoEntry("broken", broken, "missing.out"),
+		ingestRepoEntry("healthy", healthy, "coverage.out")))
+
+	if _, _, err := runCLI(t, "collect", "--config", cfgPath); err == nil {
+		t.Fatal("want a non-zero status from the run that failed a repo")
+	}
+
+	stdout, stderr, err := runCLI(t, "report", "--config", cfgPath, "--format", "json")
+	if err != nil {
+		t.Fatalf("report --format json: %v (stderr: %s)", err, stderr)
+	}
+
+	type repoJSON struct {
+		Name        string  `json:"name"`
+		Status      string  `json:"status"`
+		CollectedAt string  `json:"collected_at"`
+		CoveragePct float64 `json:"coverage_pct"`
+		Error       string  `json:"error"`
+	}
+	var parsed struct {
+		Repos    []repoJSON `json:"repos"`
+		Movers   []repoJSON `json:"movers"`
+		Problems []repoJSON `json:"problems"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &parsed); err != nil {
+		t.Fatalf("unparseable json: %v\n%s", err, stdout)
+	}
+
+	var got *repoJSON
+	for i := range parsed.Repos {
+		if parsed.Repos[i].Name == "broken" {
+			got = &parsed.Repos[i]
+		}
+	}
+	if got == nil {
+		t.Fatalf("the broken repo dropped out of the report entirely: %s", stdout)
+	}
+	if got.Status == string(store.StatusOK) {
+		t.Errorf("a repo with no usable snapshot is not ok, got status %q", got.Status)
+	}
+	if got.Status != string(store.StatusFailed) {
+		t.Errorf("status = %q, want %q", got.Status, store.StatusFailed)
+	}
+	// Empty here is what the renderer turns into "never", which is the lie:
+	// this repo did run, and the timestamp of the last attempt is what tells
+	// the reader whether the failure is from last night or from March.
+	if got.CollectedAt == "" {
+		t.Error("want the time of the last attempt, got nothing, which reads as never collected")
+	}
+	if got.Error == "" {
+		t.Error("want the recorded failure text so the report says what broke")
+	}
+
+	// It must not lead the report on a fabricated cliff either.
+	for _, m := range parsed.Movers {
+		if m.Name == "broken" {
+			t.Errorf("a crashed test command is not this week's biggest move: %+v", m)
+		}
+	}
+	var listed bool
+	for _, p := range parsed.Problems {
+		if p.Name == "broken" {
+			listed = true
+		}
+	}
+	if !listed {
+		t.Error("want the failing repo under collection problems")
+	}
+
+	// The healthy repo is untouched by any of this.
+	for _, r := range parsed.Repos {
+		if r.Name == "healthy" && r.CoveragePct != 60 {
+			t.Errorf("healthy repo = %+v, want 60 percent", r)
+		}
+	}
+}
+
 func TestReposListsCollectedAndUncollected(t *testing.T) {
 	dir := t.TempDir()
 	healthy := repoDir(t, dir, "healthy", sampleProfile)
@@ -562,10 +757,61 @@ func TestReposListsCollectedAndUncollected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("repos: %v (stderr: %s)", err, stderr)
 	}
-	for _, want := range []string{"REPO", "healthy", "ok", "60.0%", "never", "no usable snapshot"} {
-		if !strings.Contains(stdout, want) {
-			t.Errorf("want %q in the repos table, got %q", want, stdout)
-		}
+	if !strings.Contains(stdout, "REPO") {
+		t.Errorf("want a header row, got %q", stdout)
+	}
+	// Each value is checked against its own row. Searching the whole table for
+	// "ok" and "60.0%" passes even when those sit on the wrong repo's line.
+	wantInRow(t, stdout, "healthy", "ok", "60.0%")
+	wantInRow(t, stdout, "never", "never collected")
+	if strings.Contains(rowFor(t, stdout, "never"), "60.0%") {
+		t.Error("the uncollected repo is carrying the collected one's coverage")
+	}
+}
+
+// "Never ran" and "ran and broke every time" are the two states this subcommand
+// exists to tell apart, because one means run collect and the other means go fix
+// your build. LatestSnapshot returns nil for both, so consulting only it renders
+// them identically.
+func TestReposDistinguishesNeverCollectedFromAlwaysFailing(t *testing.T) {
+	dir := t.TempDir()
+	// Ingest mode pointed at a profile that is not there, so every run fails.
+	broken := repoDir(t, dir, "broken", "")
+	never := repoDir(t, dir, "never", "")
+	dbPath := filepath.Join(dir, "metrics.db")
+
+	cfgPath := writeConfig(t, dir, fmt.Sprintf("database: %q\nrepos:\n%s%s",
+		dbPath,
+		ingestRepoEntry("broken", broken, "missing.out"),
+		ingestRepoEntry("never", never, "coverage.out")))
+
+	if _, _, err := runCLI(t, "collect", "--config", cfgPath, "--repo", "broken"); err == nil {
+		t.Fatal("want a non-zero status from a repo that could not be collected")
+	}
+
+	stdout, stderr, err := runCLI(t, "repos", "--config", cfgPath)
+	if err != nil {
+		t.Fatalf("repos: %v (stderr: %s)", err, stderr)
+	}
+
+	brokenRow := rowFor(t, stdout, "broken")
+	neverRow := rowFor(t, stdout, "never")
+	if !strings.Contains(brokenRow, string(store.StatusFailed)) {
+		t.Errorf("want the failing repo shown as failed, got %q", brokenRow)
+	}
+	if !strings.Contains(brokenRow, "UTC") {
+		t.Errorf("want the time of the last attempt on the failing repo's row, got %q", brokenRow)
+	}
+	if !strings.Contains(neverRow, "never") {
+		t.Errorf("want the uncollected repo shown as never collected, got %q", neverRow)
+	}
+	if strings.Contains(neverRow, string(store.StatusFailed)) {
+		t.Errorf("a repo that never ran has not failed, got %q", neverRow)
+	}
+	// The point of the whole test: the two rows must not read the same.
+	if strings.TrimSpace(strings.TrimPrefix(brokenRow, "broken")) ==
+		strings.TrimSpace(strings.TrimPrefix(neverRow, "never")) {
+		t.Errorf("the two states render identically:\n%s\n%s", brokenRow, neverRow)
 	}
 }
 

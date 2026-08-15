@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"strings"
 	"text/template"
 
@@ -50,13 +51,29 @@ var funcs = template.FuncMap{
 		return fmt.Sprintf("%+d", *n)
 	},
 
+	// days renders the reporting window. It steps down to hours and minutes
+	// because a sub-day window is a real setting: --window 12h through %.0f
+	// prints "0 days", which reads as comparing a repo against right now.
+	//
+	// The count is rounded before the noun is chosen, so a 1.4 day window says
+	// "1 day" rather than "1 days".
 	"days": func(d float64) string {
-		if d == 1 {
-			return "1 day"
+		switch {
+		case d >= 1:
+			return count(d, "day")
+		case d*24 >= 1:
+			return count(d*24, "hour")
+		case d*24*60 >= 1:
+			return count(d*24*60, "minute")
+		default:
+			return "less than a minute"
 		}
-		return fmt.Sprintf("%.0f days", d)
 	},
 
+	// ne is not a convenience shadow of the builtin: the builtin cannot compare
+	// a *int against an int and fails with "incompatible types for comparison",
+	// which is what the template needs for an optional test delta. Removing this
+	// breaks rendering at run time, not at compile time.
 	"ne": func(n *int, v int) bool { return n != nil && *n != v },
 
 	"anyPackageChurn": func(repos []RepoView) bool {
@@ -67,6 +84,29 @@ var funcs = template.FuncMap{
 		}
 		return false
 	},
+
+	// anyEnvWarned gates the footnote that explains the table's toolchain
+	// marker. It goes through the same predicate the rows do so the footnote can
+	// never explain a marker that is not there, or be missing under one that is.
+	"anyEnvWarned": func(repos []RepoView) bool {
+		for _, r := range repos {
+			if r.EnvWarned() {
+				return true
+			}
+		}
+		return false
+	},
+}
+
+// count renders a rounded quantity with a singular or plural noun. Rounding
+// first is what keeps "1 days" out of the report: %.0f on 1.4 rounds for
+// display but the grammar would still be decided by the unrounded value.
+func count(n float64, unit string) string {
+	rounded := math.Round(n)
+	if rounded == 1 {
+		return "1 " + unit
+	}
+	return fmt.Sprintf("%.0f %ss", rounded, unit)
 }
 
 var tmpl = template.Must(template.New("report").Funcs(funcs).Parse(markdownTemplate))

@@ -8,7 +8,7 @@ Comparing each repo against its closest snapshot from about {{ days .WindowDays 
 ### {{ .Name }}
 
 Coverage {{ pct .CoveragePct }}{{ with .CoverageDeltaPoints }}, {{ points . }} on the week{{ end }}. Tests {{ .Tests }}{{ with .TestsDelta }}{{ if ne . 0 }}, {{ signed . }}{{ end }}{{ end }}.
-{{- if .EnvChanged }}
+{{- if .EnvWarned }}
 
 Heads up: these two snapshots were taken under different toolchains, so some of this move is not code.
 {{- end }}
@@ -38,16 +38,21 @@ Nothing cleared the reporting threshold this time.
 value rather than a measurement. Printing them would claim the repo sits at 0.0%
 with every package tested, and subtracting a healthy baseline from those zeros
 would post a cliff this week and a recovery next week, neither of which happened.
+A repo that has never been collected at all gets the same row for the same
+reason: its zeros were never measured either.
 Partial snapshots are different: they carry real numbers and keep showing them. */}}
 {{- range .Repos }}
-{{- if eq .Status "failed" }}
+{{- if or (eq .Status "failed") (not .HasSnapshot) }}
 | {{ .Name }} | not collected | not collected | not collected | not collected | not collected | {{ if .CollectedAt }}{{ .CollectedAt }}{{ else }}never{{ end }} |
 {{- else }}
-| {{ .Name }} | {{ pct .CoveragePct }} | {{ if .HasBaseline }}{{ points .CoverageDeltaPoints }}{{ else }}no baseline yet{{ end }} | {{ .Tests }} | {{ if .HasBaseline }}{{ signed .TestsDelta }}{{ else }}no baseline yet{{ end }} | {{ .PackagesWithoutTests }} | {{ if .CollectedAt }}{{ .CollectedAt }}{{ else }}never{{ end }} |
+| {{ .Name }} | {{ pct .CoveragePct }} | {{ if .HasBaseline }}{{ points .CoverageDeltaPoints }}{{ if .EnvWarned }}, toolchain changed{{ end }}{{ else }}no baseline yet{{ end }} | {{ .Tests }} | {{ if .HasBaseline }}{{ signed .TestsDelta }}{{ else }}no baseline yet{{ end }} | {{ .PackagesWithoutTests }} | {{ if .CollectedAt }}{{ .CollectedAt }}{{ else }}never{{ end }} |
 {{- end }}
 {{- end }}
 
 Coverage is covered statements over total statements across the whole repo, so a big package counts for more than a small one.
+{{ if anyEnvWarned .Repos }}
+A row marked toolchain changed had its two snapshots taken under different toolchains, so some of that move is not code. It is flagged here whether or not the repo moved enough to lead the report.
+{{ end -}}
 {{ if anyPackageChurn .Repos }}
 ## Packages that came and went
 

@@ -16,14 +16,21 @@ database: /srv/repo-metrics/repo-metrics.db
 # Default reporting window. Head is the newest usable snapshot, baseline is the
 # newest usable snapshot at or before head minus this window.
 #
-# Durations use Go's syntax, which has no day unit, so a week is 168h and not
-# 7d. 7d is a parse error, not a silent fallback.
+# Every duration in this file goes through Go's time.ParseDuration, whose
+# largest unit is the hour, so a week is 168h here and 7d is a load error rather
+# than a silent fallback. Same for timeout and max_age further down.
+#
+# The --window flag is the one exception: it understands a d suffix for days, so
+# `report --window 7d` is fine even though `window: 7d` here is not.
 # Default: 168h. Override per run with `report --window`.
 window: 168h
 
 # Noise floor for culprit ranking, in statements. A package smaller than this is
 # left out of the "which package is why" list, because a three-statement helper
-# going from 0 to 100 percent is not news. It still shows up in the appendix.
+# going from 0 to 100 percent is not news. There is no appendix listing what got
+# dropped: a small package that merely moved is not named in the report at all.
+# Its statements do still count toward its repo's coverage number, and it is
+# still listed by name if it was added or deleted.
 # Default: 20
 min_statements: 20
 
@@ -86,8 +93,14 @@ repos:
     # No command here, so no stdout_format and no timeout. Coverage only, no test
     # counts, because nothing produced a -json stream for this repo.
 
-  # Values are expanded from the environment, so anything machine-specific or
-  # secret can stay out of the file.
+  # ${VAR} and $VAR are expanded from the environment in four places and only
+  # four: the top-level database, and each repo's path, coverprofile, and
+  # command entries. That is enough to keep the machine-specific parts of a
+  # checkout layout out of the file.
+  #
+  # Nothing else is expanded. A ${VAR} in name is kept as literal text, and one
+  # in stdout_format, timeout, or max_age makes the config fail to load, since
+  # those are parsed and validated exactly as written.
   # - name: from-env
   #   path: ${CHECKOUT_ROOT}/another-repo
   #   coverprofile: coverage.out

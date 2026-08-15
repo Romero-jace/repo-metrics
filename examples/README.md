@@ -46,9 +46,27 @@ when something is wrong, so prefer them.)
 
 Same thing, one line. Absolute paths for the same reason as above: cron gets a
 minimal `PATH` and will not find a binary you installed somewhere interesting.
+The per-repo command in your config inherits that same `PATH`, so if it starts
+with `go`, set a `PATH` at the top of the crontab rather than hoping.
 
 ```
-5 6 * * *  /usr/local/bin/repo-metrics collect --config /srv/repo-metrics/repo-metrics.yaml && /usr/local/bin/repo-metrics report --config /srv/repo-metrics/repo-metrics.yaml --window 168h --out /srv/repo-metrics/report.md
+PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin
+
+5 6 * * *  /usr/local/bin/repo-metrics collect --config /srv/repo-metrics/repo-metrics.yaml ; /usr/local/bin/repo-metrics report --config /srv/repo-metrics/repo-metrics.yaml --window 7d --out /srv/repo-metrics/report.md
 ```
 
-Note `168h` rather than `7d`. Durations use Go's syntax, which has no day unit.
+`;` between the two, not `&&`. `collect` exits 1 when any single repo failed,
+deliberately, because it keeps going so one unreachable repo does not cost you
+the other nine. Chained with `&&`, that same exit code hands one bad repo a veto
+over the whole report. The plist ships `;` for the same reason and says so.
+
+## 7d or 168h
+
+Both work on `--window`, and they mean the same thing. The flag understands a
+`d` suffix for days on top of Go's duration syntax, so `7d`, `168h`, and `1d12h`
+all parse.
+
+The duration fields inside the config file are not the same. `window:`,
+`timeout:`, and `max_age:` go through Go's `time.ParseDuration`, whose largest
+unit is the hour, so `7d` there is a load error rather than a silent fallback
+and a week has to be written `168h`.

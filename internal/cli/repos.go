@@ -45,11 +45,9 @@ func runRepos(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 	_, _ = fmt.Fprintln(w, "REPO\tLAST COLLECTED\tSTATUS\tCOVERAGE")
 
 	for _, configured := range cfg.Repos {
-		// LatestSnapshot skips failed rows because they carry no numbers, so a
-		// repo whose only runs failed lands here looking like one that has
-		// never run. The wording says "no usable snapshot" rather than "never"
-		// so that the table is not quietly lying about which one it is.
-		collected, status, coverage := "no usable snapshot", "-", "-"
+		// The default is the repo the database has never heard of. A repo whose
+		// runs all failed gets overwritten below with its real last attempt.
+		collected, status, coverage := "never", "never collected", "-"
 
 		if repo, ok := byName[configured.Name]; ok {
 			snap, err := st.LatestSnapshot(ctx, repo.ID)
@@ -67,6 +65,23 @@ func runRepos(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 					return err
 				}
 				coverage = formatCoverage(coverageTotals(metrics))
+			} else {
+				// LatestSnapshot skips failed rows because they carry no
+				// numbers, so a repo whose every run failed arrives here
+				// looking exactly like one that has never run. Those two call
+				// for opposite actions, go fix your build versus go run
+				// collect, so the failed row is looked up and shown with the
+				// time of the last attempt.
+				last, err := st.LatestSnapshotAny(ctx, repo.ID)
+				if err != nil {
+					_, _ = fmt.Fprintf(stderr, "%s: %v\n", configured.Name, err)
+					return err
+				}
+				if last != nil {
+					collected = last.CollectedAt.UTC().Format(timeFormat)
+					status = string(last.Status)
+					coverage = "not collected"
+				}
 			}
 		}
 

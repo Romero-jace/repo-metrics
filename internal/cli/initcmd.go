@@ -6,9 +6,43 @@ import (
 	"io"
 	iofs "io/fs"
 	"os"
+	"time"
+
+	"github.com/Romero-jace/repo-metrics/internal/config"
 )
 
 // starterConfig is what init writes.
+//
+// Every tunable in it is filled in from the config package's own defaults rather
+// than written out again as a literal. Duplicating them means the day someone
+// changes a default, the file this tool writes quietly disagrees with the tool
+// that wrote it, and the new user's first config is already wrong.
+var starterConfig = fmt.Sprintf(
+	starterConfigFormat,
+	config.DefaultDatabase,
+	defaultWindowText(),
+	config.DefaultMinStatements,
+	config.DefaultMinRepoDelta,
+)
+
+// defaultWindowText renders the default reporting window for the config file.
+//
+// Hours rather than days, even though the window is really a week: durations in
+// this file go through Go's time.ParseDuration, whose largest unit is the hour,
+// so a literal "7d" here would make the starter config fail to load. The
+// --window flag is parsed separately and does understand 7d.
+func defaultWindowText() string {
+	if config.DefaultWindow%time.Hour == 0 {
+		return fmt.Sprintf("%dh", config.DefaultWindow/time.Hour)
+	}
+	// Not a whole number of hours, so let the Duration spell itself. Its String
+	// round-trips through time.ParseDuration, which is all the file needs.
+	return config.DefaultWindow.String()
+}
+
+// starterConfigFormat is the file with its four tunables left as verbs, filled
+// in by starterConfig above. The verbs are database, window, min_statements,
+// and min_repo_delta, in that order.
 //
 // The first repo entry is live and points at the current directory rather than
 // at a placeholder like /path/to/your-repo. config.Load requires at least one
@@ -16,26 +50,26 @@ import (
 // out, or all fictional, does not load: the first thing a new user would see is
 // a validation error from a file the tool itself had just written. Keep one
 // entry real when editing this.
-const starterConfig = `# repo-metrics config.
+const starterConfigFormat = `# repo-metrics config.
 #
 # This file is the only thing that knows which repos exist. The tool has no repo
 # discovery and no forge API, so whatever generates this list is a separate job.
 
-database: ./repo-metrics.db
+database: %s
 
 # How far back to look for a baseline when reporting. --window overrides it.
 #
-# Written as hours on purpose: durations in this file go through Go's
-# time.ParseDuration, whose largest unit is the hour, so "7d" here is a load
-# error. The --window flag on the command line does understand 7d.
-window: 168h
+# This is a week, written in hours. Durations in this file go through Go's
+# time.ParseDuration, whose largest unit is the hour, so the "7d" the --window
+# flag accepts is a load error here. 168h and 7d are the same thing.
+window: %s
 
 # Packages smaller than this stay out of the culprit ranking. A three-statement
 # helper swinging from 0 to 100 percent is not news.
-min_statements: 20
+min_statements: %d
 
 # How far a repo's coverage has to move, in percentage points, to lead the report.
-min_repo_delta: 0.5
+min_repo_delta: %v
 
 repos:
   # Mode one: run a command, then read what it wrote. This entry points at the

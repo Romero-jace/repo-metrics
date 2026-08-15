@@ -1,0 +1,15 @@
+/bin/
+/repo-metrics
+
+# SQLite database and its WAL sidecars
+*.db
+*.db-wal
+*.db-shm
+
+# A local go.work would defeat the GOWORK=off arrangement in the Makefile
+go.work
+go.work.sum
+
+# Coverage artifacts, in case anyone runs the tool against this repo
+coverage.out
+/reports/

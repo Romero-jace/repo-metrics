@@ -59,6 +59,18 @@ func testCount(pkg string, n int) store.Metric {
 	return store.Metric{Key: collect.KeyTestCount, Scope: pkg, Value: float64(n)}
 }
 
+// testStream wraps per-package counts the way the collector actually emits
+// them: whenever it parses a stdout stream it also writes a repo-level
+// pkg.without_tests metric, including when the value is zero.
+//
+// That marker is what distinguishes "measured and found none" from "never
+// looked". A fixture carrying bare test counts without it describes output the
+// collector cannot produce, and would let an unmeasured-versus-zero bug pass.
+func testStream(withoutTests int, counts ...store.Metric) []store.Metric {
+	return append(counts,
+		store.Metric{Key: collect.KeyPkgWithoutTest, Value: float64(withoutTests)})
+}
+
 func snap(id, repoID int64, env string, status store.Status, errText string) *store.Snapshot {
 	return &store.Snapshot{
 		ID:          id,
@@ -97,14 +109,13 @@ func fullReport() delta.Report {
 		cov(pkgAlpha, 80, 200),
 		cov(pkgBravo, 100, 200),
 		cov(pkgNew, 30, 100),
-		[]store.Metric{testCount(pkgAlpha, 10), testCount(pkgBravo, 5)},
-		[]store.Metric{{Key: collect.KeyPkgWithoutTest, Value: 2}},
+		testStream(2, testCount(pkgAlpha, 10), testCount(pkgBravo, 5)),
 	)
 	moverBase := metrics(
 		cov(pkgAlpha, 180, 200),
 		cov(pkgBravo, 100, 200),
 		cov(pkgGone, 95, 100),
-		[]store.Metric{testCount(pkgAlpha, 12), testCount(pkgBravo, 5), testCount(pkgGone, 3)},
+		testStream(2, testCount(pkgAlpha, 12), testCount(pkgBravo, 5), testCount(pkgGone, 3)),
 	)
 
 	inputs := []delta.Input{
@@ -120,23 +131,23 @@ func fullReport() delta.Report {
 			// that reaches the "tests unchanged" branch of the movers paragraph.
 			Repo:        store.Repo{ID: 2, Name: repoSteady, Path: "/repos/steadyrepo"},
 			Head:        snap(21, 2, "go1.26.5", store.StatusOK, ""),
-			HeadMetrics: metrics(cov(pkgAlpha, 53, 100), []store.Metric{testCount(pkgAlpha, 4)}),
+			HeadMetrics: metrics(cov(pkgAlpha, 53, 100), testStream(0, testCount(pkgAlpha, 4))),
 			Base:        snap(20, 2, "go1.26.5", store.StatusOK, ""),
-			BaseMetrics: metrics(cov(pkgAlpha, 50, 100), []store.Metric{testCount(pkgAlpha, 4)}),
+			BaseMetrics: metrics(cov(pkgAlpha, 50, 100), testStream(0, testCount(pkgAlpha, 4))),
 		},
 		{
 			Repo:        store.Repo{ID: 3, Name: repoQuiet, Path: "/repos/quietrepo"},
 			Head:        snap(31, 3, "go1.26.5", store.StatusOK, ""),
-			HeadMetrics: metrics(cov(pkgAlpha, 50, 100), []store.Metric{testCount(pkgAlpha, 4)}),
+			HeadMetrics: metrics(cov(pkgAlpha, 50, 100), testStream(0, testCount(pkgAlpha, 4))),
 			Base:        snap(30, 3, "go1.26.5", store.StatusOK, ""),
-			BaseMetrics: metrics(cov(pkgAlpha, 50, 100), []store.Metric{testCount(pkgAlpha, 4)}),
+			BaseMetrics: metrics(cov(pkgAlpha, 50, 100), testStream(0, testCount(pkgAlpha, 4))),
 		},
 		{
 			// First ever collection. Nothing about this repo may be printed as
 			// though there were something to compare against.
 			Repo:        store.Repo{ID: 4, Name: repoFresh, Path: "/repos/freshrepo"},
 			Head:        snap(41, 4, "go1.26.5", store.StatusOK, ""),
-			HeadMetrics: metrics(cov(pkgAlpha, 10, 100), []store.Metric{testCount(pkgAlpha, 1)}),
+			HeadMetrics: metrics(cov(pkgAlpha, 10, 100), testStream(0, testCount(pkgAlpha, 1))),
 		},
 		{
 			Repo: store.Repo{ID: 5, Name: repoBroken, Path: "/repos/brokenrepo"},
@@ -492,7 +503,7 @@ func TestJSONWireShape(t *testing.T) {
 		Repo:        store.Repo{ID: 8, Name: "crashedrepo", Path: "/repos/crashedrepo"},
 		Head:        snap(81, 8, "go1.26.5", store.StatusFailed, "coverage profile was stale"),
 		Base:        snap(80, 8, "go1.26.5", store.StatusOK, ""),
-		BaseMetrics: metrics(cov(pkgAlpha, 72, 100), []store.Metric{testCount(pkgAlpha, 40)}),
+		BaseMetrics: metrics(cov(pkgAlpha, 72, 100), testStream(0, testCount(pkgAlpha, 40))),
 	}}, options(), fixedNow()))["crashedrepo"]
 	if crashed == nil {
 		t.Fatalf("crashedrepo is missing from the json entirely")
@@ -654,7 +665,7 @@ func TestFailedCollectionQuotesNoNumbers(t *testing.T) {
 	partial := delta.Compute([]delta.Input{{
 		Repo:        store.Repo{ID: 9, Name: "partialrepo", Path: "/repos/partialrepo"},
 		Head:        snap(91, 9, "go1.26.5", store.StatusPartial, "test command exited 1"),
-		HeadMetrics: metrics(cov(pkgAlpha, 33, 100), []store.Metric{testCount(pkgAlpha, 7)}),
+		HeadMetrics: metrics(cov(pkgAlpha, 33, 100), testStream(0, testCount(pkgAlpha, 7))),
 	}}, options(), fixedNow())
 
 	partialRow := repoRow(t, mustMarkdown(t, partial), "partialrepo")
@@ -675,7 +686,7 @@ func TestFailedCollectionAfterAGoodOneInventsNoCliff(t *testing.T) {
 		Repo:        store.Repo{ID: 8, Name: "crashedrepo", Path: "/repos/crashedrepo"},
 		Head:        snap(81, 8, "go1.26.5", store.StatusFailed, "coverage profile was stale"),
 		Base:        snap(80, 8, "go1.26.5", store.StatusOK, ""),
-		BaseMetrics: metrics(cov(pkgAlpha, 72, 100), []store.Metric{testCount(pkgAlpha, 40)}),
+		BaseMetrics: metrics(cov(pkgAlpha, 72, 100), testStream(0, testCount(pkgAlpha, 40))),
 	}}, options(), fixedNow())
 
 	view := findRepoView(t, report.Build(rep).Repos, "crashedrepo")
@@ -818,9 +829,9 @@ func TestEnvChangeIsCalledOutForARepoThatDidNotMove(t *testing.T) {
 	rep := delta.Compute([]delta.Input{{
 		Repo:        store.Repo{ID: 6, Name: repoUpgraded, Path: "/repos/upgradedrepo"},
 		Head:        snap(61, 6, "go1.26.5", store.StatusOK, ""),
-		HeadMetrics: metrics(cov(pkgAlpha, 50, 100), []store.Metric{testCount(pkgAlpha, 4)}),
+		HeadMetrics: metrics(cov(pkgAlpha, 50, 100), testStream(0, testCount(pkgAlpha, 4))),
 		Base:        snap(60, 6, "go1.25.1", store.StatusOK, ""),
-		BaseMetrics: metrics(cov(pkgAlpha, 50, 100), []store.Metric{testCount(pkgAlpha, 4)}),
+		BaseMetrics: metrics(cov(pkgAlpha, 50, 100), testStream(0, testCount(pkgAlpha, 4))),
 	}}, options(), fixedNow())
 
 	built := report.Build(rep)

@@ -214,11 +214,19 @@ func TestMoverThreshold(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			head := append([]store.Metric{}, tc.head...)
 			base := append([]store.Metric{}, tc.base...)
+			// Both sides get the repo-level pkg.without_tests marker the
+			// collector always emits alongside real counts. Without it these
+			// fixtures describe output the collector cannot produce, and a
+			// test-count delta is correctly ignored as unmeasured.
 			if tc.headT > 0 {
-				head = append(head, store.Metric{Key: collect.KeyTestCount, Scope: "m/a", Value: float64(tc.headT)})
+				head = append(head,
+					store.Metric{Key: collect.KeyTestCount, Scope: "m/a", Value: float64(tc.headT)},
+					store.Metric{Key: collect.KeyPkgWithoutTest, Value: 0})
 			}
 			if tc.baseT > 0 {
-				base = append(base, store.Metric{Key: collect.KeyTestCount, Scope: "m/a", Value: float64(tc.baseT)})
+				base = append(base,
+					store.Metric{Key: collect.KeyTestCount, Scope: "m/a", Value: float64(tc.baseT)},
+					store.Metric{Key: collect.KeyPkgWithoutTest, Value: 0})
 			}
 
 			got := one(t, delta.Input{

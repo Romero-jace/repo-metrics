@@ -7,7 +7,7 @@ Comparing each repo against its closest snapshot from about {{ days .WindowDays 
 {{ range .Movers }}
 ### {{ .Name }}
 
-Coverage {{ pct .CoveragePct }}{{ with .CoverageDeltaPoints }}, {{ points . }} on the week{{ end }}. Tests {{ .Tests }}{{ with .TestsDelta }}{{ if ne . 0 }}, {{ signed . }}{{ end }}{{ end }}.
+Coverage {{ pct .CoveragePct }}{{ with .CoverageDeltaPoints }}, {{ points . }} on the week{{ end }}. {{ if .TestsMeasured }}Tests {{ .Tests }}{{ with .TestsDelta }}{{ if ne . 0 }}, {{ signed . }}{{ end }}{{ end }}.{{ else }}Tests were not measured for this repo.{{ end }}
 {{- if .EnvWarned }}
 
 Heads up: these two snapshots were taken under different toolchains, so some of this move is not code.
@@ -45,7 +45,7 @@ Partial snapshots are different: they carry real numbers and keep showing them. 
 {{- if or (eq .Status "failed") (not .HasSnapshot) }}
 | {{ .Name }} | not collected | not collected | not collected | not collected | not collected | {{ if .CollectedAt }}{{ .CollectedAt }}{{ else }}never{{ end }} |
 {{- else }}
-| {{ .Name }} | {{ pct .CoveragePct }} | {{ if .HasBaseline }}{{ points .CoverageDeltaPoints }}{{ if .EnvWarned }}, toolchain changed{{ end }}{{ else }}no baseline yet{{ end }} | {{ .Tests }} | {{ if .HasBaseline }}{{ signed .TestsDelta }}{{ else }}no baseline yet{{ end }} | {{ .PackagesWithoutTests }} | {{ if .CollectedAt }}{{ .CollectedAt }}{{ else }}never{{ end }} |
+| {{ .Name }} | {{ pct .CoveragePct }} | {{ if .HasBaseline }}{{ points .CoverageDeltaPoints }}{{ if .EnvWarned }}, toolchain changed{{ end }}{{ else }}no baseline yet{{ end }} | {{ if .TestsMeasured }}{{ .Tests }}{{ else }}not measured{{ end }} | {{ if not .TestsMeasured }}not measured{{ else if .TestsDelta }}{{ signed .TestsDelta }}{{ else }}no baseline yet{{ end }} | {{ if .TestsMeasured }}{{ .PackagesWithoutTests }}{{ else }}not measured{{ end }} | {{ if .CollectedAt }}{{ .CollectedAt }}{{ else }}never{{ end }} |
 {{- end }}
 {{- end }}
 

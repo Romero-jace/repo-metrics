@@ -74,6 +74,15 @@ type RepoDelta struct {
 	BaseTests    int
 	// PkgWithoutTests is from the newer snapshot.
 	PkgWithoutTests int
+	// HasTestData is false when the collection never parsed a test stream at
+	// all, which happens in ingest mode and whenever stdout_format is unset.
+	//
+	// Unmeasured is not the same as zero, and conflating them is the same
+	// silent wrong answer as reporting a never-collected repo at 0% coverage.
+	// A repo with seventy test files rendering as "tests 0" tells the reader
+	// something false with no hint that anything is missing.
+	HasTestData     bool
+	BaseHasTestData bool
 
 	// HasBaseline is false when there is no earlier snapshot to compare
 	// against. There is no synthetic delta in that case: the report says so.
@@ -99,7 +108,17 @@ func (r RepoDelta) CoverageChange() float64 {
 }
 
 // TestChange is the repo's movement in test count.
+//
+// Only meaningful when TestChangeMeaningful reports true: subtracting an
+// unmeasured side from a measured one manufactures the whole count as a delta.
 func (r RepoDelta) TestChange() int { return r.HeadTests - r.BaseTests }
+
+// TestChangeMeaningful reports whether both snapshots actually measured tests.
+// Without it, a repo that gained a stdout_format between runs would post its
+// entire test suite as this week's growth.
+func (r RepoDelta) TestChangeMeaningful() bool {
+	return r.HasBaseline && r.HasTestData && r.BaseHasTestData
+}
 
 // Input is one repo's two snapshots and their metrics.
 type Input struct {
@@ -175,6 +194,7 @@ func computeRepo(in Input, opts Options) RepoDelta {
 	d.HeadCoverage = sumCoverage(headPkgs)
 	d.HeadTests = sumMetric(in.HeadMetrics, collect.KeyTestCount)
 	d.PkgWithoutTests = repoLevel(in.HeadMetrics, collect.KeyPkgWithoutTest)
+	d.HasTestData = hasTestData(in.HeadMetrics)
 
 	if in.Base == nil {
 		return d
@@ -184,13 +204,19 @@ func computeRepo(in Input, opts Options) RepoDelta {
 	basePkgs := coverageByPackage(in.BaseMetrics)
 	d.BaseCoverage = sumCoverage(basePkgs)
 	d.BaseTests = sumMetric(in.BaseMetrics, collect.KeyTestCount)
+	d.BaseHasTestData = hasTestData(in.BaseMetrics)
 
 	if in.Head != nil && in.Head.Env != in.Base.Env {
 		d.EnvChanged = true
 	}
 
 	d.Culprits, d.Added, d.Removed = culprits(headPkgs, basePkgs, d.HeadCoverage, opts)
-	d.IsMover = math.Abs(d.CoverageChange()) >= opts.MinRepoDelta || d.TestChange() != 0
+
+	// A test-count change only counts when both sides measured tests. Otherwise
+	// turning on stdout_format would make every repo a mover on the strength of
+	// its whole suite appearing out of nowhere.
+	d.IsMover = math.Abs(d.CoverageChange()) >= opts.MinRepoDelta ||
+		(d.TestChangeMeaningful() && d.TestChange() != 0)
 
 	return d
 }
@@ -300,6 +326,21 @@ func sumMetric(metrics []store.Metric, key string) int {
 		}
 	}
 	return int(sum)
+}
+
+// hasTestData reports whether a test stream was parsed for this snapshot.
+//
+// The marker is the repo-level pkg.without_tests metric, which the collector
+// emits unconditionally whenever it parses stdout, including when the value is
+// zero. Presence is the signal, so this deliberately ignores the value; summing
+// test.count instead would read a genuinely empty repo as unmeasured.
+func hasTestData(metrics []store.Metric) bool {
+	for _, m := range metrics {
+		if m.Key == collect.KeyPkgWithoutTest && m.Scope == "" {
+			return true
+		}
+	}
+	return false
 }
 
 func repoLevel(metrics []store.Metric, key string) int {

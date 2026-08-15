@@ -43,6 +43,12 @@ type RepoView struct {
 	Tests                int      `json:"tests"`
 	TestsDelta           *int     `json:"tests_delta"`
 	PackagesWithoutTests int      `json:"packages_without_tests"`
+	// TestsMeasured is false when no test stream was parsed, which is the
+	// normal case in ingest mode and whenever stdout_format is unset. Tests and
+	// PackagesWithoutTests are then zero because nothing looked, not because
+	// nothing is there. Rendering that as "tests 0" tells a reader with seventy
+	// test files something flatly false, so the template says so instead.
+	TestsMeasured bool `json:"tests_measured"`
 	// HasSnapshot is false when this repo has never been collected. Every count
 	// on such a repo is a Go zero value rather than a measurement, so a consumer
 	// has to be able to tell before it charts any of them.
@@ -164,14 +170,20 @@ func buildRepo(r delta.RepoDelta) RepoView {
 	if failed(r.Head) {
 		return out
 	}
+	out.TestsMeasured = r.HasTestData
 	out.AddedPackages = r.Added
 	out.RemovedPackages = r.Removed
 
 	// Only publish deltas when there is something to compare against.
 	if r.HasBaseline {
 		coverageDelta := r.CoverageChange()
-		testsDelta := r.TestChange()
 		out.CoverageDeltaPoints = &coverageDelta
+	}
+	// The test delta needs both sides measured, not just a baseline to exist.
+	// A repo that gained a stdout_format between runs would otherwise post its
+	// entire suite as this week's growth.
+	if r.TestChangeMeaningful() {
+		testsDelta := r.TestChange()
 		out.TestsDelta = &testsDelta
 	}
 

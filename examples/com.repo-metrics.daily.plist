@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- Has to match the filename stem. launchctl addresses the job by label,
+	     and a mismatch makes bootout and kickstart fail in a confusing way. -->
+	<key>Label</key>
+	<string>com.repo-metrics.daily</string>
+
+	<!-- ProgramArguments is argv, not a shell line, so there is no way to say
+	     "collect and then report" without handing the pair to a shell. This is
+	     the one place a shell string is the right answer.
+
+	     Absolute paths everywhere on purpose: a launchd agent gets a minimal
+	     PATH, and it does not expand ~ or $HOME anywhere in this file. -->
+	<key>ProgramArguments</key>
+	<array>
+		<string>/bin/sh</string>
+		<string>-c</string>
+		<string>/usr/local/bin/repo-metrics collect --config /srv/repo-metrics/repo-metrics.yaml &amp;&amp; /usr/local/bin/repo-metrics report --config /srv/repo-metrics/repo-metrics.yaml --window 168h --out /srv/repo-metrics/report.md</string>
+	</array>
+
+	<!-- launchd starts jobs in / , and the database path plus any relative path
+	     in the config resolve against the working directory. Without this, a
+	     config that says ./repo-metrics.db quietly writes to the filesystem
+	     root, or fails, depending on permissions. -->
+	<key>WorkingDirectory</key>
+	<string>/srv/repo-metrics</string>
+
+	<!-- 6:05am daily. Use StartCalendarInterval, not StartInterval: an interval
+	     job drifts and fires at whatever time of day the machine happened to
+	     wake up, which makes "what changed since yesterday" mean nothing. -->
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>6</integer>
+		<key>Minute</key>
+		<integer>5</integer>
+	</dict>
+
+	<!-- Without these, a job that fails has nowhere to say so and you find out
+	     by noticing the report stopped changing. -->
+	<key>StandardOutPath</key>
+	<string>/srv/repo-metrics/logs/repo-metrics.log</string>
+	<key>StandardErrorPath</key>
+	<string>/srv/repo-metrics/logs/repo-metrics.err.log</string>
+
+	<!-- False so the job does not fire every time you log in or reload it, which
+	     would put a full test run in the way of you starting work. launchd
+	     already runs a missed StartCalendarInterval once after the machine
+	     wakes, so an overnight sleep does not lose the day. -->
+	<key>RunAtLoad</key>
+	<false/>
+</dict>
+</plist>

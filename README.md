@@ -11,10 +11,12 @@ Self-hosted, one binary, no account, no SaaS.
 
 ## Status
 
-Early. The scaffold builds and the design is settled. Collectors, storage, and
-the report are being built out now. Not usable yet.
+The core is built: the Go collector, SQLite storage, delta computation against a
+baseline snapshot, and the markdown and JSON report. It has not been run against
+a fleet for long enough to have opinions about it yet, and the only collector is
+the Go one, so treat it as working but young.
 
-## How it will work
+## How it works
 
 You give it a config listing the repos you care about:
 
@@ -35,12 +37,18 @@ repos:
     # no command, so it just reads what CI already wrote
 ```
 
+There is a fully commented version of that config at
+[`examples/repo-metrics.yaml`](examples/repo-metrics.yaml), with every field
+annotated with what it does and what happens if you leave it out.
+
 Then you run it on whatever schedule you like:
 
 ```sh
-repo-metrics collect                          # one pass, then exits
-repo-metrics report --window 7d --out report.md
+repo-metrics collect                             # one pass, then exits
+repo-metrics report --window 168h --out report.md
 ```
+
+Durations use Go's syntax, which has no day unit, so a week is `168h`.
 
 There is no daemon. `collect` does one pass and exits, so cron or launchd owns
 the cadence and you can always just run it by hand:
@@ -48,6 +56,34 @@ the cadence and you can always just run it by hand:
 ```
 0 6 * * *  repo-metrics collect && repo-metrics report --out /srv/report.md
 ```
+
+[`examples/`](examples/) has a ready-made launchd agent for macOS and the
+equivalent crontab line for Linux.
+
+## How it decides what to tell you
+
+The report leads with which repos moved, and under each one, which packages are
+why. Picking those packages is the only genuinely interesting decision the tool
+makes, so here is how it works.
+
+For each package, it recomputes the repo's overall coverage with that one package
+held at its old numbers and everything else left at today's. The gap between that
+made-up figure and the real one is what that package contributed, in percentage
+points of the repo. Packages are ranked by the size of that gap.
+
+The obvious alternative, ranking by how much each package's own percentage moved,
+sounds equivalent and is not. Say a three-statement helper goes from 0 percent to
+100 percent. That is the biggest percentage swing in the repo by a mile, so it
+tops the list, and it is worth nothing: three statements against a repo of tens of
+thousands does not move the repo number at all. Meanwhile a large package sliding
+four points quietly accounts for the entire drop you are trying to explain, and
+sits below the helper. Ranking by contribution puts them the right way round,
+because it is measuring the thing the headline is actually about.
+
+There is a size floor on top of that, `min_statements`, default 20. Tiny packages
+are left out of the ranking entirely rather than trusted to sort themselves to the
+bottom. They still show up in the appendix, so nothing is hidden, it just does not
+get to lead.
 
 ## Design notes
 
@@ -86,6 +122,9 @@ it is deliberately not part of. It is meant to build standalone.
 make build     # ./bin/repo-metrics
 make check     # build, vet, test, lint
 ```
+
+[CONTRIBUTING.md](CONTRIBUTING.md) has the rest: the pinned linter version, the
+house style, and why a new metric goes in as counts rather than a percentage.
 
 ## License
 

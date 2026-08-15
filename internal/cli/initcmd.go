@@ -1,0 +1,103 @@
+package cli
+
+import (
+	"errors"
+	"fmt"
+	"io"
+	iofs "io/fs"
+	"os"
+)
+
+// starterConfig is what init writes.
+//
+// The first repo entry is live and points at the current directory rather than
+// at a placeholder like /path/to/your-repo. config.Load requires at least one
+// repo and stats every path, so a starter file whose examples are all commented
+// out, or all fictional, does not load: the first thing a new user would see is
+// a validation error from a file the tool itself had just written. Keep one
+// entry real when editing this.
+const starterConfig = `# repo-metrics config.
+#
+# This file is the only thing that knows which repos exist. The tool has no repo
+# discovery and no forge API, so whatever generates this list is a separate job.
+
+database: ./repo-metrics.db
+
+# How far back to look for a baseline when reporting. --window overrides it.
+#
+# Written as hours on purpose: durations in this file go through Go's
+# time.ParseDuration, whose largest unit is the hour, so "7d" here is a load
+# error. The --window flag on the command line does understand 7d.
+window: 168h
+
+# Packages smaller than this stay out of the culprit ranking. A three-statement
+# helper swinging from 0 to 100 percent is not news.
+min_statements: 20
+
+# How far a repo's coverage has to move, in percentage points, to lead the report.
+min_repo_delta: 0.5
+
+repos:
+  # Mode one: run a command, then read what it wrote. This entry points at the
+  # current directory so the file works as written. Point it somewhere you
+  # actually care about and give it a better name.
+  - name: this-repo
+    path: .
+    coverprofile: coverage.out
+    command: ["go", "test", "./...", "-json", "-coverpkg=./...", "-coverprofile=coverage.out"]
+    stdout_format: go-test-json
+    timeout: 10m
+
+  # Mode two, ingest only: no command, so it parses whatever CI already left on
+  # disk. max_age is the freshness limit, past which the numbers get reported as
+  # stale rather than presented as current. Uncomment and point it at a real
+  # checkout. Note that every path here has to exist, or the config will not load.
+  # - name: built-by-ci
+  #   path: /srv/checkouts/built-by-ci
+  #   coverprofile: artifacts/coverage.out
+  #   max_age: 24h
+`
+
+func runInit(args []string, stdout, stderr io.Writer) error {
+	set := newFlagSet("init", stderr)
+	path := set.String("config", defaultConfigPath, "where to write the starter config")
+	force := set.Bool("force", false, "overwrite an existing config instead of refusing")
+	proceed, err := parseFlags(set, args, stderr)
+	if !proceed || err != nil {
+		return err
+	}
+
+	// O_EXCL rather than stat-then-create: one syscall decides it, so there is
+	// no window in which a file appears between the check and the write, and
+	// nothing can clobber a config full of hand-edited repos.
+	flags := os.O_WRONLY | os.O_CREATE | os.O_EXCL
+	if *force {
+		flags = os.O_WRONLY | os.O_CREATE | os.O_TRUNC
+	}
+
+	f, err := os.OpenFile(*path, flags, 0o644)
+	if err != nil {
+		if errors.Is(err, iofs.ErrExist) {
+			_, _ = fmt.Fprintf(stderr, "%s already exists. Pass --force to overwrite it.\n", *path)
+			return fmt.Errorf("config %s already exists", *path)
+		}
+		_, _ = fmt.Fprintf(stderr, "could not create %s: %v\n", *path, err)
+		return err
+	}
+
+	if _, err := io.WriteString(f, starterConfig); err != nil {
+		_ = f.Close()
+		_, _ = fmt.Fprintf(stderr, "could not write %s: %v\n", *path, err)
+		return err
+	}
+	// Checked rather than deferred and discarded: a short write surfaces at
+	// close, and swallowing it would report success for a truncated config.
+	if err := f.Close(); err != nil {
+		_, _ = fmt.Fprintf(stderr, "could not finish writing %s: %v\n", *path, err)
+		return err
+	}
+
+	_, _ = fmt.Fprintf(stdout, "wrote %s\n", *path)
+	_, _ = fmt.Fprint(stdout, "edit the repo list in it, then run: repo-metrics collect\n")
+	return nil
+}

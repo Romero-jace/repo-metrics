@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  # This module is developed inside a directory that carries a sibling go.work
+  # which does not list it, so every local toolchain call has to opt out or it
+  # fails with "directory prefix . does not contain modules listed in go.work".
+  # The Makefile exports the same thing. In CI there is no go.work at all, so
+  # this is harmless here; it is set so that CI and a developer laptop run the
+  # toolchain under identical settings and neither can pass while the other
+  # fails for a workspace reason.
+  #
+  # Quoted on purpose: bare off is a YAML 1.1 boolean and would reach the
+  # toolchain as the string "false", which Go reads as a workspace file path.
+  GOWORK: "off"
+
+jobs:
+  # One job on purpose. This is a small tool with one supported toolchain, and
+  # a matrix here would be four times the minutes to learn nothing.
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          # The go directive in go.mod is the single source of truth for the
+          # version, so bumping the module does not also mean editing CI.
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      # -race needs cgo, which is why CGO_ENABLED is deliberately left alone.
+      # The released binary is built CGO-free elsewhere; the test run is not.
+      - name: Test
+        run: go test ./... -race
+
+      # The two cross-checks against the real Go toolchain are opt-in: they need
+      # a genuine coverage profile or -json stream handed to them through
+      # REPO_METRICS_TEST_PROFILE and REPO_METRICS_TEST_JSON, which CI has no
+      # reason to produce, so both skip here. Running them anyway keeps them
+      # compiling, so they cannot quietly rot into tests that no longer build
+      # and that nobody notices until the day someone needs them.
+      - name: Opt-in cross-checks compile
+        run: go test ./... -run 'TestAgainstGoToolCover|TestTestJSONAgainstRealStream' -v
+
+      - name: Lint
+        uses: golangci/golangci-lint-action@v8
+        with:
+          # Pinned, never floating. .golangci.yml is a v2 config, and v1 rejects
+          # it with an error that talks about the Go version instead of the
+          # config format, which sends people off debugging entirely the wrong
+          # thing. This is also the version used locally.
+          version: v2.12.2

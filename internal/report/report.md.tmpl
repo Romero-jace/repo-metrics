@@ -1,0 +1,80 @@
+# Repo metrics, {{ .GeneratedAt }}
+
+Comparing each repo against its closest snapshot from about {{ days .WindowDays }} back.
+
+{{ if .Movers -}}
+## What moved
+{{ range .Movers }}
+### {{ .Name }}
+
+Coverage {{ pct .CoveragePct }}{{ with .CoverageDeltaPoints }}, {{ points . }} on the week{{ end }}. Tests {{ .Tests }}{{ with .TestsDelta }}{{ if ne . 0 }}, {{ signed . }}{{ end }}{{ end }}.
+{{- if .EnvChanged }}
+
+Heads up: these two snapshots were taken under different toolchains, so some of this move is not code.
+{{- end }}
+{{ if .Culprits }}
+Where it came from:
+{{ range .Culprits }}
+{{- if eq .State "added" }}
+- `{{ .Package }}` (new code, {{ pct .ToPct }} covered): shifts the repo total by {{ pts .ContributionPoints }} just by showing up ({{ .Statements }} statements)
+{{- else if eq .State "removed" }}
+- `{{ .Package }}` (gone, was {{ pct .FromPct }}): shifts the repo total by {{ pts .ContributionPoints }} just by going away ({{ .Statements }} statements)
+{{- else }}
+- `{{ .Package }}`: {{ pct .FromPct }} to {{ pct .ToPct }}, worth {{ pts .ContributionPoints }} of the repo total ({{ .Statements }} statements)
+{{- end }}
+{{- end }}
+{{ end -}}
+{{ end }}
+{{- else -}}
+## What moved
+
+Nothing cleared the reporting threshold this time.
+{{ end }}
+## Every repo
+
+| repo | coverage | change | tests | change | packages without tests | last collected |
+| --- | --- | --- | --- | --- | --- | --- |
+{{- /* A failed run came back with no metrics, so every count on it is a Go zero
+value rather than a measurement. Printing them would claim the repo sits at 0.0%
+with every package tested, and subtracting a healthy baseline from those zeros
+would post a cliff this week and a recovery next week, neither of which happened.
+Partial snapshots are different: they carry real numbers and keep showing them. */}}
+{{- range .Repos }}
+{{- if eq .Status "failed" }}
+| {{ .Name }} | not collected | not collected | not collected | not collected | not collected | {{ if .CollectedAt }}{{ .CollectedAt }}{{ else }}never{{ end }} |
+{{- else }}
+| {{ .Name }} | {{ pct .CoveragePct }} | {{ if .HasBaseline }}{{ points .CoverageDeltaPoints }}{{ else }}no baseline yet{{ end }} | {{ .Tests }} | {{ if .HasBaseline }}{{ signed .TestsDelta }}{{ else }}no baseline yet{{ end }} | {{ .PackagesWithoutTests }} | {{ if .CollectedAt }}{{ .CollectedAt }}{{ else }}never{{ end }} |
+{{- end }}
+{{- end }}
+
+Coverage is covered statements over total statements across the whole repo, so a big package counts for more than a small one.
+{{ if anyPackageChurn .Repos }}
+## Packages that came and went
+
+These are not regressions or improvements. They are here so a coverage move that came from adding or deleting code is not mistaken for one that came from testing it.
+{{ range .Repos }}
+{{- if or .AddedPackages .RemovedPackages }}
+**{{ .Name }}**
+{{ if .AddedPackages }}
+New:
+{{- range .AddedPackages }}
+- `{{ . }}`
+{{- end }}
+{{ end }}
+{{- if .RemovedPackages }}
+Gone:
+{{- range .RemovedPackages }}
+- `{{ . }}`
+{{- end }}
+{{ end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if .Problems }}
+## Collection problems
+
+These repos did not report clean. Whatever numbers they did produce are worth a second look, and the ones that produced none say so in the table above.
+{{ range .Problems }}
+- **{{ .Name }}** ({{ .Status }}){{ if .Error }}: {{ .Error }}{{ end }}
+{{- end }}
+{{ end -}}

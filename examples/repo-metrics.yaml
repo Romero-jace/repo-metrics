@@ -1,0 +1,93 @@
+# Starter config for repo-metrics.
+#
+# Copy this next to your database and edit the paths. It will not load as-is:
+# every repo path is checked at load time and has to be a directory that exists,
+# so the placeholders below are a shape to copy, not a config to run.
+#
+# Every field has a default. The comments say what each one does and what
+# happens if you leave it out.
+
+# Where the SQLite database lives. Relative paths resolve against the working
+# directory of whoever runs the tool, which matters if you schedule it, so
+# prefer an absolute path once it is not just you running it by hand.
+# Default: ./repo-metrics.db
+database: /srv/repo-metrics/repo-metrics.db
+
+# Default reporting window. Head is the newest usable snapshot, baseline is the
+# newest usable snapshot at or before head minus this window.
+#
+# Durations use Go's syntax, which has no day unit, so a week is 168h and not
+# 7d. 7d is a parse error, not a silent fallback.
+# Default: 168h. Override per run with `report --window`.
+window: 168h
+
+# Noise floor for culprit ranking, in statements. A package smaller than this is
+# left out of the "which package is why" list, because a three-statement helper
+# going from 0 to 100 percent is not news. It still shows up in the appendix.
+# Default: 20
+min_statements: 20
+
+# How far a repo's coverage has to move, in percentage points, before it earns a
+# spot in the movers section. Set this to 0 to see every twitch.
+# Default: 0.5
+min_repo_delta: 0.5
+
+repos:
+  # Mode one: repo-metrics runs a command, then reads what the command wrote.
+  - name: my-service
+    # Absolute path to the checkout. Has to exist and be a directory or the
+    # config fails to load. Required.
+    path: /srv/checkouts/my-service
+
+    # Where the coverage profile lands, relative to path unless absolute.
+    # Required, even in command mode: without it there is nothing to parse, so
+    # running the command would burn a whole test suite and record nothing.
+    coverprofile: coverage.out
+
+    # An argv slice, never a shell string. Nothing here goes through a shell, so
+    # quoting and word splitting cannot surprise you, and it also means you
+    # cannot use pipes or && here. Leave it out to switch to ingest mode below.
+    #
+    # -coverpkg=./... matters: without it, packages that have no test files are
+    # invisible in the profile and the repo percentage silently reads high.
+    command:
+      - go
+      - test
+      - ./...
+      - -json
+      - -coverpkg=./...
+      - -coverprofile=coverage.out
+
+    # Parse the command's stdout for test counts, pass/fail/skip, and per-package
+    # durations. go-test-json is the only supported value today. Leave it out and
+    # stdout is ignored, so you get coverage but no test counts.
+    #
+    # Setting this without a command is an error, since there would be no stdout
+    # to capture.
+    stdout_format: go-test-json
+
+    # Wall-clock budget for the command. The run is killed when it expires and
+    # the snapshot is recorded as failed rather than silently skipped.
+    # Default: 10m
+    timeout: 15m
+
+  # Mode two: ingest only. No command, so repo-metrics parses whatever is already
+  # on disk. This is how you consume a profile your CI already produced.
+  - name: built-by-ci
+    path: /srv/checkouts/built-by-ci
+    coverprofile: artifacts/coverage.out
+
+    # Ingest mode only. A profile older than this is reported as stale instead of
+    # being presented as a current number, which is the whole point: a coverage
+    # file sitting at the expected path is not evidence that anything ran.
+    # Default: 24h
+    max_age: 36h
+
+    # No command here, so no stdout_format and no timeout. Coverage only, no test
+    # counts, because nothing produced a -json stream for this repo.
+
+  # Values are expanded from the environment, so anything machine-specific or
+  # secret can stay out of the file.
+  # - name: from-env
+  #   path: ${CHECKOUT_ROOT}/another-repo
+  #   coverprofile: coverage.out

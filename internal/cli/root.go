@@ -7,14 +7,196 @@
 // first positional argument, so the reverse order cannot work without a manual
 // pre-pass, and a tool that accepts only one of the two orders should accept the
 // one users already have in their fingers.
+//
+// Run is the only exported symbol, and everything printed here goes to the
+// writers Run was handed rather than to os.Stdout. That is what makes the whole
+// command surface testable in process.
 package cli
 
-import "io"
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"os"
+	"os/signal"
+	"syscall"
 
-// Run dispatches a subcommand. args excludes the program name.
+	"github.com/Romero-jace/repo-metrics/internal/collect"
+	"github.com/Romero-jace/repo-metrics/internal/config"
+	"github.com/Romero-jace/repo-metrics/internal/store"
+)
+
+// defaultConfigPath is where every subcommand looks unless told otherwise.
+const defaultConfigPath = "repo-metrics.yaml"
+
+// Output formats for the report subcommand.
+const (
+	formatMarkdown = "markdown"
+	formatJSON     = "json"
+)
+
+// timeFormat is how timestamps are shown to people. It matches what the report
+// renders, so a line from repos and a line from the report read the same.
+const timeFormat = "2006-01-02 15:04 UTC"
+
+// Run dispatches a subcommand. args excludes the program name. A non-nil return
+// becomes exit status 1, so every path that returns one has already explained
+// itself on stderr: the error text is for the caller, not for the user.
+func Run(args []string, stdout, stderr io.Writer) error {
+	if len(args) == 0 {
+		printUsage(stderr)
+		return errors.New("no command given")
+	}
+
+	// A collect run over a dozen repos takes minutes, so ctrl-C or a TERM from
+	// launchd has to stop it between repos rather than killing it mid-write.
+	// Cancellation propagates into the subprocess runner as well.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	switch args[0] {
+	case "init":
+		return runInit(args[1:], stdout, stderr)
+	case "collect":
+		return runCollect(ctx, args[1:], stdout, stderr)
+	case "report":
+		return runReport(ctx, args[1:], stdout, stderr)
+	case "repos":
+		return runRepos(ctx, args[1:], stdout, stderr)
+	case "help", "-h", "--help":
+		printUsage(stderr)
+		return nil
+	default:
+		printUsage(stderr)
+		return fmt.Errorf("unknown command %q", args[0])
+	}
+}
+
+// newFlagSet builds a subcommand flag set that reports through the caller's
+// writer and never exits the process. flag.ExitOnError would call os.Exit from
+// inside a library function, which defeats the injectable writers entirely.
+func newFlagSet(name string, stderr io.Writer) *flag.FlagSet {
+	set := flag.NewFlagSet(name, flag.ContinueOnError)
+	set.SetOutput(stderr)
+	return set
+}
+
+// parseFlags reports whether the caller should carry on. A -h is a successful
+// outcome rather than a failure, so it stops the command without an error and
+// without exit status 1.
 //
-// Subcommand wiring lands in a later step; this stub exists so the module has a
-// buildable package from the first commit.
-func Run(_ []string, _, _ io.Writer) error {
-	return nil
+// No subcommand takes a positional argument, and leftovers are rejected rather
+// than ignored. Go's flag package stops at the first non-flag token, so
+// `collect myrepo --config prod.yaml` would otherwise parse no flags at all,
+// fall back to the default config, quietly collect a different set of repos
+// than the one asked for, and exit 0. That is the silent wrong answer this tool
+// exists to refuse.
+func parseFlags(set *flag.FlagSet, args []string, stderr io.Writer) (proceed bool, err error) {
+	if err := set.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			printUsage(stderr)
+			return false, nil
+		}
+		return false, err
+	}
+	if set.NArg() > 0 {
+		_, _ = fmt.Fprintf(stderr, "%s takes no positional arguments, got %q\n", set.Name(), set.Arg(0))
+		printUsage(stderr)
+		return false, fmt.Errorf("unexpected argument %q", set.Arg(0))
+	}
+	return true, nil
+}
+
+// loadConfig reads the config and explains itself on stderr, since the error
+// this returns only ever becomes an exit status.
+func loadConfig(path string, stderr io.Writer) (*config.Config, error) {
+	cfg, err := config.Load(path)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "%v\n", err)
+		if errors.Is(err, os.ErrNotExist) {
+			_, _ = fmt.Fprintf(stderr, "run `repo-metrics init` to write a starter config at %s\n", path)
+		}
+		return nil, err
+	}
+	return cfg, nil
+}
+
+func openStore(path string, stderr io.Writer) (*store.Store, error) {
+	st, err := store.Open(path)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "%v\n", err)
+		return nil, err
+	}
+	return st, nil
+}
+
+// coverageTotals sums statement counts across a snapshot's packages.
+//
+// The sum has to happen before the division: a repo's coverage is total covered
+// over total statements, not the mean of the per-package rates, so a big package
+// counts for more than a small one. Repo-level metrics carry an empty scope and
+// are not coverage at all, hence the skip.
+func coverageTotals(metrics []store.Metric) (covered, total int) {
+	for _, m := range metrics {
+		if m.Scope == "" {
+			continue
+		}
+		switch m.Key {
+		case collect.KeyCoveredStmts:
+			covered += int(m.Value)
+		case collect.KeyTotalStmts:
+			total += int(m.Value)
+		}
+	}
+	return covered, total
+}
+
+// formatCoverage renders a percentage, or says so when there is nothing to
+// divide by. Zero total statements is not zero percent coverage.
+func formatCoverage(covered, total int) string {
+	if total == 0 {
+		return "no coverage"
+	}
+	return fmt.Sprintf("%.1f%%", float64(covered)/float64(total)*100)
+}
+
+func printUsage(w io.Writer) {
+	// A failed write to the caller's own writer is not actionable, so the
+	// error is deliberately discarded here and everywhere else we print.
+	_, _ = fmt.Fprint(w, `repo-metrics: track coverage and test health across a pile of repos, and say
+what got worse this week.
+
+usage:
+  repo-metrics init    [--config FILE] [--force]
+  repo-metrics collect [--config FILE] [--repo NAME]
+  repo-metrics report  [--config FILE] [--window 7d] [--out FILE] [--format markdown|json]
+  repo-metrics repos   [--config FILE]
+
+Flags go AFTER the subcommand, the way git and docker take them:
+
+  repo-metrics collect --config repo-metrics.yaml
+
+init flags:
+  --config FILE   where to write the starter config (default repo-metrics.yaml)
+  --force         overwrite an existing file instead of refusing
+
+collect flags:
+  --config FILE   config to read (default repo-metrics.yaml)
+  --repo NAME     collect just this one repo instead of all of them
+
+report flags:
+  --config FILE   config to read (default repo-metrics.yaml)
+  --window DUR    how far back the baseline sits, like 7d or 36h.
+                  Defaults to the window in the config, which itself defaults to 7d.
+  --out FILE      write the report here instead of to stdout
+  --format FMT    markdown (default) or json
+
+repos flags:
+  --config FILE   config to read (default repo-metrics.yaml)
+
+collect keeps going when a repo fails and exits 1 at the end if any did, so one
+unreachable repo never costs you the other nine.
+`)
 }

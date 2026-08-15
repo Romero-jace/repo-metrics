@@ -217,9 +217,34 @@ type reportRepo struct {
 // null and for [] alike.
 type reportDoc struct {
 	Section  string        `json:"section"`
+	Scope    *scopeDoc     `json:"scope"`
 	Repos    *[]reportRepo `json:"repos"`
 	Movers   *[]reportRepo `json:"movers"`
 	Problems *[]reportRepo `json:"problems"`
+}
+
+// scopeDoc is the envelope's statement of which repos the answer covers.
+//
+// It is a pointer for the same reason the three sections are, and against a
+// sharper hazard: json.Unmarshal ignores a key the struct has no field for, so a
+// value-typed Scope here would decode a report that never carried one into a
+// struct full of zeroes, and every assertion below would pass while proving
+// nothing. Going through scopeOf makes that a named failure instead.
+type scopeDoc struct {
+	// Repo is nil on an unnarrowed run. A string field would flatten that into
+	// "", which is a repo name as far as any consumer can tell.
+	Repo       *string `json:"repo"`
+	Selected   int     `json:"selected"`
+	Configured int     `json:"configured"`
+}
+
+// scopeOf unwraps the scope a report must always carry. See rowsOf.
+func scopeOf(t *testing.T, doc reportDoc) scopeDoc {
+	t.Helper()
+	if doc.Scope == nil {
+		t.Fatal("the report carries no scope at all, so nothing in it says which repos the answer covers")
+	}
+	return *doc.Scope
 }
 
 func decodeReport(t *testing.T, out string) reportDoc {
@@ -1152,6 +1177,111 @@ func TestReportNarrowsToOneRepo(t *testing.T) {
 		if strings.Contains(md, "### "+gone) {
 			t.Errorf("--repo steady still wrote up %q under what moved:\n%s", gone, md)
 		}
+	}
+}
+
+// The failure this whole round is about.
+//
+// "No repo failed to collect" and "the one repo I asked about did not fail to
+// collect" are wildly different findings, and before the scope field they were
+// the same bytes: an empty problems list. An agent that ran --repo steady and
+// reported the fleet healthy would have been reading the tool exactly as written.
+//
+// So the two runs are rendered side by side here and the test is that they can be
+// told apart, rather than that either one says something in particular.
+func TestANarrowedAllClearIsNotAFleetWideAllClear(t *testing.T) {
+	cfgPath := narrowingFixture(t)
+
+	narrowed, stderr, err := runCLI(t, "report", "--config", cfgPath, "--format", "json", "--section", "problems", "--repo", "steady")
+	if err != nil {
+		t.Fatalf("narrowed problems report: %v (stderr: %s)", err, stderr)
+	}
+	whole, stderr, err := runCLI(t, "report", "--config", cfgPath, "--format", "json", "--section", "problems")
+	if err != nil {
+		t.Fatalf("fleet-wide problems report: %v (stderr: %s)", err, stderr)
+	}
+
+	narrowedDoc, wholeDoc := decodeReport(t, narrowed), decodeReport(t, whole)
+
+	// The premise: the narrowed run really does come back clean, because steady
+	// is fine. Without this the test could pass on a fixture where both runs
+	// listed broken and nothing was ever ambiguous.
+	if rows := rowsOf(t, narrowedDoc.Problems, "problems"); len(rows) != 0 {
+		t.Fatalf("--repo steady --section problems reported %+v, want nothing: steady collects cleanly, and the ambiguity this test is about only exists when it does", rows)
+	}
+	if !listedIn(rowsOf(t, wholeDoc.Problems, "problems"), "broken") {
+		t.Fatal("the fleet-wide run does not report the broken repo, so there is no fleet-wide finding for the narrowed run to be confused with")
+	}
+
+	got := scopeOf(t, narrowedDoc)
+	if got.Repo == nil || *got.Repo != "steady" {
+		t.Errorf("scope.repo = %v, want %q. Nothing else in a clean narrowed report says which repo it is clean about.", got.Repo, "steady")
+	}
+	if got.Selected != 1 || got.Configured != 3 {
+		t.Errorf("scope selected/configured = %d/%d, want 1/3. The report has to say how much of the config it is not covering.", got.Selected, got.Configured)
+	}
+
+	// And the unnarrowed run has to be readable as unnarrowed, or the fix only
+	// works for callers who already know they narrowed.
+	fleet := scopeOf(t, wholeDoc)
+	if fleet.Repo != nil {
+		t.Errorf("scope.repo = %q on a fleet-wide run, want null", *fleet.Repo)
+	}
+	if fleet.Selected != fleet.Configured {
+		t.Errorf("scope selected/configured = %d/%d on a fleet-wide run, want them equal: that equality is how a consumer knows it is seeing everything", fleet.Selected, fleet.Configured)
+	}
+}
+
+// The same distinction in the format a person reads. A narrowed markdown report
+// that just says nothing failed is as misleading as the JSON was.
+func TestMarkdownSaysWhatACleanProblemsSectionIsCleanAbout(t *testing.T) {
+	cfgPath := narrowingFixture(t)
+
+	md, stderr, err := runCLI(t, "report", "--config", cfgPath, "--section", "problems", "--repo", "steady")
+	if err != nil {
+		t.Fatalf("narrowed problems report: %v (stderr: %s)", err, stderr)
+	}
+
+	// The heading has to be there at all. It used to be gated on the list being
+	// non-empty, so asking specifically about problems and having none rendered a
+	// document with no problems section in it, which answers a question with
+	// silence.
+	if !strings.Contains(md, "## Collection problems") {
+		t.Errorf("--section problems rendered no problems section:\n%s", md)
+	}
+	if !strings.Contains(md, "Nothing failed to collect.") {
+		t.Errorf("--section problems does not say that nothing failed:\n%s", md)
+	}
+	if !strings.Contains(md, "Only covering the repo `steady`") {
+		t.Errorf("a narrowed report does not say what it is narrowed to:\n%s", md)
+	}
+	if strings.Contains(md, "broken") {
+		t.Errorf("--repo steady mentions the repo that did fail:\n%s", md)
+	}
+}
+
+// A full report gains the same positive statement, which is information rather
+// than filler for a tool whose entire job is noticing that a repo stopped
+// reporting.
+func TestAFleetWideReportStatesThatNothingFailed(t *testing.T) {
+	dir := t.TempDir()
+	clean := repoDir(t, dir, "clean", sampleProfile)
+	cfgPath := writeConfig(t, dir, fmt.Sprintf("database: %q\nrepos:\n%s",
+		filepath.Join(dir, "metrics.db"), ingestRepoEntry("clean", clean, "coverage.out")))
+
+	if _, stderr, err := runCLI(t, "collect", "--config", cfgPath); err != nil {
+		t.Fatalf("collect: %v (stderr: %s)", err, stderr)
+	}
+	md, stderr, err := runCLI(t, "report", "--config", cfgPath)
+	if err != nil {
+		t.Fatalf("report: %v (stderr: %s)", err, stderr)
+	}
+
+	if !strings.Contains(md, "## Collection problems") {
+		t.Errorf("a clean report has no collection problems section, so it never says the collection worked:\n%s", md)
+	}
+	if !strings.Contains(md, "Nothing failed to collect.") {
+		t.Errorf("a clean report does not say that nothing failed:\n%s", md)
 	}
 }
 

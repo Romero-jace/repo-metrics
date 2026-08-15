@@ -27,6 +27,10 @@ type View struct {
 	// consumer looking at a null needs to be able to tell "you did not ask for
 	// this" from "the tool has nothing to say".
 	Section Section `json:"section"`
+	// Scope says which repos the answer covers. Same reason as Section, one axis
+	// over: --repo narrows what was asked about, and without this the answer to a
+	// narrow question is indistinguishable from an answer to a broad one.
+	Scope ScopeView `json:"scope"`
 	// The three lists are allocated and empty when the section was rendered and
 	// found nothing, and nil when the section was not rendered at all. Those are
 	// different answers: an empty movers list says nothing moved this week, and
@@ -36,6 +40,61 @@ type View struct {
 	Movers   []RepoView `json:"movers"`
 	Repos    []RepoView `json:"repos"`
 	Problems []RepoView `json:"problems"`
+}
+
+// Scope is what the caller narrowed the report to, in the terms the caller knows
+// it: the name it passed to --repo, and how many repos the config names in total.
+//
+// It is the input side and deliberately does not carry the selected count. That
+// number is a fact about the report rather than about the request, so BuildSection
+// derives it and no caller is able to supply a wrong one.
+type Scope struct {
+	// Repo is the name --repo narrowed to, empty when the report covers
+	// everything the config names.
+	Repo string
+	// Configured is how many repos the config names, narrowing or not.
+	Configured int
+}
+
+// ScopeView is the same fact on the wire.
+//
+// It is always an object and never null, which is the opposite of how the
+// measurement groups behave, and on purpose. A null group means nothing measured
+// this; scope is not a measurement, it is a statement about which question was
+// asked, and every report has an answer to that. Section is the precedent: also
+// always present, also carrying an explicit value for the unnarrowed case.
+//
+// The failure it exists to refuse: `report --repo alpha --section problems` on a
+// clean week answers with an empty problems list, and an empty problems list from
+// an unnarrowed run means no repo anywhere failed to collect. Those are wildly
+// different findings and without this field they are the same bytes.
+type ScopeView struct {
+	// Repo is nil when the report was not narrowed, which is a genuinely
+	// different answer from any repo name and so cannot be an empty string: a
+	// consumer testing `scope.repo == ""` would have to know that empty means all,
+	// while nil reads as absent-of-filter on its own.
+	Repo *string `json:"repo"`
+	// Selected and Configured are counts of repos the caller and the config
+	// supplied, not measurements of anything a collection did or did not find, so
+	// they sit here as plain numbers rather than inside a nullable group. There is
+	// no state in which they were not measured. Anything derived from what a
+	// collection produced does not get to follow them here.
+	Selected   int `json:"selected"`
+	Configured int `json:"configured"`
+}
+
+// Narrowed reports whether --repo restricted this report to one repo. The
+// template branches on it so the header line can never announce a narrowing that
+// did not happen.
+func (s ScopeView) Narrowed() bool { return s.Repo != nil }
+
+// RepoName reads through the nil so the template cannot dereference it. See the
+// comment on RepoView.Culprits for why these accessors are methods.
+func (s ScopeView) RepoName() string {
+	if s.Repo == nil {
+		return ""
+	}
+	return *s.Repo
 }
 
 // RepoView is one repo's line in the report.
@@ -190,19 +249,34 @@ type CulpritView struct {
 	Statements         int     `json:"statements"`
 }
 
-// Build converts a computed report into the render-ready view.
+// Build converts a whole computed report into the render-ready view.
+//
+// Its contract is that nothing was narrowed, so it states that scope rather than
+// leaving it to a zero value: every repo in the report is every repo there is.
+// That is true by construction here, which is why this wrapper is safe when a
+// general-purpose one taking a default would not be. A caller that did narrow has
+// to say so through BuildSection.
 func Build(rep delta.Report) View {
-	return BuildSection(rep, SectionAll)
+	return BuildSection(rep, SectionAll, Scope{Configured: len(rep.Repos)})
 }
 
 // BuildSection converts a computed report into the render-ready view, narrowed
-// to one section.
+// to one section and describing whatever repo narrowing produced it.
 //
 // Narrowing happens here rather than in either renderer so that markdown and
 // JSON cannot disagree about what a section contains, which is the same reason
 // they share a View at all.
-func BuildSection(rep delta.Report, sec Section) View {
+func BuildSection(rep delta.Report, sec Section, scope Scope) View {
 	movers, problems := rep.Movers(), rep.Problems()
+
+	// Counted from the computed report rather than from v.Repos below, which is
+	// nil under every section but repos and all. Reading the rendered slice would
+	// publish "selected: 0" on every --section movers call, which is this
+	// project's recurring bug wearing the field that exists to prevent it.
+	sv := ScopeView{Selected: len(rep.Repos), Configured: scope.Configured}
+	if scope.Repo != "" {
+		sv.Repo = &scope.Repo
+	}
 
 	// The requested slices are allocated, never left nil. A nil slice marshals
 	// to JSON null, so on a quiet week a consumer doing data.movers.length would
@@ -212,6 +286,7 @@ func BuildSection(rep delta.Report, sec Section) View {
 		GeneratedAt: rep.GeneratedAt.UTC().Format("2006-01-02 15:04 UTC"),
 		WindowDays:  rep.Window.Hours() / 24,
 		Section:     sec,
+		Scope:       sv,
 	}
 	if sec.shows(SectionRepos) {
 		v.Repos = make([]RepoView, 0, len(rep.Repos))

@@ -1,6 +1,9 @@
 # Repo metrics, {{ .GeneratedAt }}
 
 Comparing each repo against its closest snapshot from about {{ days .WindowDays }} back.
+{{ if .Scope.Narrowed }}
+Only covering the repo `{{ .Scope.RepoName }}`, out of {{ repos .Scope.Configured }} in this config. Anything below is about that repo and nothing else.
+{{ end -}}
 {{ if .ShowMovers }}
 {{ if .Movers -}}
 ## What moved
@@ -85,11 +88,14 @@ Gone:
 {{- end }}
 {{- end }}
 {{- end }}
-{{- if and .ShowProblems .Problems }}
+{{- if .ShowProblems }}
 ## Collection problems
-
+{{ if .Problems }}
 These repos did not report clean. Whatever numbers they did produce are worth a second look, and the ones that produced none say so in the table above.
 {{ range .Problems }}
 - **{{ .Name }}** ({{ .Status }}){{ if .Error }}: {{ .Error }}{{ end }}
 {{- end }}
-{{ end -}}
+{{ else }}
+Nothing failed to collect.
+{{ end }}
+{{- end -}}

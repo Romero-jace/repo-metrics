@@ -86,7 +86,13 @@ func runReport(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		// MaxCulprits stays zero so Compute applies its own default.
 	}, time.Now())
 
-	return writeReport(rep, *format, sec, *outPath, stdout, stderr)
+	// cfg.Repos is the honest denominator: selectRepos returns a new slice and
+	// never touches the one it was given, so the full configured count is still
+	// here after narrowing. The report says what it covers rather than leaving a
+	// caller to infer it from a list that may not even be rendered.
+	scope := report.Scope{Repo: *only, Configured: len(cfg.Repos)}
+
+	return writeReport(rep, *format, sec, scope, *outPath, stdout, stderr)
 }
 
 // reportInputs pairs each repo it is given with its newest snapshot and the
@@ -190,17 +196,18 @@ func reportInputs(
 	return inputs, nil
 }
 
-// writeReport renders the report to stdout or to a file. sec goes to whichever
-// renderer is chosen rather than being applied afterwards, so markdown and JSON
-// cannot disagree about what a section contains.
-func writeReport(rep delta.Report, format string, sec report.Section, outPath string, stdout, stderr io.Writer) error {
+// writeReport renders the report to stdout or to a file. sec and scope go to
+// whichever renderer is chosen rather than being applied afterwards, so markdown
+// and JSON cannot disagree about what a section contains or about which repos the
+// answer covers.
+func writeReport(rep delta.Report, format string, sec report.Section, scope report.Scope, outPath string, stdout, stderr io.Writer) error {
 	render := report.Markdown
 	if format == formatJSON {
 		render = report.JSON
 	}
 
 	if outPath == "" {
-		if err := render(stdout, rep, sec); err != nil {
+		if err := render(stdout, rep, sec, scope); err != nil {
 			_, _ = fmt.Fprintf(stderr, "%v\n", err)
 			return err
 		}
@@ -212,7 +219,7 @@ func writeReport(rep delta.Report, format string, sec report.Section, outPath st
 		_, _ = fmt.Fprintf(stderr, "could not create %s: %v\n", outPath, err)
 		return err
 	}
-	if err := render(f, rep, sec); err != nil {
+	if err := render(f, rep, sec, scope); err != nil {
 		_ = f.Close()
 		_, _ = fmt.Fprintf(stderr, "%v\n", err)
 		return err

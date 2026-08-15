@@ -208,6 +208,10 @@ report flags:
   --format FMT    markdown (default) or json
   --repo NAME     report on just this one repo instead of all of them. A name
                   that is not in the config is an error, not an empty report.
+                  Every report says what it covers, narrowed or not: the json
+                  carries a scope object and the markdown says so under the
+                  heading, so a quiet answer about one repo is never readable as
+                  a quiet week across all of them.
   --section NAME  render one part of the report instead of the whole thing.
                   One of: `+sections+`. Default is all.
                     movers   what got better or worse, and by far the cheapest

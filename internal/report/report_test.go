@@ -165,7 +165,12 @@ func mustMarkdown(t *testing.T, rep delta.Report) string {
 
 func mustMarkdownSection(t *testing.T, rep delta.Report, sec report.Section) string {
 	t.Helper()
-	md, err := report.MarkdownString(rep, sec)
+	return mustMarkdownScoped(t, rep, sec, unnarrowed(rep))
+}
+
+func mustMarkdownScoped(t *testing.T, rep delta.Report, sec report.Section, scope report.Scope) string {
+	t.Helper()
+	md, err := report.MarkdownString(rep, sec, scope)
 	if err != nil {
 		t.Fatalf("MarkdownString(%q): %v", sec, err)
 	}
@@ -179,11 +184,24 @@ func mustJSON(t *testing.T, rep delta.Report) string {
 
 func mustJSONSection(t *testing.T, rep delta.Report, sec report.Section) string {
 	t.Helper()
+	return mustJSONScoped(t, rep, sec, unnarrowed(rep))
+}
+
+func mustJSONScoped(t *testing.T, rep delta.Report, sec report.Section, scope report.Scope) string {
+	t.Helper()
 	var b strings.Builder
-	if err := report.JSON(&b, rep, sec); err != nil {
+	if err := report.JSON(&b, rep, sec, scope); err != nil {
 		t.Fatalf("JSON(%q): %v", sec, err)
 	}
 	return b.String()
+}
+
+// unnarrowed is the scope of a run that asked about everything the config names,
+// which is what all but the narrowing tests are exercising. It matches what Build
+// constructs, so these helpers render exactly what an unnarrowed CLI run would
+// rather than something only the tests ever see.
+func unnarrowed(rep delta.Report) report.Scope {
+	return report.Scope{Configured: len(rep.Repos)}
 }
 
 // coverageOf and testsOf read one repo's measurement group and fail if it is

@@ -16,9 +16,62 @@ baseline snapshot, and the markdown and JSON report. It has not been run against
 a fleet for long enough to have opinions about it yet, and the only collector is
 the Go one, so treat it as working but young.
 
-## How it works
+## Install
 
-You give it a config listing the repos you care about:
+```sh
+go install github.com/Romero-jace/repo-metrics/cmd/repo-metrics@latest
+```
+
+Or from a checkout, which is what you want if you plan to change anything:
+
+```sh
+make build     # ./bin/repo-metrics
+```
+
+Two dependencies, both load-bearing: `modernc.org/sqlite`, which is a pure-Go
+SQLite so there is no CGO and no system library to install, and
+`github.com/goccy/go-yaml` for the config.
+
+## Getting started
+
+```sh
+repo-metrics init                 # writes a commented repo-metrics.yaml
+$EDITOR repo-metrics.yaml         # point it at repos you actually have
+repo-metrics collect              # one pass over all of them, then exits
+repo-metrics report               # markdown to stdout
+```
+
+`init` writes a config that already works: the first repo entry points at the
+current directory, so you can run the other three commands immediately and see
+real output before editing anything. Every path in the file is checked when it
+loads, so a config full of `/path/to/your-repo` placeholders is a load error
+rather than a mystery later.
+
+The report needs two snapshots to compare, so the first one has nothing to say
+about deltas. Collect again tomorrow and it will.
+
+## The four commands
+
+| command | what it is for |
+|---|---|
+| `init` | write a starter config |
+| `collect` | run each repo's command, parse what it produced, store a snapshot |
+| `report` | compare the newest snapshot against one from a window ago |
+| `repos` | list every configured repo and when it was last collected |
+
+`repos` is the one that is not obvious. It answers "did the cron job actually
+run", and it lists repos the database has never heard of alongside the ones it
+has, because a repo that quietly stopped being collected looks exactly like a
+repo that has not changed.
+
+```
+REPO         LAST COLLECTED        STATUS           COVERAGE
+api          2026-08-15 23:47 UTC  ok               80.0%
+worker       2026-08-15 23:47 UTC  ok               80.0%
+old-service  never                 never collected  -
+```
+
+## Configuring it
 
 ```yaml
 database: ./repo-metrics.db
@@ -37,22 +90,17 @@ repos:
     # no command, so it just reads what CI already wrote
 ```
 
-There is a fully commented version of that config at
+There is a fully commented version at
 [`examples/repo-metrics.yaml`](examples/repo-metrics.yaml), with every field
 annotated with what it does and what happens if you leave it out.
-
-Then you run it on whatever schedule you like:
-
-```sh
-repo-metrics collect                          # one pass, then exits
-repo-metrics report --window 7d --out report.md
-```
 
 `--window` takes Go's duration syntax plus a `d` suffix for days, so `7d`,
 `168h`, and `1d12h` all work. The duration fields in the config file are
 stricter: `window:`, `timeout:`, and `max_age:` go through Go's
 `time.ParseDuration`, whose largest unit is the hour, so a week there has to be
 written `168h` and `7d` is a load error.
+
+## Running it on a schedule
 
 There is no daemon. `collect` does one pass and exits, so cron or launchd owns
 the cadence and you can always just run it by hand:
@@ -68,6 +116,74 @@ report you actually wanted.
 
 [`examples/`](examples/) has a ready-made launchd agent for macOS and the
 equivalent crontab line for Linux.
+
+## Asking it narrower questions
+
+`--format json` gives you the same report as data, and two flags narrow what you
+get. This matters most if the thing reading the report is a script or an AI
+agent, because the whole report is usually far more than the question needs.
+
+```sh
+repo-metrics report --format json                      # everything
+repo-metrics report --format json --section movers     # just what changed
+repo-metrics report --format json --section problems   # just what failed to collect
+repo-metrics report --format json --repo my-service    # just one repo
+```
+
+Measured on a three-repo config with `tiktoken` (`cl100k_base`), so these are
+counts rather than estimates. Yours will differ with your fleet and how much
+moved:
+
+| what you ask for | tokens |
+|---|---|
+| the whole report | 688 |
+| `--section movers` | 205 |
+| `--section problems` | 166 |
+
+`--section` works on markdown too, since a person narrowing to what moved is
+just as reasonable as a machine doing it.
+
+### What the JSON promises
+
+Two things, and both exist because the same bug kept happening: something that
+was never measured getting published as a measurement of zero.
+
+**Numbers live inside nullable groups.** A repo that measured nothing does not
+have a coverage percentage of zero, it has no coverage object at all. A whole
+row, nothing left out:
+
+```json
+{"name": "legacy", "status": "failed", "collected_at": "2026-08-15 23:47 UTC",
+ "coverage": null, "tests": null,
+ "has_snapshot": true, "has_baseline": false, "env_changed": false,
+ "error": "no coverage profile at /srv/legacy/coverage.out and no command configured to produce one"}
+```
+
+That shape is deliberate. If those fields were merely omitted, a consumer writing
+`row.coverage_pct ?? 0` would turn an absent measurement straight back into a
+measured zero. Reaching into a null object throws instead, which is the point.
+There are two levels of it: a null `coverage` means nothing was measured, while
+a `delta_points` of null inside a present `coverage` means it was measured and
+there is no baseline to compare it against.
+
+**Every report says what it covers.** A section you did not ask for comes back
+`null` rather than `[]`, so "not requested" is distinguishable from "nothing to
+report", and a `scope` object says which repos the answer is about:
+
+```json
+{"generated_at": "2026-08-15 23:47 UTC", "window_days": 7, "section": "problems",
+ "scope": {"repo": "api", "selected": 1, "configured": 3},
+ "movers": null, "repos": null, "problems": []}
+```
+
+That one says every repo it looked at collected cleanly, and that it only looked
+at one of the three you configured. Without the scope object it would be
+byte-identical to the answer meaning "none of your three repos failed", which is
+a much stronger claim. `selected == configured` is how you know you are seeing
+all of it.
+
+Nothing here needs the flags to be discovered ahead of time: `repo-metrics
+report --help` lists them all.
 
 ## How it decides what to tell you
 
@@ -124,7 +240,17 @@ fingerprint so you do not get to diff across that boundary without being told.
 - **No export plumbing.** It writes markdown and JSON. If you want it in Notion
   or Linear, the official MCP servers already do that better than a bespoke
   integration would.
+- **No MCP server of its own either.** A CLI costs nothing until you invoke it,
+  while an MCP tool schema sits in the context window whether or not anyone uses
+  it. This tool is stateless and one-shot, its state is a SQLite file rather than
+  anything a server has to hold, and its output was already JSON, so a protocol
+  would not have been relieving anyone of a parsing burden. What MCP genuinely
+  buys is discoverability, and `--help` buys most of that for free.
 - **No dashboard, no web server.** Static output only.
+- **No coverage floor, and no ratchet.** The report says what moved and leaves the
+  judgment to you. A percentage gate punishes an honest deletion of covered code
+  and rewards writing low-value tests to clear a bar, which is the exact confusion
+  this tool argues against everywhere else.
 - **No plugin system.** There is a `Collector` interface so this does not stay
   Go-only forever, but one interface is not a registry and does not need to be.
 

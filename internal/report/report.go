@@ -2,8 +2,8 @@
 //
 // Both formats are rendered from one View, so they cannot disagree about a
 // number. The markdown is the product; the JSON exists so something downstream
-// (an MCP client, a static-site build) can consume the same figures without
-// re-deriving them.
+// (a script, an agent asking what regressed, a static-site build) can consume the
+// same figures without re-deriving them.
 package report
 
 import (
@@ -65,6 +65,11 @@ var funcs = template.FuncMap{
 		}
 		return fmt.Sprintf("%+d", *n)
 	},
+
+	// repos renders a count of repos with its noun, so a single-repo config
+	// cannot produce "out of 1 repos in this config". It goes through the same
+	// helper as days for the same reason.
+	"repos": func(n int) string { return count(float64(n), "repo") },
 
 	// days renders the reporting window. It steps down to hours and minutes
 	// because a sub-day window is a real setting: --window 12h through %.0f
@@ -129,18 +134,18 @@ func count(n float64, unit string) string {
 
 var tmpl = template.Must(template.New("report").Funcs(funcs).Parse(markdownTemplate))
 
-// Markdown renders the report for humans, narrowed to sec.
-func Markdown(w io.Writer, rep delta.Report, sec Section) error {
-	if err := tmpl.Execute(w, BuildSection(rep, sec)); err != nil {
+// Markdown renders the report for humans, narrowed to sec and to scope.
+func Markdown(w io.Writer, rep delta.Report, sec Section, scope Scope) error {
+	if err := tmpl.Execute(w, BuildSection(rep, sec, scope)); err != nil {
 		return fmt.Errorf("report: rendering markdown: %w", err)
 	}
 	return nil
 }
 
-// JSON renders the same numbers for machines, narrowed to the same sec. Both
+// JSON renders the same numbers for machines, narrowed the same way. Both
 // formats go through BuildSection, so neither can include a section the other
-// left out.
-func JSON(w io.Writer, rep delta.Report, sec Section) error {
+// left out or disagree about what the report covers.
+func JSON(w io.Writer, rep delta.Report, sec Section, scope Scope) error {
 	enc := json.NewEncoder(w)
 	// Not indented, on purpose. JSON here is the machine format and markdown is
 	// the human one, so paying for indentation in the machine format buys
@@ -149,16 +154,16 @@ func JSON(w io.Writer, rep delta.Report, sec Section) error {
 	// runs of spaces worse than the byte count suggests. Anyone who does want to
 	// read it can pipe it through jq.
 	enc.SetEscapeHTML(false)
-	if err := enc.Encode(BuildSection(rep, sec)); err != nil {
+	if err := enc.Encode(BuildSection(rep, sec, scope)); err != nil {
 		return fmt.Errorf("report: rendering json: %w", err)
 	}
 	return nil
 }
 
 // MarkdownString is a convenience for callers that want the text in hand.
-func MarkdownString(rep delta.Report, sec Section) (string, error) {
+func MarkdownString(rep delta.Report, sec Section, scope Scope) (string, error) {
 	var b strings.Builder
-	if err := Markdown(&b, rep, sec); err != nil {
+	if err := Markdown(&b, rep, sec, scope); err != nil {
 		return "", err
 	}
 	return b.String(), nil

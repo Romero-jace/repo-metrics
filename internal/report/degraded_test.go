@@ -1,6 +1,7 @@
 package report_test
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -366,6 +367,23 @@ const (
 	// kindContext is everything else: names, statuses, booleans, lists, error
 	// text. A context path may never render as a number.
 	kindContext fieldKind = "context"
+	// kindInput is a number the caller or the config supplied rather than one a
+	// collection produced: the reporting window, how many repos are configured.
+	// There is no state in which one of these was not measured, so it is allowed
+	// outside a group, which is the whole reason this kind is dangerous.
+	//
+	// It exists only for the envelope. Nothing in a repo row may use it, and
+	// TestNoRepoFieldEscapesThroughKindInput enforces that, because the moment a
+	// figure derived from what a collection found is declared an input, this is
+	// no longer a guard, it is a hole with a name.
+	kindInput fieldKind = "input"
+	// kindRepoRows is one of the envelope's three lists of repo rows. The
+	// envelope census stops here rather than descending: the rows are walked in
+	// full by TestEveryNumberIsInsideANullableGroup against repoWireFields, and
+	// all three lists are []RepoView, so guarding one shape guards all of them.
+	// Descending again would mean a second copy of every repo classification,
+	// keyed three ways, which is three places for one rule to rot.
+	kindRepoRows fieldKind = "repo rows"
 )
 
 // repoWireFields is the census, and it is written by hand on purpose.
@@ -422,8 +440,51 @@ var repoWireFields = map[string]fieldKind{
 	"tests.packages_without_tests": kindMeasurement,
 }
 
+// envelopeWireFields is the same census one level up, over the object the repo
+// rows sit inside.
+//
+// It exists because the row census could not see this. It is seeded from
+// jsonRepoRows, which keeps doc["repos"] and throws the envelope away, so
+// window_days has sat on the wire as a bare ungrouped number for as long as it
+// has existed and nothing noticed. That was harmless, because the window is an
+// input rather than a measurement, but the absence of any check was not: it made
+// the envelope the one place a derived number could be added with no test
+// pressure at all, which is precisely where the next instance of this project's
+// recurring bug would have landed.
+//
+// Two tables rather than one merged walk, on purpose. Merging would mean keying
+// every repo classification three times over, once per list, since movers, repos
+// and problems all render []RepoView. Three copies of one rule is three places
+// for it to rot.
+var envelopeWireFields = map[string]fieldKind{
+	"generated_at": kindContext,
+	"section":      kindContext,
+	"window_days":  kindInput,
+
+	// scope descends: it is an object, but not a nullable one, so it is context
+	// rather than a group. A group has to be demonstrated null somewhere, and this
+	// one never is, which is the point of it.
+	"scope": kindContext,
+	// The narrowed-to name is nullable and is not a number, so it is context. Its
+	// null means no filter was applied, which is a real answer rather than an
+	// absent measurement.
+	"scope.repo": kindContext,
+	// Counts of repos the caller and the config supplied. Nothing measured them,
+	// nothing can fail to measure them.
+	"scope.selected":   kindInput,
+	"scope.configured": kindInput,
+
+	"movers":   kindRepoRows,
+	"repos":    kindRepoRows,
+	"problems": kindRepoRows,
+}
+
 // wireCensus is what walking the rendered JSON learned.
 type wireCensus struct {
+	// fields is the classification table this walk is judged against. It is a
+	// field rather than the package-level map because there are two regions to
+	// guard with one walk: the repo rows, and the envelope around them.
+	fields map[string]fieldKind
 	// paths is every key path that reached the wire, across every degraded
 	// state, so a classification that no longer matches anything can be spotted.
 	paths map[string]bool
@@ -437,8 +498,9 @@ type wireCensus struct {
 	problems []string
 }
 
-func newWireCensus() *wireCensus {
+func newWireCensus(fields map[string]fieldKind) *wireCensus {
 	return &wireCensus{
+		fields: fields,
 		paths:  map[string]bool{},
 		nulled: map[string]bool{},
 		filled: map[string]bool{},
@@ -462,9 +524,9 @@ func (c *wireCensus) walk(path string, v any, inGroup bool) {
 				childPath = path + "." + key
 			}
 			c.paths[childPath] = true
-			kind, ok := repoWireFields[childPath]
+			kind, ok := c.fields[childPath]
 			if !ok {
-				c.problem("%q reaches the wire and nothing in repoWireFields says what it is. Add it: is it a number, and if so which nullable group is it inside?", childPath)
+				c.problem("%q reaches the wire and nothing classifies it. Add it: is it a number, and if so which nullable group is it inside?", childPath)
 				continue
 			}
 			switch kind {
@@ -490,6 +552,26 @@ func (c *wireCensus) walk(path string, v any, inGroup bool) {
 				case float64, nil:
 				default:
 					c.problem("%q is classified a measurement but rendered as %T (%v).", childPath, child, child)
+				}
+			case kindInput:
+				// The one kind allowed outside a group, so it gets the mirror of
+				// the measurement check: inside a group it would be indistinguishable
+				// from a measurement to anyone reading the JSON, and the null that
+				// group renders would then look like it governed this too.
+				if inGroup {
+					c.problem("%q is classified an input but sits inside a nullable group. An input has no unmeasured state, so a null group around it says something untrue about it. Move it out, or it is a measurement and should say so.", childPath)
+				}
+				switch child.(type) {
+				case float64, string:
+				default:
+					c.problem("%q is classified an input but rendered as %T (%v). An input is a number or a string the caller supplied, and never absent.", childPath, child, child)
+				}
+			case kindRepoRows:
+				// Deliberately not walked. See kindRepoRows.
+				switch child.(type) {
+				case []any, nil:
+				default:
+					c.problem("%q is classified a list of repo rows but rendered as %T. It is a list, or null when the section was not asked for, and nothing else.", childPath, child)
 				}
 			case kindContext:
 				c.walk(childPath, child, inGroup)
@@ -538,7 +620,7 @@ func TestEveryNumberIsInsideANullableGroup(t *testing.T) {
 	// failed row carries it, and because no single row shows a group both null
 	// and filled. A census taken from one healthy row would declare a real key
 	// rot and would never see a null at all.
-	census := newWireCensus()
+	census := newWireCensus(repoWireFields)
 	for name, row := range jsonRepoRows(t, delta.Compute(inputs, options(), fixedNow())) {
 		if len(row) == 0 {
 			t.Fatalf("%s rendered an empty json object", name)
@@ -592,5 +674,81 @@ func TestEveryNumberIsInsideANullableGroup(t *testing.T) {
 	}
 	if got := strings.Join(sortedNames(measurements), ","); got != strings.Join(want, ",") {
 		t.Errorf("measurement paths: got %v, want %v. A number moved buckets, which is a decision worth making on purpose rather than to quiet a test.", sortedNames(measurements), want)
+	}
+}
+
+// TestEveryEnvelopeFieldIsDeclared is the test above's blind spot, closed.
+//
+// That one is seeded from jsonRepoRows, which keeps doc["repos"] and discards
+// everything around it, so nothing has ever checked the object the rows sit in. A
+// number added there would have shipped with no test pressure whatever.
+//
+// It runs under every section and under both narrowings, because scope is the one
+// envelope field whose value changes with either. A census that only ever walked
+// an unnarrowed --section all render would pass while a narrowed --section movers
+// call published something else entirely.
+func TestEveryEnvelopeFieldIsDeclared(t *testing.T) {
+	rows := degradedRows()
+	inputs := make([]delta.Input, 0, len(rows))
+	for _, row := range rows {
+		inputs = append(inputs, row.in)
+	}
+	rep := delta.Compute(inputs, options(), fixedNow())
+
+	scopes := map[string]report.Scope{
+		"unnarrowed": {Configured: len(rep.Repos)},
+		"narrowed":   {Repo: repoHealthy, Configured: len(rep.Repos) + 2},
+	}
+
+	census := newWireCensus(envelopeWireFields)
+	for _, sec := range report.Sections() {
+		for name, scope := range scopes {
+			var doc map[string]any
+			raw := mustJSONScoped(t, rep, report.Section(sec), scope)
+			if err := json.Unmarshal([]byte(raw), &doc); err != nil {
+				t.Fatalf("--section %s, %s: decoding the rendered json: %v", sec, name, err)
+			}
+			census.walk("", doc, false)
+		}
+	}
+
+	for _, problem := range census.problems {
+		t.Error(problem)
+	}
+
+	for path := range envelopeWireFields {
+		if !census.paths[path] {
+			t.Errorf("envelopeWireFields classifies %q but no render carries it, so the classification is rot.", path)
+		}
+	}
+
+	// Pin the input set the same way the measurement set is pinned. Reclassifying
+	// a derived number as an input is how this guard would be quietly relaxed, and
+	// it is the only reclassification that lets a number out of a nullable group.
+	var inputs2 []string
+	for path, kind := range envelopeWireFields {
+		if kind == kindInput {
+			inputs2 = append(inputs2, path)
+		}
+	}
+	want := []string{"scope.configured", "scope.selected", "window_days"}
+	if got := strings.Join(sortedNames(inputs2), ","); got != strings.Join(want, ",") {
+		t.Errorf("input paths: got %v, want %v. A number became an input, which means it left the only rule that keeps an unmeasured figure off the wire. That is a decision to make on purpose.", sortedNames(inputs2), want)
+	}
+}
+
+// TestNoRepoFieldEscapesThroughKindInput keeps the envelope's escape hatch out of
+// the region it would actually hurt.
+//
+// kindInput exists so window_days and the scope counts can sit outside a nullable
+// group, which is honest for a figure the caller supplied. Applied to a repo row
+// it would be a license to publish a measurement ungrouped, which is the entire
+// bug this package is built against. One line, so that stays impossible rather
+// than merely unlikely.
+func TestNoRepoFieldEscapesThroughKindInput(t *testing.T) {
+	for path, kind := range repoWireFields {
+		if kind == kindInput {
+			t.Errorf("%q is a repo field classified as an input. A repo row carries what a collection found, and everything a collection finds can fail to be found, so it belongs inside a nullable group.", path)
+		}
 	}
 }

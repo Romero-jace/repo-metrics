@@ -46,7 +46,31 @@ type PackageTests struct {
 	Duration time.Duration
 	// NoTestFiles reports a package the toolchain skipped for having no test
 	// files, as opposed to one whose tests all skipped themselves.
+	//
+	// Only set when the toolchain printed the marker, which it does NOT do
+	// under -coverpkg. See HasResult.
 	NoTestFiles bool
+	// HasResult reports whether the package produced a package-level verdict.
+	//
+	// It exists because -coverpkg=./... changes what an untested package looks
+	// like. Without it, such a package is skipped and marked "[no test files]".
+	// With it, the toolchain builds an instrumented test binary for every
+	// package in the pattern, so the same package reports a plain "pass" and
+	// the marker never appears. Since -coverpkg is the recommended default
+	// here (it is what keeps untested packages in the coverage denominator),
+	// the marker alone would report zero untested packages on almost every
+	// real run.
+	HasResult bool
+}
+
+// Untested reports whether this package carries no tests at all.
+//
+// Two signals, because the toolchain's answer depends on flags nobody should
+// have to think about: the explicit marker, or a package that returned a
+// verdict without a single test result in it.
+func (p PackageTests) Untested() bool {
+	return p.NoTestFiles ||
+		(p.HasResult && p.Passed+p.Failed+p.Skipped+p.Subtests == 0)
 }
 
 // Totals sums the per-package numbers.
@@ -68,7 +92,7 @@ func (s *TestSummary) Totals() (tests, failed, skipped int, elapsed time.Duratio
 func (s *TestSummary) PackagesWithoutTests() int {
 	var n int
 	for _, p := range s.Packages {
-		if p.NoTestFiles {
+		if p.Untested() {
 			n++
 		}
 	}
@@ -154,6 +178,7 @@ func ParseTestJSON(r io.Reader) (*TestSummary, error) {
 			}
 		case isResult(ev.Action):
 			// Package-level result. Elapsed is the package's wall time.
+			p.HasResult = true
 			p.Duration = time.Duration(ev.Elapsed * float64(time.Second))
 		}
 	}

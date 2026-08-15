@@ -2,7 +2,8 @@
 //
 // It is deliberately plain database/sql with hand-written queries. There is no
 // ORM and no migration framework: the whole schema is one embedded, idempotent
-// .sql file applied on every Open.
+// .sql file applied on every Open, versioned by PRAGMA user_version. See
+// schema.go for the version guard.
 package store
 
 import (
@@ -37,7 +38,9 @@ type Store struct {
 	db *sql.DB
 }
 
-// Open opens (creating if needed) the database at path and applies the schema.
+// Open opens (creating if needed) the database at path and brings its schema up
+// to date. It fails with ErrSchemaTooNew rather than opening a file written by a
+// newer repo-metrics.
 func Open(path string) (*Store, error) {
 	if path == "" {
 		return nil, errors.New("store: empty database path")
@@ -62,9 +65,9 @@ func Open(path string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("store: setting pragmas: %w", err)
 	}
-	if _, err := db.Exec(migrationSQL); err != nil {
+	if err := applySchema(context.Background(), db, path); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("store: applying schema: %w", err)
+		return nil, err
 	}
 
 	return &Store{db: db}, nil

@@ -139,6 +139,58 @@ repos:
 	}
 }
 
+// env exists so a repo needing GOWORK=off does not have to smuggle it into the
+// argv as `env GOWORK=off go test ...`. Values expand like the other
+// machine-specific fields; keys do not, since letting the environment decide
+// which variable gets set is a different and much stranger feature.
+func TestLoadParsesEnvMap(t *testing.T) {
+	t.Setenv("RM_TEST_FLAGS", "-mod=mod")
+
+	path := write(t, `
+repos:
+  - name: svc
+    path: $REPO
+    coverprofile: coverage.out
+    command: ["go", "test", "./..."]
+    env:
+      GOWORK: "off"
+      GOFLAGS: ${RM_TEST_FLAGS}
+`)
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	env := cfg.Repos[0].Env
+	if got := env["GOWORK"]; got != "off" {
+		t.Errorf("env GOWORK: got %q, want %q", got, "off")
+	}
+	if got := env["GOFLAGS"]; got != "-mod=mod" {
+		t.Errorf("env GOFLAGS not expanded: got %q, want %q", got, "-mod=mod")
+	}
+	if len(env) != 2 {
+		t.Errorf("env has %d entries, want 2: %v", len(env), env)
+	}
+}
+
+// A repo without an env block must not come back with an empty map that then
+// has to be distinguished from a nil one everywhere downstream.
+func TestLoadLeavesEnvNilWhenAbsent(t *testing.T) {
+	cfg, err := config.Load(write(t, `
+repos:
+  - name: svc
+    path: $REPO
+    coverprofile: coverage.out
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Repos[0].Env != nil {
+		t.Errorf("Env: got %v, want nil when the file says nothing", cfg.Repos[0].Env)
+	}
+}
+
 func TestLoadRejectsBadConfigs(t *testing.T) {
 	cases := []struct {
 		name string
@@ -192,6 +244,36 @@ repos:
   - {name: svc, path: $REPO, coverprofile: c.out, timeout: -5s}
 `,
 			want: "timeout",
+		},
+		{
+			// An empty key becomes "=VALUE" in the child's environment, which
+			// is not a variable and not an error anyone would ever see.
+			name: "empty env key",
+			body: `
+repos:
+  - name: svc
+    path: $REPO
+    coverprofile: c.out
+    command: ["go", "test"]
+    env:
+      "": off
+`,
+			want: "empty key",
+		},
+		{
+			// "A=B": "c" would join to "A=B=c" and set A to "B=c", silently
+			// setting a different variable than the one written in the file.
+			name: "env key containing an equals sign",
+			body: `
+repos:
+  - name: svc
+    path: $REPO
+    coverprofile: c.out
+    command: ["go", "test"]
+    env:
+      "GOWORK=off": "1"
+`,
+			want: "cannot contain",
 		},
 		{
 			name: "unparseable duration",

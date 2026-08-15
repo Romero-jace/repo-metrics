@@ -40,12 +40,16 @@ with every package tested, and subtracting a healthy baseline from those zeros
 would post a cliff this week and a recovery next week, neither of which happened.
 A repo that has never been collected at all gets the same row for the same
 reason: its zeros were never measured either.
+A third case comes back status ok and still measured nothing: a coverage profile
+carrying only its header instruments no packages, so the repo's total is zero
+statements and its percentage is zero for want of a denominator. That row says
+not measured rather than 0.0% for the same reason as the other two.
 Partial snapshots are different: they carry real numbers and keep showing them. */}}
 {{- range .Repos }}
 {{- if or (eq .Status "failed") (not .HasSnapshot) }}
 | {{ .Name }} | not collected | not collected | not collected | not collected | not collected | {{ if .CollectedAt }}{{ .CollectedAt }}{{ else }}never{{ end }} |
 {{- else }}
-| {{ .Name }} | {{ pct .CoveragePct }} | {{ if .HasBaseline }}{{ points .CoverageDeltaPoints }}{{ if .EnvWarned }}, toolchain changed{{ end }}{{ else }}no baseline yet{{ end }} | {{ if .TestsMeasured }}{{ .Tests }}{{ else }}not measured{{ end }} | {{ if not .TestsMeasured }}not measured{{ else if .TestsDelta }}{{ signed .TestsDelta }}{{ else }}no baseline yet{{ end }} | {{ if .TestsMeasured }}{{ .PackagesWithoutTests }}{{ else }}not measured{{ end }} | {{ if .CollectedAt }}{{ .CollectedAt }}{{ else }}never{{ end }} |
+| {{ .Name }} | {{ if .CoverageMeasured }}{{ pct .CoveragePct }}{{ else }}not measured{{ end }} | {{ if not .CoverageMeasured }}not measured{{ else if .HasBaseline }}{{ points .CoverageDeltaPoints }}{{ if .EnvWarned }}, toolchain changed{{ end }}{{ else }}no baseline yet{{ end }} | {{ if .TestsMeasured }}{{ .Tests }}{{ else }}not measured{{ end }} | {{ if not .TestsMeasured }}not measured{{ else if .TestsDelta }}{{ signed .TestsDelta }}{{ else }}no baseline yet{{ end }} | {{ if .TestsMeasured }}{{ .PackagesWithoutTests }}{{ else }}not measured{{ end }} | {{ if .CollectedAt }}{{ .CollectedAt }}{{ else }}never{{ end }} |
 {{- end }}
 {{- end }}
 

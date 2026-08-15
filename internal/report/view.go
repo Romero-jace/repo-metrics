@@ -49,6 +49,17 @@ type RepoView struct {
 	// nothing is there. Rendering that as "tests 0" tells a reader with seventy
 	// test files something flatly false, so the template says so instead.
 	TestsMeasured bool `json:"tests_measured"`
+	// CoverageMeasured is false when the snapshot stored no coverage metrics at
+	// all, which is what a coverage profile carrying only its "mode: set" header
+	// produces. Nothing downgrades the status in that case, so the run is stored
+	// ok and CoveragePct is 0 because the total is 0, not because the code is
+	// uncovered. Over a healthy baseline that repo would otherwise lead the
+	// report as the week's biggest drop.
+	//
+	// It is deliberately not folded into HasSnapshot. A snapshot existing and a
+	// snapshot having measured coverage are different questions, and answering
+	// the second with the first would bury this gap instead of naming it.
+	CoverageMeasured bool `json:"coverage_measured"`
 	// HasSnapshot is false when this repo has never been collected. Every count
 	// on such a repo is a Go zero value rather than a measurement, so a consumer
 	// has to be able to tell before it charts any of them.
@@ -111,8 +122,11 @@ func Build(rep delta.Report) View {
 		// from the size of its move, and a failed run's "move" is its baseline
 		// measured against zero. Left in, the report leads with the biggest
 		// drop of the week, which is really a crashed test command. A repo with
-		// no snapshot at all is the same artifact one step further along.
-		if failed(r.Head) || neverCollected(r.Head) {
+		// no snapshot at all is the same artifact one step further along. A run
+		// that stored no coverage metrics is the third door into the same room:
+		// it comes back status ok, so neither test above catches it, and its
+		// "move" is still a healthy baseline measured against zero.
+		if failed(r.Head) || neverCollected(r.Head) || !r.HasCoverageData {
 			continue
 		}
 		v.Movers = append(v.Movers, buildRepo(r))
@@ -171,11 +185,21 @@ func buildRepo(r delta.RepoDelta) RepoView {
 		return out
 	}
 	out.TestsMeasured = r.HasTestData
-	out.AddedPackages = r.Added
-	out.RemovedPackages = r.Removed
+	// Set after the two early returns above, so a failed or never collected run
+	// reports false without either branch having to remember to say so.
+	out.CoverageMeasured = r.HasCoverageData
+	// Package churn is a comparison too. A head that measured no coverage makes
+	// every baseline package look deleted, so the report would list a repo's
+	// whole tree as gone on the strength of an empty profile.
+	if r.CoverageChangeMeaningful() || !r.HasBaseline {
+		out.AddedPackages = r.Added
+		out.RemovedPackages = r.Removed
+	}
 
-	// Only publish deltas when there is something to compare against.
-	if r.HasBaseline {
+	// A baseline existing is not enough for a coverage delta: both sides have
+	// to have measured. Otherwise an empty profile subtracts its zero from a
+	// real baseline and posts the entire baseline as this week's drop.
+	if r.CoverageChangeMeaningful() {
 		coverageDelta := r.CoverageChange()
 		out.CoverageDeltaPoints = &coverageDelta
 	}
@@ -185,6 +209,13 @@ func buildRepo(r delta.RepoDelta) RepoView {
 	if r.TestChangeMeaningful() {
 		testsDelta := r.TestChange()
 		out.TestsDelta = &testsDelta
+	}
+
+	// Culprits explain a coverage move. With nothing measured on one side there
+	// is no move to explain, only an artifact, and naming a package as its
+	// cause is worse than saying nothing.
+	if !r.CoverageChangeMeaningful() {
+		return out
 	}
 
 	for _, c := range r.Culprits {

@@ -317,6 +317,116 @@ func TestNonGitDirectoryStillCollects(t *testing.T) {
 	if res.Snapshot.GitSHA != "" {
 		t.Errorf("GitSHA: got %q, want empty outside a checkout", res.Snapshot.GitSHA)
 	}
+	// The other two fields are stored on every snapshot too, so leaving them
+	// unasserted is how a fabricated branch name or a stuck dirty flag would
+	// get in without anything turning red.
+	if res.Snapshot.GitBranch != "" {
+		t.Errorf("GitBranch: got %q, want empty outside a checkout", res.Snapshot.GitBranch)
+	}
+	if res.Snapshot.GitDirty {
+		t.Error("GitDirty: got true outside a checkout, where there is no tree to be dirty")
+	}
+	if !strings.Contains(diagText(res), "git metadata unavailable") {
+		t.Errorf("the missing metadata was not disclosed:\n%s", diagText(res))
+	}
+}
+
+// The env field exists so a repo needing GOWORK=off does not have to smuggle it
+// into the argv as `env GOWORK=off go test ...`. What matters is that the value
+// reaches the subprocess, so the command here refuses to produce a profile
+// without it and writes what it actually saw to disk.
+func TestConfiguredEnvReachesTheCommand(t *testing.T) {
+	dir := repoDir(t)
+	src := writeProfile(t, dir, "src.out", 0)
+	dst := filepath.Join(dir, "coverage.out")
+	seen := filepath.Join(dir, "seen.txt")
+
+	script := "printf '%s' \"$RM_TEST_ENV\" > " + seen +
+		" && test -n \"$RM_TEST_ENV\" && cp " + src + " " + dst
+
+	t.Run("with the variable set", func(t *testing.T) {
+		r := repo(dir, "sh", "-c", script)
+		r.Env = map[string]string{"RM_TEST_ENV": "gowork-off"}
+
+		res := collectOnce(t, r)
+
+		if res.Snapshot.Status != store.StatusOK {
+			t.Fatalf("Status: got %q, want ok. Diagnostics:\n%s", res.Snapshot.Status, diagText(res))
+		}
+		got, err := os.ReadFile(seen) //nolint:gosec // path is our own temp file
+		if err != nil {
+			t.Fatalf("reading what the subprocess saw: %v", err)
+		}
+		if string(got) != "gowork-off" {
+			t.Errorf("subprocess saw RM_TEST_ENV=%q, want %q", got, "gowork-off")
+		}
+	})
+
+	// The anti-vacuity control. Without this the case above would still pass if
+	// the variable were exported by the test process itself rather than
+	// threaded through the config.
+	t.Run("without it the same command fails", func(t *testing.T) {
+		if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
+			t.Fatalf("clearing the profile: %v", err)
+		}
+		res := collectOnce(t, repo(dir, "sh", "-c", script))
+
+		if res.Snapshot.Status != store.StatusFailed {
+			t.Errorf("Status: got %q, want failed. Diagnostics:\n%s", res.Snapshot.Status, diagText(res))
+		}
+	})
+}
+
+// Several variables at once, because one is the case where a missing sort
+// cannot show. The ordering itself is asserted in envpairs_internal_test.go:
+// a shell rebuilds its exported environment in hash order, so `env` inside
+// `sh -c` cannot observe the order the argv env was handed over in.
+func TestSeveralConfiguredVarsAllArrive(t *testing.T) {
+	dir := repoDir(t)
+	src := writeProfile(t, dir, "src.out", 0)
+	dst := filepath.Join(dir, "coverage.out")
+	dump := filepath.Join(dir, "vars.txt")
+
+	r := repo(dir, "sh", "-c",
+		"printf '%s,%s,%s' \"$RM_MANY_A\" \"$RM_MANY_B\" \"$RM_MANY_C\" > "+dump+
+			" && cp "+src+" "+dst)
+	r.Env = map[string]string{"RM_MANY_C": "three", "RM_MANY_A": "one", "RM_MANY_B": "two"}
+
+	res := collectOnce(t, r)
+	if res.Snapshot.Status != store.StatusOK {
+		t.Fatalf("Status: got %q, want ok. Diagnostics:\n%s", res.Snapshot.Status, diagText(res))
+	}
+
+	got, err := os.ReadFile(dump) //nolint:gosec // path is our own temp file
+	if err != nil {
+		t.Fatalf("reading what the subprocess saw: %v", err)
+	}
+	if string(got) != "one,two,three" {
+		t.Errorf("subprocess saw %q, want %q", got, "one,two,three")
+	}
+}
+
+// No env configured must not mean an empty non-nil slice or a replaced
+// environment: the subprocess still needs PATH to find anything at all.
+func TestNoConfiguredEnvLeavesTheEnvironmentAlone(t *testing.T) {
+	dir := repoDir(t)
+	src := writeProfile(t, dir, "src.out", 0)
+	dst := filepath.Join(dir, "coverage.out")
+	dump := filepath.Join(dir, "path.txt")
+
+	res := collectOnce(t, repo(dir, "sh", "-c",
+		"printf '%s' \"$PATH\" > "+dump+" && cp "+src+" "+dst))
+
+	if res.Snapshot.Status != store.StatusOK {
+		t.Fatalf("Status: got %q, want ok. Diagnostics:\n%s", res.Snapshot.Status, diagText(res))
+	}
+	got, err := os.ReadFile(dump) //nolint:gosec // path is our own temp file
+	if err != nil {
+		t.Fatalf("reading PATH as the subprocess saw it: %v", err)
+	}
+	if len(got) == 0 {
+		t.Error("the subprocess inherited an empty PATH")
+	}
 }
 
 func writeFile(t *testing.T, dir, name, body string) string {

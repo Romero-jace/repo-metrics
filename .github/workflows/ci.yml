@@ -93,6 +93,19 @@ jobs:
         # same do-nothing step this one replaced.
         run: go test -count=1 ./internal/collect/golang/ -run 'TestAgainstGoToolCover|TestTestJSONAgainstRealStream' -v
 
+      - name: Coverage
+        # Reported, never enforced. There is deliberately no floor and no
+        # ratchet: a percentage gate punishes an honest deletion of covered code
+        # and rewards writing low-value tests to clear a bar, which is the exact
+        # confusion this tool argues against everywhere else. The number is for
+        # a human to look at.
+        #
+        # -coverpkg=./... is what keeps untested packages in the denominator, so
+        # the figure counts code nobody tested rather than quietly excluding it.
+        run: |
+          go test ./... -coverpkg=./... -coverprofile=${{ runner.temp }}/all.out
+          go tool cover -func=${{ runner.temp }}/all.out | tail -1
+
       - name: Lint
         uses: golangci/golangci-lint-action@v8
         with:

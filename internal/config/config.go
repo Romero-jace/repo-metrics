@@ -15,7 +15,10 @@ package config
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"os"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/goccy/go-yaml"
@@ -65,7 +68,13 @@ type Repo struct {
 	// through a shell, so quoting and word splitting cannot surprise anyone.
 	Command      []string `yaml:"command"`
 	StdoutFormat string   `yaml:"stdout_format"`
-	Timeout      Duration `yaml:"timeout"`
+	// Env is added to the command's environment as KEY=VALUE. It exists
+	// because there is no shell to put a `VAR=x` prefix in front of: without
+	// it, a repo needing GOWORK=off has to smuggle it into the argv as
+	// `env GOWORK=off go test ...`, which works but reads like a workaround
+	// because it is one.
+	Env     map[string]string `yaml:"env"`
+	Timeout Duration          `yaml:"timeout"`
 	// MaxAge applies only in ingest mode (no Command). An artifact older than
 	// this is reported as stale rather than presented as a current number.
 	MaxAge Duration `yaml:"max_age"`
@@ -134,6 +143,12 @@ func (c *Config) expandEnv() {
 		r.Coverprofile = os.ExpandEnv(r.Coverprofile)
 		for j := range r.Command {
 			r.Command[j] = os.ExpandEnv(r.Command[j])
+		}
+		// Values only. A ${VAR} in a key would let the environment decide
+		// which variable gets set, and an unset one would produce the empty
+		// key that validate rejects.
+		for k, v := range r.Env {
+			r.Env[k] = os.ExpandEnv(v)
 		}
 	}
 }
@@ -206,6 +221,21 @@ func (c *Config) validate() error {
 		if r.StdoutFormat != "" && len(r.Command) == 0 {
 			problems = append(problems, fmt.Errorf(
 				"%s: stdout_format needs a command to capture stdout from", label))
+		}
+
+		// Sorted so a config with several bad env keys reports them in the
+		// same order every run. Map order would make the message shuffle
+		// between runs and the failure harder to talk about.
+		for _, k := range slices.Sorted(maps.Keys(r.Env)) {
+			switch {
+			case k == "":
+				problems = append(problems, fmt.Errorf("%s: env has an empty key", label))
+			case strings.Contains(k, "="):
+				// The runner joins these as KEY=VALUE, so a key carrying its
+				// own "=" would silently set a different variable than the
+				// one written in the file.
+				problems = append(problems, fmt.Errorf("%s: env key %q cannot contain \"=\"", label, k))
+			}
 		}
 
 		if r.Timeout <= 0 {

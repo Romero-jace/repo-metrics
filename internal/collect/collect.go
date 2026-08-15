@@ -11,9 +11,11 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"time"
 
@@ -46,7 +48,11 @@ func Collect(ctx context.Context, repo config.Repo, collector Collector, now tim
 	sha, branch, dirty, gitDiags := gitMetadata(ctx, repo.Path)
 	res.Snapshot.GitSHA, res.Snapshot.GitBranch, res.Snapshot.GitDirty = sha, branch, dirty
 	res.Diagnostics = append(res.Diagnostics, gitDiags...)
-	res.Snapshot.Env = envFingerprint(ctx, repo.Path)
+	// The repo's configured environment has to reach this too, not just the
+	// command. Fingerprinting the ambient environment while measuring under a
+	// different one records the wrong side of the very boundary the
+	// fingerprint exists to mark.
+	res.Snapshot.Env = envFingerprint(ctx, repo.Path, envPairs(repo.Env))
 
 	profilePath := repo.Coverprofile
 	if !filepath.IsAbs(profilePath) {
@@ -128,6 +134,7 @@ func execute(ctx context.Context, repo config.Repo, stdoutPath string) (*run.Res
 	opts := run.Options{
 		Dir:     repo.Path,
 		Args:    repo.Command,
+		Env:     envPairs(repo.Env),
 		Timeout: time.Duration(repo.Timeout),
 	}
 	if stdout != nil {
@@ -143,6 +150,26 @@ func execute(ctx context.Context, repo config.Repo, stdoutPath string) (*run.Res
 			"command exceeded its %s timeout and was killed", time.Duration(repo.Timeout))), false
 	}
 	return runRes, diags, true
+}
+
+// envPairs renders the configured environment as the KEY=VALUE slice
+// run.Options wants, appended to the process environment rather than replacing
+// it.
+//
+// The keys are sorted because Go randomizes map iteration order. Left unsorted,
+// two identical configs would hand the subprocess its variables in a different
+// order on every run, so anything sensitive to that order (a duplicate key
+// resolving to whichever came last, a command that echoes its environment)
+// would fail intermittently and not reproduce.
+func envPairs(env map[string]string) []string {
+	if len(env) == 0 {
+		return nil
+	}
+	pairs := make([]string, 0, len(env))
+	for _, k := range slices.Sorted(maps.Keys(env)) {
+		pairs = append(pairs, k+"="+env[k])
+	}
+	return pairs
 }
 
 // stdoutSink returns a temp file path for capturing stdout, or an empty path if
@@ -219,26 +246,46 @@ func gitOutput(ctx context.Context, dir string, args ...string) (string, error) 
 // against the versions pinned in go.mod. Same command, same commit, different
 // source, different coverage. Recording the fingerprint is what lets the report
 // refuse to diff across that boundary silently.
-func envFingerprint(ctx context.Context, dir string) string {
+func envFingerprint(ctx context.Context, dir string, env []string) string {
 	var buf bytes.Buffer
 	res, err := run.Command(ctx, run.Options{
 		Dir:     dir,
 		Args:    []string{"go", "env", "GOVERSION", "GOWORK"},
+		Env:     env,
 		Timeout: gitTimeout,
 		Stdout:  &buf,
 	})
 	if err != nil || res.ExitCode != 0 {
 		return "go=unknown"
 	}
+	return fingerprintFrom(buf.String())
+}
 
-	lines := strings.Split(strings.TrimRight(buf.String(), "\n"), "\n")
+// fingerprintFrom parses `go env GOVERSION GOWORK` output.
+//
+// Split out from the subprocess so the parsing can be tested directly, which
+// matters because the parsing is where this went wrong: `go env GOWORK` prints
+// one of three things and only one of them is a path. The literal "off" when
+// the workspace is disabled, the go.work path when one is active, and the empty
+// string when there is none. Reading "any non-empty value means a workspace is
+// on" reported GOWORK=off as gowork=on, the exact inverse of the truth for the
+// one case this fingerprint exists to detect. Measured against Go 1.26.
+func fingerprintFrom(out string) string {
+	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
+
 	version := runtime.Version()
-	if len(lines) > 0 && lines[0] != "" {
-		version = lines[0]
+	if len(lines) > 0 && strings.TrimSpace(lines[0]) != "" {
+		version = strings.TrimSpace(lines[0])
 	}
+
 	workspace := "off"
-	if len(lines) > 1 && strings.TrimSpace(lines[1]) != "" {
-		workspace = "on"
+	if len(lines) > 1 {
+		switch strings.TrimSpace(lines[1]) {
+		case "", "off":
+			workspace = "off"
+		default:
+			workspace = "on"
+		}
 	}
 	return fmt.Sprintf("go=%s;gowork=%s", version, workspace)
 }

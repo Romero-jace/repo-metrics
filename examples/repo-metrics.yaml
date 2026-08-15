@@ -73,6 +73,24 @@ repos:
     # to capture.
     stdout_format: go-test-json
 
+    # Extra environment variables for the command, added to the environment
+    # repo-metrics itself is running with rather than replacing it. Leave it out
+    # and the command just inherits what repo-metrics has.
+    #
+    # This is here because command is an argv slice with no shell in front of
+    # it, so there is nowhere to write a `VAR=x` prefix. The worked example is
+    # the real one: a module sitting under a go.work that does not list it fails
+    # every go command outright, and the fix is one variable. Without this field
+    # you would have to write `env GOWORK=off go test ...` in the argv, which
+    # works and is what this repo did before the field existed.
+    #
+    # Keys are used exactly as written: no ${VAR} expansion, no empty key, and
+    # no "=" inside a key, since the pair is joined as KEY=VALUE and a key
+    # carrying its own "=" would set a different variable than the one you
+    # wrote. Values do expand ${VAR} from the environment.
+    env:
+      GOWORK: "off"
+
     # Wall-clock budget for the command. The run is killed when it expires and
     # the snapshot is recorded as failed rather than silently skipped.
     # Default: 10m
@@ -93,14 +111,14 @@ repos:
     # No command here, so no stdout_format and no timeout. Coverage only, no test
     # counts, because nothing produced a -json stream for this repo.
 
-  # ${VAR} and $VAR are expanded from the environment in four places and only
-  # four: the top-level database, and each repo's path, coverprofile, and
-  # command entries. That is enough to keep the machine-specific parts of a
-  # checkout layout out of the file.
+  # ${VAR} and $VAR are expanded from the environment in five places and only
+  # five: the top-level database, and each repo's path, coverprofile, command
+  # entries, and env VALUES. That is enough to keep the machine-specific parts
+  # of a checkout layout out of the file.
   #
-  # Nothing else is expanded. A ${VAR} in name is kept as literal text, and one
-  # in stdout_format, timeout, or max_age makes the config fail to load, since
-  # those are parsed and validated exactly as written.
+  # Nothing else is expanded. A ${VAR} in name or in an env KEY is kept as
+  # literal text, and one in stdout_format, timeout, or max_age makes the config
+  # fail to load, since those are parsed and validated exactly as written.
   # - name: from-env
   #   path: ${CHECKOUT_ROOT}/another-repo
   #   coverprofile: coverage.out

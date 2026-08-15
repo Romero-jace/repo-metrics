@@ -83,6 +83,23 @@ type RepoDelta struct {
 	// something false with no hint that anything is missing.
 	HasTestData     bool
 	BaseHasTestData bool
+	// HasCoverageData is false when the snapshot stored no coverage metrics at
+	// all. That is what a coverage profile carrying only its "mode: set" header
+	// produces: it parses clean, no package is instrumented, and nothing
+	// downgrades the status, so the snapshot is stored ok. HeadCoverage is then
+	// {0, 0} and Pct() returns 0, which reads as a repo measured at zero.
+	//
+	// Presence is the signal, not value. A repo whose packages genuinely cover
+	// nothing still stored a metric per package, and calling that unmeasured
+	// would be the same mistake in the other direction.
+	//
+	// This is deliberately separate from whether a snapshot exists at all. The
+	// two answer different questions, and reusing that gate here would hide this
+	// gap behind a name that does not describe it.
+	HasCoverageData bool
+	// BaseHasCoverageData is the same question asked of the baseline, and both
+	// halves are needed before any coverage comparison means anything.
+	BaseHasCoverageData bool
 
 	// HasBaseline is false when there is no earlier snapshot to compare
 	// against. There is no synthetic delta in that case: the report says so.
@@ -112,6 +129,18 @@ func (r RepoDelta) CoverageChange() float64 {
 // Only meaningful when TestChangeMeaningful reports true: subtracting an
 // unmeasured side from a measured one manufactures the whole count as a delta.
 func (r RepoDelta) TestChange() int { return r.HeadTests - r.BaseTests }
+
+// CoverageChangeMeaningful reports whether both snapshots actually measured
+// coverage.
+//
+// A baseline existing is not enough. A head that stored no coverage subtracts
+// its zero from a real baseline and posts the whole baseline as this week's
+// drop, then blames whichever package was largest. That is the fabricated cliff
+// a failed run was already fixed for, reached instead through a profile that
+// parsed cleanly and simply had nothing in it.
+func (r RepoDelta) CoverageChangeMeaningful() bool {
+	return r.HasBaseline && r.HasCoverageData && r.BaseHasCoverageData
+}
 
 // TestChangeMeaningful reports whether both snapshots actually measured tests.
 // Without it, a repo that gained a stdout_format between runs would post its
@@ -195,6 +224,7 @@ func computeRepo(in Input, opts Options) RepoDelta {
 	d.HeadTests = sumMetric(in.HeadMetrics, collect.KeyTestCount)
 	d.PkgWithoutTests = repoLevel(in.HeadMetrics, collect.KeyPkgWithoutTest)
 	d.HasTestData = hasTestData(in.HeadMetrics)
+	d.HasCoverageData = hasCoverageData(in.HeadMetrics)
 
 	if in.Base == nil {
 		return d
@@ -205,6 +235,7 @@ func computeRepo(in Input, opts Options) RepoDelta {
 	d.BaseCoverage = sumCoverage(basePkgs)
 	d.BaseTests = sumMetric(in.BaseMetrics, collect.KeyTestCount)
 	d.BaseHasTestData = hasTestData(in.BaseMetrics)
+	d.BaseHasCoverageData = hasCoverageData(in.BaseMetrics)
 
 	if in.Head != nil && in.Head.Env != in.Base.Env {
 		d.EnvChanged = true
@@ -337,6 +368,25 @@ func sumMetric(metrics []store.Metric, key string) int {
 func hasTestData(metrics []store.Metric) bool {
 	for _, m := range metrics {
 		if m.Key == collect.KeyPkgWithoutTest && m.Scope == "" {
+			return true
+		}
+	}
+	return false
+}
+
+// hasCoverageData reports whether any coverage was stored for this snapshot.
+//
+// It mirrors hasTestData: the marker is presence of a package-scoped coverage
+// metric, and the value is deliberately ignored so that a package covering none
+// of its statements still counts as measured. A header-only coverage profile
+// stores no such metric, and that is the case this exists to tell apart from a
+// repo genuinely sitting at zero.
+func hasCoverageData(metrics []store.Metric) bool {
+	for _, m := range metrics {
+		if m.Scope == "" {
+			continue
+		}
+		if m.Key == collect.KeyCoveredStmts || m.Key == collect.KeyTotalStmts {
 			return true
 		}
 	}

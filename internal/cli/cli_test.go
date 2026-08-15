@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode"
 
 	"github.com/Romero-jace/repo-metrics/internal/cli"
 	"github.com/Romero-jace/repo-metrics/internal/collect"
@@ -92,7 +94,7 @@ func repoByName(t *testing.T, st *store.Store, name string) store.Repo {
 	return store.Repo{}
 }
 
-// rowFor returns the single output line whose first field is name.
+// rowFor returns the single output line whose first cell is name.
 //
 // Asserting with strings.Contains over the whole of stdout cannot fail when a
 // row carries another row's numbers, which is exactly the mix-up worth catching
@@ -102,18 +104,38 @@ func rowFor(t *testing.T, out, name string) string {
 	t.Helper()
 	var found string
 	for _, line := range strings.Split(out, "\n") {
-		fields := strings.Fields(line)
-		if len(fields) > 0 && fields[0] == name {
-			if found != "" {
-				t.Fatalf("more than one row for %q in:\n%s", name, out)
-			}
-			found = line
+		if firstCell(line) != name {
+			continue
 		}
+		if found != "" {
+			t.Fatalf("more than one row for %q in:\n%s", name, out)
+		}
+		found = line
 	}
 	if found == "" {
 		t.Fatalf("no row for %q in:\n%s", name, out)
 	}
 	return found
+}
+
+// firstCell returns the leading label of a table row, understanding both the
+// space-aligned tables collect and repos print and the pipe-delimited ones the
+// markdown report renders.
+//
+// Without the markdown case, an assertion about the report table would have to
+// fall back to searching the whole document, which is the exact weakness rowFor
+// exists to remove. Two notes on the fixtures this constrains: no repo may be
+// named "repo", because that is the literal first cell of the report's header
+// row, and none may be named "---", the separator.
+func firstCell(line string) string {
+	if trimmed := strings.TrimSpace(line); strings.HasPrefix(trimmed, "|") {
+		return strings.TrimSpace(strings.Split(strings.Trim(trimmed, "|"), "|")[0])
+	}
+	fields := strings.Fields(line)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
 }
 
 // wantInRow asserts every want appears on the one row belonging to name.
@@ -125,6 +147,58 @@ func wantInRow(t *testing.T, out, name string, wants ...string) {
 			t.Errorf("want %q on the %s row, got %q", want, name, row)
 		}
 	}
+}
+
+// reportRepo is the subset of a rendered JSON repo row these tests assert on.
+//
+// The report's JSON is the assertion target rather than its markdown prose
+// wherever the question is what this command put into the report, because the
+// prose is the renderer's wording and can be reworded without the numbers
+// moving.
+type reportRepo struct {
+	Name        string  `json:"name"`
+	Status      string  `json:"status"`
+	CollectedAt string  `json:"collected_at"`
+	CoveragePct float64 `json:"coverage_pct"`
+	HasSnapshot bool    `json:"has_snapshot"`
+	Error       string  `json:"error"`
+}
+
+type reportDoc struct {
+	Repos    []reportRepo `json:"repos"`
+	Movers   []reportRepo `json:"movers"`
+	Problems []reportRepo `json:"problems"`
+}
+
+func decodeReport(t *testing.T, out string) reportDoc {
+	t.Helper()
+	var doc reportDoc
+	if err := json.Unmarshal([]byte(out), &doc); err != nil {
+		t.Fatalf("unparseable report json: %v\n%s", err, out)
+	}
+	return doc
+}
+
+// jsonRepo is the JSON counterpart of rowFor: it binds every assertion to one
+// named repo instead of to the document as a whole.
+func jsonRepo(t *testing.T, rows []reportRepo, name string) reportRepo {
+	t.Helper()
+	for _, r := range rows {
+		if r.Name == name {
+			return r
+		}
+	}
+	t.Fatalf("no repo named %q in %+v", name, rows)
+	return reportRepo{}
+}
+
+func listedIn(rows []reportRepo, name string) bool {
+	for _, r := range rows {
+		if r.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // coverageTotals mirrors what the report does: sum first, divide once.
@@ -733,6 +807,315 @@ func TestReportMarksARepoWhoseEveryRunFailed(t *testing.T) {
 		if r.Name == "healthy" && r.CoveragePct != 60 {
 			t.Errorf("healthy repo = %+v, want 60 percent", r)
 		}
+	}
+}
+
+// Deliberately not covered, so nobody reopens it: the four error returns in
+// reportInputs (Repos, LatestSnapshot, LatestSnapshotAny, MetricsFor). Reaching
+// any of them needs an injected failing database driver, and the resulting test
+// would assert that fmt.Errorf wraps a string correctly rather than that the
+// command does anything useful. Same call as the store's rows.Scan branches.
+
+// A repo the database has never heard of is the most common degraded state
+// there is: someone adds a repo to the config and runs report before collect.
+// reportInputs has a branch for exactly that, and until now nothing ran it.
+//
+// Two ways to get it wrong, and the assertions here are aimed at both. Drop the
+// repo and it vanishes from the report, which is how a cron job that never ran
+// goes unnoticed for a month. Hand it a head instead and it arrives as a
+// healthy repo sitting at 0.0 percent, which is this project's recurring bug:
+// something unmeasured presented as a measurement of zero.
+func TestReportIncludesARepoTheDatabaseHasNeverHeardOf(t *testing.T) {
+	dir := t.TempDir()
+	collected := repoDir(t, dir, "collected", sampleProfile)
+	// A real profile sits in pending too. It is never read, and that is the
+	// point: what puts a repo in the report is a row in the database, not a file
+	// on disk, so the fixture must not let a disk read stand in for a collection.
+	pending := repoDir(t, dir, "pending", sampleProfile)
+	dbPath := filepath.Join(dir, "metrics.db")
+
+	cfgPath := writeConfig(t, dir, fmt.Sprintf("database: %q\nrepos:\n%s%s",
+		dbPath,
+		ingestRepoEntry("collected", collected, "coverage.out"),
+		ingestRepoEntry("pending", pending, "coverage.out")))
+
+	// --repo is load-bearing. A bare collect would collect pending as well, give
+	// it a repos row and a snapshot, and quietly move this test onto a different
+	// branch of reportInputs than the one it is named after.
+	if _, stderr, err := runCLI(t, "collect", "--config", cfgPath, "--repo", "collected"); err != nil {
+		t.Fatalf("collect: %v (stderr: %s)", err, stderr)
+	}
+
+	stdout, stderr, err := runCLI(t, "report", "--config", cfgPath, "--format", "json")
+	if err != nil {
+		t.Fatalf("report --format json: %v (stderr: %s)", err, stderr)
+	}
+	doc := decodeReport(t, stdout)
+
+	// Present at all. This is the half that fails if the branch just skips.
+	got := jsonRepo(t, doc.Repos, "pending")
+
+	// And not fabricated. Every one of these is what a head the command invented
+	// would flip.
+	if got.HasSnapshot {
+		t.Error("has_snapshot is true for a repo with no row in the database, so a consumer would chart its zeros")
+	}
+	if got.Status == string(store.StatusOK) {
+		t.Errorf("status = %q, and a repo nobody has ever collected is not ok", got.Status)
+	}
+	if got.CollectedAt != "" {
+		t.Errorf("collected_at = %q, want nothing: this repo has never been collected", got.CollectedAt)
+	}
+	if got.Error != "" {
+		t.Errorf("error = %q, but nothing ran, so nothing broke", got.Error)
+	}
+	// Labeled rather than claimed: this one cannot currently fail. delta.Compute
+	// only sets IsMover once a baseline exists, and reportInputs fetches no
+	// baseline for a repo with no head, so pending has no delta to clear a
+	// threshold with. Kept as a guard against that changing, not offered as a
+	// proven assertion.
+	if listedIn(doc.Movers, "pending") {
+		t.Error("a repo that was never collected cannot be this week's biggest move")
+	}
+
+	// Anti-vacuity control: the collected repo still carries its own real
+	// numbers, so a change that flattened every row would not pass this.
+	if healthy := jsonRepo(t, doc.Repos, "collected"); !healthy.HasSnapshot || healthy.CoveragePct != 60 {
+		t.Errorf("collected repo = %+v, want a snapshot at 60 percent", healthy)
+	}
+
+	// The markdown says the same thing, bound to its own row. A Contains over
+	// the whole document would pass while pending carried collected's coverage.
+	md, stderr, err := runCLI(t, "report", "--config", cfgPath)
+	if err != nil {
+		t.Fatalf("report: %v (stderr: %s)", err, stderr)
+	}
+	// Shape, not wording: a row for a repo where nothing was measured must carry
+	// no numeral anywhere. That one predicate covers "not collected", "not
+	// measured", and whatever prose a future degraded state gets, it survives a
+	// reword of the template, and it still fails on both of the ways to get this
+	// wrong: a fabricated 0.0% and a fabricated zero timestamp are both digits.
+	if row := rowFor(t, md, "pending"); strings.ContainsFunc(row, unicode.IsDigit) {
+		t.Errorf("the row for a repo that was never collected carries a number: %q", row)
+	}
+	// The measured row is asserted exactly, which is the anti-vacuity control:
+	// without it, a renderer that emitted prose for every repo would pass.
+	wantInRow(t, md, "collected", "60.0%")
+}
+
+// "Registered but never collected" and "ran and broke every time" both reach
+// reportInputs with LatestSnapshot returning nil, and they call for opposite
+// actions: go run collect versus go fix your build. The LatestSnapshotAny
+// fallback is what keeps them apart, by attaching the failed row as the head so
+// it carries a status, a time, and what broke.
+//
+// TestReportMarksARepoWhoseEveryRunFailed already pins what the failed row
+// itself carries. This test is only the contrast between the two, which is the
+// thing neither test can check on its own.
+func TestReportTellsNeverCollectedFromEveryRunFailed(t *testing.T) {
+	dir := t.TempDir()
+	// Ingest mode pointed at a profile that is not there, so every run fails.
+	broken := repoDir(t, dir, "broken", "")
+	registered := repoDir(t, dir, "registered", "")
+	dbPath := filepath.Join(dir, "metrics.db")
+
+	cfgPath := writeConfig(t, dir, fmt.Sprintf("database: %q\nrepos:\n%s%s",
+		dbPath,
+		ingestRepoEntry("broken", broken, "missing.out"),
+		ingestRepoEntry("registered", registered, "missing.out")))
+
+	// registered gets a repos row and nothing else, which is what a first run
+	// interrupted between the upsert and the insert leaves behind. It is seeded
+	// through the store rather than by collecting because any collect would
+	// leave a snapshot too, failed or not, and that is the other case.
+	ctx := context.Background()
+	seed := openStore(t, dbPath)
+	if _, err := seed.UpsertRepo(ctx, "registered", registered); err != nil {
+		t.Fatalf("seeding the repo row: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("closing the seed store: %v", err)
+	}
+
+	if _, _, err := runCLI(t, "collect", "--config", cfgPath, "--repo", "broken"); err == nil {
+		t.Fatal("want a non-zero status from a repo that could not be collected")
+	}
+
+	stdout, stderr, err := runCLI(t, "report", "--config", cfgPath, "--format", "json")
+	if err != nil {
+		t.Fatalf("report --format json: %v (stderr: %s)", err, stderr)
+	}
+	doc := decodeReport(t, stdout)
+	brokeRow := jsonRepo(t, doc.Repos, "broken")
+	neverRow := jsonRepo(t, doc.Repos, "registered")
+
+	// The whole point of the test: the two rows must not read the same.
+	if brokeRow.Status == neverRow.Status {
+		t.Errorf("both states render as status %q, so the report cannot tell go-fix-your-build from go-run-collect",
+			brokeRow.Status)
+	}
+	if brokeRow.HasSnapshot == neverRow.HasSnapshot {
+		t.Errorf("has_snapshot is %v for both, so a consumer cannot tell them apart either", brokeRow.HasSnapshot)
+	}
+	// The timestamp is the actionable half: it says whether the breakage is from
+	// last night or from March.
+	if brokeRow.CollectedAt == "" {
+		t.Error("want the time of the last attempt on the repo that ran and broke")
+	}
+	if neverRow.CollectedAt != "" {
+		t.Errorf("collected_at = %q on a repo that has never been collected", neverRow.CollectedAt)
+	}
+	// Neither is a measurement, so neither may lead the report on a cliff.
+	//
+	// Same caveat as the one in the test above, and worth stating twice because
+	// the fabricated cliff is the failure this project keeps rediscovering: this
+	// check cannot currently fail. Two independent things already prevent it, and
+	// neither is reachable from here. reportInputs fetches no baseline for a
+	// failed head, so there is no delta; and even with one, the renderer excludes
+	// failed and never-collected repos from Movers. That second gate lives in
+	// internal/report, which this unit does not own, so this assertion is not
+	// proven by any revert available in this package.
+	if listedIn(doc.Movers, "broken") || listedIn(doc.Movers, "registered") {
+		t.Errorf("a repo with no numbers cannot be a mover: %+v", doc.Movers)
+	}
+}
+
+// Deliberately not covered, so nobody reopens it: the render-to-file and Close
+// failure branches of writeReport. Both need a file handle that fails partway
+// through a write, which is not portably arrangeable, and the assertion would be
+// about error wrapping rather than about behavior. The failure that is worth a
+// test is the one a user actually hits, which is a path that cannot be created,
+// and it is covered below.
+func TestReportWriteDestinationsAndFormats(t *testing.T) {
+	dir := t.TempDir()
+	healthy := repoDir(t, dir, "healthy", sampleProfile)
+	dbPath := filepath.Join(dir, "metrics.db")
+	cfgPath := writeConfig(t, dir, fmt.Sprintf("database: %q\nrepos:\n%s",
+		dbPath, ingestRepoEntry("healthy", healthy, "coverage.out")))
+
+	if _, stderr, err := runCLI(t, "collect", "--config", cfgPath); err != nil {
+		t.Fatalf("collect: %v (stderr: %s)", err, stderr)
+	}
+
+	t.Run("markdown to stdout", func(t *testing.T) {
+		stdout, stderr, err := runCLI(t, "report", "--config", cfgPath)
+		if err != nil {
+			t.Fatalf("report: %v (stderr: %s)", err, stderr)
+		}
+		wantInRow(t, stdout, "healthy", "60.0%")
+		if stderr != "" {
+			t.Errorf("a clean run should say nothing on stderr, got %q", stderr)
+		}
+	})
+
+	t.Run("json to stdout", func(t *testing.T) {
+		stdout, stderr, err := runCLI(t, "report", "--config", cfgPath, "--format", "json")
+		if err != nil {
+			t.Fatalf("report --format json: %v (stderr: %s)", err, stderr)
+		}
+		if got := jsonRepo(t, decodeReport(t, stdout).Repos, "healthy"); got.CoveragePct != 60 {
+			t.Errorf("json = %+v, want healthy at 60", got)
+		}
+	})
+
+	t.Run("markdown to a file", func(t *testing.T) {
+		outPath := filepath.Join(dir, "report.md")
+		stdout, stderr, err := runCLI(t, "report", "--config", cfgPath, "--out", outPath)
+		if err != nil {
+			t.Fatalf("report --out: %v (stderr: %s)", err, stderr)
+		}
+		// stdout gets the confirmation and not the report. A --out run that also
+		// printed the report would hand a pipeline the document twice.
+		if !strings.Contains(stdout, outPath) {
+			t.Errorf("want the written path confirmed on stdout, got %q", stdout)
+		}
+		if strings.Contains(stdout, "| repo |") {
+			t.Errorf("the report went to stdout as well as to the file: %q", stdout)
+		}
+		written, err := os.ReadFile(outPath)
+		if err != nil {
+			t.Fatalf("reading the written report: %v", err)
+		}
+		wantInRow(t, string(written), "healthy", "60.0%")
+	})
+
+	t.Run("json to a file", func(t *testing.T) {
+		outPath := filepath.Join(dir, "report.json")
+		stdout, stderr, err := runCLI(t, "report", "--config", cfgPath, "--out", outPath, "--format", "json")
+		if err != nil {
+			t.Fatalf("report --out --format json: %v (stderr: %s)", err, stderr)
+		}
+		if !strings.Contains(stdout, outPath) {
+			t.Errorf("want the written path confirmed on stdout, got %q", stdout)
+		}
+		written, err := os.ReadFile(outPath)
+		if err != nil {
+			t.Fatalf("reading the written report: %v", err)
+		}
+		// The format flag has to reach the file, not just stdout. Writing
+		// markdown into a .json a pipeline is about to parse is the failure.
+		if got := jsonRepo(t, decodeReport(t, string(written)).Repos, "healthy"); got.CoveragePct != 60 {
+			t.Errorf("the written json = %+v, want healthy at 60", got)
+		}
+	})
+
+	// Both unwritable cases assert the same three things, because all three are
+	// what "exit 1" is made of: an error back to Run, an explanation on stderr,
+	// and no report on stdout pretending the run worked.
+	for name, outPath := range map[string]string{
+		"a parent directory that is not there": filepath.Join(dir, "no-such-dir", "report.md"),
+		"a path that is a directory":           repoDir(t, dir, "already-a-directory", ""),
+	} {
+		t.Run(name, func(t *testing.T) {
+			stdout, stderr, err := runCLI(t, "report", "--config", cfgPath, "--out", outPath)
+			if err == nil {
+				t.Fatal("want an error so the process exits 1 rather than claiming it wrote a report")
+			}
+			if !strings.Contains(stderr, outPath) {
+				t.Errorf("want the path that could not be written named on stderr, got %q", stderr)
+			}
+			if stdout != "" {
+				t.Errorf("want nothing on stdout when nothing was written, got %q", stdout)
+			}
+		})
+	}
+}
+
+// closedWriter is stdout after the thing on the other end of the pipe has gone,
+// which is what `repo-metrics report | head` looks like.
+type closedWriter struct{}
+
+func (closedWriter) Write([]byte) (int, error) { return 0, io.ErrClosedPipe }
+
+// A report that could not be written must not exit 0. Rendering to stdout is
+// the default path, so a swallowed error here means a cron job that pipes the
+// report somewhere reports success on the weeks it delivered nothing.
+func TestReportSurfacesAFailureToWriteToStdout(t *testing.T) {
+	dir := t.TempDir()
+	healthy := repoDir(t, dir, "healthy", sampleProfile)
+	dbPath := filepath.Join(dir, "metrics.db")
+	cfgPath := writeConfig(t, dir, fmt.Sprintf("database: %q\nrepos:\n%s",
+		dbPath, ingestRepoEntry("healthy", healthy, "coverage.out")))
+
+	if _, stderr, err := runCLI(t, "collect", "--config", cfgPath); err != nil {
+		t.Fatalf("collect: %v (stderr: %s)", err, stderr)
+	}
+
+	for _, format := range []string{"markdown", "json"} {
+		t.Run(format, func(t *testing.T) {
+			var stderr bytes.Buffer
+			// runCLI is not usable here: it owns both buffers, and the writer is
+			// the fixture.
+			err := cli.Run([]string{"report", "--config", cfgPath, "--format", format}, closedWriter{}, &stderr)
+			if err == nil {
+				t.Fatal("want an error so the process exits 1 rather than claiming it wrote a report")
+			}
+			// Asserted as non-empty rather than matched: the wording belongs to
+			// the renderer and pinning it here would break on a reword.
+			if stderr.Len() == 0 {
+				t.Error("the failure has to reach the user, not only the exit status")
+			}
+		})
 	}
 }
 

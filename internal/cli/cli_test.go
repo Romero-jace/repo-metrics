@@ -16,6 +16,7 @@ import (
 	"github.com/Romero-jace/repo-metrics/internal/cli"
 	"github.com/Romero-jace/repo-metrics/internal/collect"
 	"github.com/Romero-jace/repo-metrics/internal/config"
+	"github.com/Romero-jace/repo-metrics/internal/report"
 	"github.com/Romero-jace/repo-metrics/internal/store"
 )
 
@@ -138,6 +139,19 @@ func firstCell(line string) string {
 	return fields[0]
 }
 
+// hasRowFor is rowFor's negative. rowFor fails when a row is missing, which is
+// the wrong shape for asserting that a narrowed report left a repo out, and a
+// plain Contains over the document cannot be used either: "moved" is a repo
+// name here and also a word in the "What moved" heading.
+func hasRowFor(out, name string) bool {
+	for _, line := range strings.Split(out, "\n") {
+		if firstCell(line) == name {
+			return true
+		}
+	}
+	return false
+}
+
 // wantInRow asserts every want appears on the one row belonging to name.
 func wantInRow(t *testing.T, out, name string, wants ...string) {
 	t.Helper()
@@ -149,6 +163,25 @@ func wantInRow(t *testing.T, out, name string, wants ...string) {
 	}
 }
 
+// reportCoverage and reportTests are the nested measurement groups.
+//
+// They are decoded through pointers everywhere they appear, which is the whole
+// reason the report nests them: a repo that measured nothing has no group at
+// all, and a struct of plain floats would decode that absence straight back
+// into 0.0. That is this project's recurring bug, and a test suite that reads
+// the wire the unsafe way cannot catch it.
+type reportCoverage struct {
+	Pct         float64  `json:"pct"`
+	Covered     int      `json:"covered"`
+	Total       int      `json:"total"`
+	DeltaPoints *float64 `json:"delta_points"`
+}
+
+type reportTests struct {
+	Count int  `json:"count"`
+	Delta *int `json:"delta"`
+}
+
 // reportRepo is the subset of a rendered JSON repo row these tests assert on.
 //
 // The report's JSON is the assertion target rather than its markdown prose
@@ -156,18 +189,37 @@ func wantInRow(t *testing.T, out, name string, wants ...string) {
 // prose is the renderer's wording and can be reworded without the numbers
 // moving.
 type reportRepo struct {
-	Name        string  `json:"name"`
-	Status      string  `json:"status"`
-	CollectedAt string  `json:"collected_at"`
-	CoveragePct float64 `json:"coverage_pct"`
-	HasSnapshot bool    `json:"has_snapshot"`
-	Error       string  `json:"error"`
+	Name        string          `json:"name"`
+	Status      string          `json:"status"`
+	CollectedAt string          `json:"collected_at"`
+	Coverage    *reportCoverage `json:"coverage"`
+	Tests       *reportTests    `json:"tests"`
+	HasSnapshot bool            `json:"has_snapshot"`
+	HasBaseline bool            `json:"has_baseline"`
+	Error       string          `json:"error"`
 }
 
+// reportDoc holds the three sections as pointers to slices rather than slices.
+//
+// Not because a plain slice cannot see the difference. json.Unmarshal leaves a
+// []reportRepo nil for a JSON null and allocates an empty one for [], so a nil
+// check over a plain slice would in fact tell a withheld section from a
+// rendered but empty one. That was measured, not assumed.
+//
+// The reason is that a nil slice stays silently readable. listedIn over a
+// withheld section answers false, so every assertion of the shape "the other
+// repo is not under problems" would pass because the problems section was
+// missing altogether, which is the assertion holding for the opposite of its
+// stated reason. A *[]reportRepo cannot be read without going through rowsOf,
+// and rowsOf fails on a section that was never rendered.
+//
+// Length checks are separately useless here and are not used: len is 0 for
+// null and for [] alike.
 type reportDoc struct {
-	Repos    []reportRepo `json:"repos"`
-	Movers   []reportRepo `json:"movers"`
-	Problems []reportRepo `json:"problems"`
+	Section  string        `json:"section"`
+	Repos    *[]reportRepo `json:"repos"`
+	Movers   *[]reportRepo `json:"movers"`
+	Problems *[]reportRepo `json:"problems"`
 }
 
 func decodeReport(t *testing.T, out string) reportDoc {
@@ -177,6 +229,30 @@ func decodeReport(t *testing.T, out string) reportDoc {
 		t.Fatalf("unparseable report json: %v\n%s", err, out)
 	}
 	return doc
+}
+
+// rowsOf unwraps a section that was rendered. A caller reaching for rows always
+// means the rendered case, so a withheld section is a named failure here rather
+// than a nil dereference somewhere further down.
+func rowsOf(t *testing.T, rows *[]reportRepo, section string) []reportRepo {
+	t.Helper()
+	if rows == nil {
+		t.Fatalf("the report withheld the %s section entirely", section)
+	}
+	return *rows
+}
+
+// coveragePct reads a repo's measured coverage percentage.
+//
+// It fails rather than returning zero when the group is absent. A helper that
+// answered 0 for a repo that measured nothing would put this project's
+// recurring bug inside the test suite that exists to catch it.
+func coveragePct(t *testing.T, r reportRepo) float64 {
+	t.Helper()
+	if r.Coverage == nil {
+		t.Fatalf("no coverage group on %q, so nothing was measured about it", r.Name)
+	}
+	return r.Coverage.Pct
 }
 
 // jsonRepo is the JSON counterpart of rowFor: it binds every assertion to one
@@ -673,26 +749,19 @@ func TestReportJSONAndOutFile(t *testing.T) {
 		t.Fatalf("report --format json: %v (stderr: %s)", err, stderr)
 	}
 
-	var parsed struct {
-		Repos []struct {
-			Name        string   `json:"name"`
-			CoveragePct float64  `json:"coverage_pct"`
-			HasBaseline bool     `json:"has_baseline"`
-			Delta       *float64 `json:"coverage_delta_points"`
-		} `json:"repos"`
+	rows := rowsOf(t, decodeReport(t, stdout).Repos, "repos")
+	if len(rows) != 1 {
+		t.Fatalf("want one repo in the json, got %d", len(rows))
 	}
-	if err := json.Unmarshal([]byte(stdout), &parsed); err != nil {
-		t.Fatalf("report --format json emitted unparseable output: %v\n%s", err, stdout)
+	got := jsonRepo(t, rows, "healthy")
+	if coveragePct(t, got) != 60 {
+		t.Errorf("json = %+v, want healthy at 60", *got.Coverage)
 	}
-	if len(parsed.Repos) != 1 {
-		t.Fatalf("want one repo in the json, got %d", len(parsed.Repos))
-	}
-	got := parsed.Repos[0]
-	if got.Name != "healthy" || got.CoveragePct != 60 {
-		t.Errorf("json = %+v, want healthy at 60", got)
-	}
-	if got.HasBaseline || got.Delta != nil {
-		t.Errorf("want a null delta with only one snapshot, got %+v", got)
+	// The inner null: measured, but with nothing to compare against. It is a
+	// different statement from the outer one, which is why the group has to be
+	// there and only the delta absent.
+	if got.HasBaseline || got.Coverage.DeltaPoints != nil {
+		t.Errorf("want a null delta with only one snapshot, got %+v", *got.Coverage)
 	}
 
 	outPath := filepath.Join(dir, "report.md")
@@ -745,31 +814,12 @@ func TestReportMarksARepoWhoseEveryRunFailed(t *testing.T) {
 		t.Fatalf("report --format json: %v (stderr: %s)", err, stderr)
 	}
 
-	type repoJSON struct {
-		Name        string  `json:"name"`
-		Status      string  `json:"status"`
-		CollectedAt string  `json:"collected_at"`
-		CoveragePct float64 `json:"coverage_pct"`
-		Error       string  `json:"error"`
-	}
-	var parsed struct {
-		Repos    []repoJSON `json:"repos"`
-		Movers   []repoJSON `json:"movers"`
-		Problems []repoJSON `json:"problems"`
-	}
-	if err := json.Unmarshal([]byte(stdout), &parsed); err != nil {
-		t.Fatalf("unparseable json: %v\n%s", err, stdout)
-	}
-
-	var got *repoJSON
-	for i := range parsed.Repos {
-		if parsed.Repos[i].Name == "broken" {
-			got = &parsed.Repos[i]
-		}
-	}
-	if got == nil {
+	doc := decodeReport(t, stdout)
+	repos := rowsOf(t, doc.Repos, "repos")
+	if !listedIn(repos, "broken") {
 		t.Fatalf("the broken repo dropped out of the report entirely: %s", stdout)
 	}
+	got := jsonRepo(t, repos, "broken")
 	if got.Status == string(store.StatusOK) {
 		t.Errorf("a repo with no usable snapshot is not ok, got status %q", got.Status)
 	}
@@ -785,28 +835,27 @@ func TestReportMarksARepoWhoseEveryRunFailed(t *testing.T) {
 	if got.Error == "" {
 		t.Error("want the recorded failure text so the report says what broke")
 	}
+	// A failed run stored no metrics, so there is nothing measured to publish.
+	// Absent groups are what make that unreadable as a repo sitting at zero: a
+	// consumer that reaches into either one gets an error instead of a default.
+	if got.Coverage != nil {
+		t.Errorf("a failed run measured no coverage, but the report published %+v", *got.Coverage)
+	}
+	if got.Tests != nil {
+		t.Errorf("a failed run counted no tests, but the report published %+v", *got.Tests)
+	}
 
 	// It must not lead the report on a fabricated cliff either.
-	for _, m := range parsed.Movers {
-		if m.Name == "broken" {
-			t.Errorf("a crashed test command is not this week's biggest move: %+v", m)
-		}
+	if listedIn(rowsOf(t, doc.Movers, "movers"), "broken") {
+		t.Errorf("a crashed test command is not this week's biggest move: %+v", *doc.Movers)
 	}
-	var listed bool
-	for _, p := range parsed.Problems {
-		if p.Name == "broken" {
-			listed = true
-		}
-	}
-	if !listed {
+	if !listedIn(rowsOf(t, doc.Problems, "problems"), "broken") {
 		t.Error("want the failing repo under collection problems")
 	}
 
 	// The healthy repo is untouched by any of this.
-	for _, r := range parsed.Repos {
-		if r.Name == "healthy" && r.CoveragePct != 60 {
-			t.Errorf("healthy repo = %+v, want 60 percent", r)
-		}
+	if healthy := jsonRepo(t, repos, "healthy"); coveragePct(t, healthy) != 60 {
+		t.Errorf("healthy repo = %+v, want 60 percent", *healthy.Coverage)
 	}
 }
 
@@ -851,14 +900,25 @@ func TestReportIncludesARepoTheDatabaseHasNeverHeardOf(t *testing.T) {
 		t.Fatalf("report --format json: %v (stderr: %s)", err, stderr)
 	}
 	doc := decodeReport(t, stdout)
+	repos := rowsOf(t, doc.Repos, "repos")
 
 	// Present at all. This is the half that fails if the branch just skips.
-	got := jsonRepo(t, doc.Repos, "pending")
+	got := jsonRepo(t, repos, "pending")
 
 	// And not fabricated. Every one of these is what a head the command invented
 	// would flip.
 	if got.HasSnapshot {
 		t.Error("has_snapshot is true for a repo with no row in the database, so a consumer would chart its zeros")
+	}
+	// The structural half of the same claim, and the stronger one. has_snapshot
+	// is a boolean a consumer has to remember to check; an absent group cannot be
+	// read as a number at all. Nothing was measured here, so nothing numeric may
+	// exist anywhere on this row for a defaulting accessor to turn into a zero.
+	if got.Coverage != nil {
+		t.Errorf("a repo nobody has ever collected published coverage %+v", *got.Coverage)
+	}
+	if got.Tests != nil {
+		t.Errorf("a repo nobody has ever collected published a test count %+v", *got.Tests)
 	}
 	if got.Status == string(store.StatusOK) {
 		t.Errorf("status = %q, and a repo nobody has ever collected is not ok", got.Status)
@@ -874,13 +934,13 @@ func TestReportIncludesARepoTheDatabaseHasNeverHeardOf(t *testing.T) {
 	// baseline for a repo with no head, so pending has no delta to clear a
 	// threshold with. Kept as a guard against that changing, not offered as a
 	// proven assertion.
-	if listedIn(doc.Movers, "pending") {
+	if listedIn(rowsOf(t, doc.Movers, "movers"), "pending") {
 		t.Error("a repo that was never collected cannot be this week's biggest move")
 	}
 
 	// Anti-vacuity control: the collected repo still carries its own real
 	// numbers, so a change that flattened every row would not pass this.
-	if healthy := jsonRepo(t, doc.Repos, "collected"); !healthy.HasSnapshot || healthy.CoveragePct != 60 {
+	if healthy := jsonRepo(t, repos, "collected"); !healthy.HasSnapshot || coveragePct(t, healthy) != 60 {
 		t.Errorf("collected repo = %+v, want a snapshot at 60 percent", healthy)
 	}
 
@@ -946,8 +1006,9 @@ func TestReportTellsNeverCollectedFromEveryRunFailed(t *testing.T) {
 		t.Fatalf("report --format json: %v (stderr: %s)", err, stderr)
 	}
 	doc := decodeReport(t, stdout)
-	brokeRow := jsonRepo(t, doc.Repos, "broken")
-	neverRow := jsonRepo(t, doc.Repos, "registered")
+	repos := rowsOf(t, doc.Repos, "repos")
+	brokeRow := jsonRepo(t, repos, "broken")
+	neverRow := jsonRepo(t, repos, "registered")
 
 	// The whole point of the test: the two rows must not read the same.
 	if brokeRow.Status == neverRow.Status {
@@ -975,8 +1036,393 @@ func TestReportTellsNeverCollectedFromEveryRunFailed(t *testing.T) {
 	// failed and never-collected repos from Movers. That second gate lives in
 	// internal/report, which this unit does not own, so this assertion is not
 	// proven by any revert available in this package.
-	if listedIn(doc.Movers, "broken") || listedIn(doc.Movers, "registered") {
-		t.Errorf("a repo with no numbers cannot be a mover: %+v", doc.Movers)
+	movers := rowsOf(t, doc.Movers, "movers")
+	if listedIn(movers, "broken") || listedIn(movers, "registered") {
+		t.Errorf("a repo with no numbers cannot be a mover: %+v", movers)
+	}
+}
+
+// narrowingFixture is a three-repo database where all three report sections
+// have something in them: moved cleared the mover threshold, steady was
+// collected and has no baseline, and broken failed every run so it lands under
+// collection problems.
+//
+// All three matter. A fixture where a section came back empty anyway would make
+// "--section movers withheld the repos table" indistinguishable from "there
+// were no repos to show", and the assertion would hold for the wrong reason.
+//
+// It returns the config path. Everything else lives under the test's own temp
+// directory, which is cleaned up with it.
+func narrowingFixture(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	moved := repoDir(t, dir, "moved", sampleProfile)
+	steady := repoDir(t, dir, "steady", sampleProfile)
+	// Ingest mode pointed at a profile that is not there, so every run fails.
+	broken := repoDir(t, dir, "broken", "")
+	dbPath := filepath.Join(dir, "metrics.db")
+
+	cfgPath := writeConfig(t, dir, fmt.Sprintf("database: %q\nrepos:\n%s%s%s",
+		dbPath,
+		ingestRepoEntry("moved", moved, "coverage.out"),
+		ingestRepoEntry("steady", steady, "coverage.out"),
+		ingestRepoEntry("broken", broken, "missing.out")))
+
+	ctx := context.Background()
+	seed := openStore(t, dbPath)
+	repoID, err := seed.UpsertRepo(ctx, "moved", moved)
+	if err != nil {
+		t.Fatalf("seeding the repo: %v", err)
+	}
+	// A fortnight back at 6 of 15 statements covered, against the fixture's 3 of
+	// 5, so the move is 40.0 to 60.0 and clears the default 0.5 threshold. The
+	// third package is only in the baseline, so it also gives the every-repo
+	// section its package-churn block to render.
+	if _, err := seed.InsertSnapshot(ctx, store.Snapshot{
+		RepoID:      repoID,
+		CollectedAt: time.Now().Add(-14 * 24 * time.Hour),
+		Status:      store.StatusOK,
+	}, []store.Metric{
+		{Key: collect.KeyCoveredStmts, Scope: "example.com/demo/a", Value: 0},
+		{Key: collect.KeyTotalStmts, Scope: "example.com/demo/a", Value: 4},
+		{Key: collect.KeyCoveredStmts, Scope: "example.com/demo/b", Value: 1},
+		{Key: collect.KeyTotalStmts, Scope: "example.com/demo/b", Value: 1},
+		{Key: collect.KeyCoveredStmts, Scope: "example.com/demo/gone", Value: 5},
+		{Key: collect.KeyTotalStmts, Scope: "example.com/demo/gone", Value: 10},
+	}); err != nil {
+		t.Fatalf("seeding a baseline snapshot: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("closing the seed store: %v", err)
+	}
+
+	// broken fails, so a non-zero status here is the fixture working rather than
+	// a problem. Asserting on it is what stops a change that made broken collect
+	// cleanly from silently emptying the problems section.
+	if _, _, err := runCLI(t, "collect", "--config", cfgPath); err == nil {
+		t.Fatal("want the failing repo to make collect exit non-zero, otherwise there are no collection problems to narrow to")
+	}
+	return cfgPath
+}
+
+// An agent asking about one repo should pay for one repo. The narrowing happens
+// before anything is read out of the database, so the other repos are not
+// fetched, compared, and then dropped.
+func TestReportNarrowsToOneRepo(t *testing.T) {
+	cfgPath := narrowingFixture(t)
+
+	stdout, stderr, err := runCLI(t, "report", "--config", cfgPath, "--format", "json", "--repo", "steady")
+	if err != nil {
+		t.Fatalf("report --repo: %v (stderr: %s)", err, stderr)
+	}
+	doc := decodeReport(t, stdout)
+	repos := rowsOf(t, doc.Repos, "repos")
+
+	if len(repos) != 1 {
+		t.Fatalf("want exactly the one repo that was asked for, got %d: %+v", len(repos), repos)
+	}
+	// Anti-vacuity control: the surviving repo still carries its real numbers, so
+	// a change that narrowed by emptying every row would not pass this.
+	if got := jsonRepo(t, repos, "steady"); coveragePct(t, got) != 60 {
+		t.Errorf("the one repo asked for = %+v, want 60 percent", got)
+	}
+	// Narrowing has to reach every section, not just the table. A --repo run
+	// still listing broken under collection problems is reporting on a repo
+	// nobody asked about, which is the cost the flag exists to remove.
+	if listedIn(rowsOf(t, doc.Problems, "problems"), "broken") {
+		t.Error("--repo steady still reported the broken repo under collection problems")
+	}
+	if listedIn(rowsOf(t, doc.Movers, "movers"), "moved") {
+		t.Error("--repo steady still reported the other repo as a mover")
+	}
+
+	// The markdown narrows too, bound to its own row rather than searched for
+	// over the whole document.
+	md, stderr, err := runCLI(t, "report", "--config", cfgPath, "--repo", "steady")
+	if err != nil {
+		t.Fatalf("report --repo (markdown): %v (stderr: %s)", err, stderr)
+	}
+	wantInRow(t, md, "steady", "60.0%")
+	for _, gone := range []string{"moved", "broken"} {
+		if hasRowFor(md, gone) {
+			t.Errorf("--repo steady still has a table row for %q:\n%s", gone, md)
+		}
+		// The movers write-up gives a repo an h3 rather than a table row, so it
+		// needs its own check: a row assertion alone would miss it entirely.
+		if strings.Contains(md, "### "+gone) {
+			t.Errorf("--repo steady still wrote up %q under what moved:\n%s", gone, md)
+		}
+	}
+}
+
+// A name that is not in the config is an error, never an empty report. An empty
+// report is the worst possible answer to a typo, and worse for an agent than
+// for a person: nothing in it says "you asked about a repo I have never heard
+// of", so it reads as a clean week.
+func TestReportRejectsARepoNameThatIsNotConfigured(t *testing.T) {
+	cfgPath := narrowingFixture(t)
+
+	// A near miss rather than nonsense, since a typo is the case this guards.
+	// "stedy" is deliberately not a substring of "steady", so the assertion
+	// below cannot be satisfied by the configured-repo list that follows it.
+	stdout, stderr, err := runCLI(t, "report", "--config", cfgPath, "--repo", "stedy")
+	if err == nil {
+		t.Fatal("want an error rather than an empty report, which an agent reads as an answer")
+	}
+	if !strings.Contains(stderr, "stedy") {
+		t.Errorf("want the name that was asked for quoted back, got %q", stderr)
+	}
+	// Naming the repo is not enough on its own: it does not say whether the name
+	// is misspelled or the config is the wrong one. Listing what is configured
+	// answers both.
+	for _, configured := range []string{"moved", "steady", "broken"} {
+		if !strings.Contains(stderr, configured) {
+			t.Errorf("want %q listed among the configured repos, got %q", configured, stderr)
+		}
+	}
+	if stdout != "" {
+		t.Errorf("want no report at all on a rejected run, got %q", stdout)
+	}
+}
+
+// Each --section value renders that section and withholds the others.
+//
+// The assertions are on whether the key came back null, never on how many rows
+// it has. A withheld section is null and a rendered but empty one is [], and
+// both are length zero, so a length check would hold whether or not narrowing
+// works at all.
+func TestReportSectionRendersOnlyWhatWasAskedFor(t *testing.T) {
+	cfgPath := narrowingFixture(t)
+
+	for _, tc := range []struct {
+		section                 string
+		movers, repos, problems bool
+	}{
+		{"all", true, true, true},
+		{"movers", true, false, false},
+		{"repos", false, true, false},
+		{"problems", false, false, true},
+	} {
+		t.Run(tc.section, func(t *testing.T) {
+			stdout, stderr, err := runCLI(t, "report", "--config", cfgPath,
+				"--format", "json", "--section", tc.section)
+			if err != nil {
+				t.Fatalf("report --section %s: %v (stderr: %s)", tc.section, err, stderr)
+			}
+			doc := decodeReport(t, stdout)
+
+			// The document says which question it answered. Without it a consumer
+			// holding a null cannot tell "you did not ask" from "nothing to say".
+			if doc.Section != tc.section {
+				t.Errorf("section = %q, want %q", doc.Section, tc.section)
+			}
+			for _, part := range []struct {
+				name     string
+				rows     *[]reportRepo
+				rendered bool
+			}{
+				{"movers", doc.Movers, tc.movers},
+				{"repos", doc.Repos, tc.repos},
+				{"problems", doc.Problems, tc.problems},
+			} {
+				if (part.rows != nil) != part.rendered {
+					t.Errorf("--section %s: %s rendered = %v, want %v",
+						tc.section, part.name, part.rows != nil, part.rendered)
+				}
+			}
+
+			// Anti-vacuity control: whatever was rendered still carries its rows,
+			// so a change that narrowed by returning an empty document would fail
+			// here rather than pass everything above.
+			if tc.movers {
+				jsonRepo(t, rowsOf(t, doc.Movers, "movers"), "moved")
+			}
+			if tc.repos {
+				jsonRepo(t, rowsOf(t, doc.Repos, "repos"), "steady")
+			}
+			if tc.problems {
+				jsonRepo(t, rowsOf(t, doc.Problems, "problems"), "broken")
+			}
+		})
+	}
+}
+
+// --section applies to markdown as well, because a person narrowing to movers is
+// as reasonable as an agent doing it.
+//
+// Headings are the assertion target: they are what a reader navigates by, and
+// binding to them says which sections are present without pinning the prose
+// underneath.
+func TestReportSectionAppliesToMarkdownToo(t *testing.T) {
+	cfgPath := narrowingFixture(t)
+
+	headings := map[string]string{
+		"movers":   "## What moved",
+		"repos":    "## Every repo",
+		"problems": "## Collection problems",
+	}
+
+	t.Run("all", func(t *testing.T) {
+		stdout, stderr, err := runCLI(t, "report", "--config", cfgPath)
+		if err != nil {
+			t.Fatalf("report: %v (stderr: %s)", err, stderr)
+		}
+		// The control for every subtest below: unnarrowed, all three are there.
+		for section, heading := range headings {
+			if !strings.Contains(stdout, heading) {
+				t.Errorf("an unnarrowed report is missing the %s section:\n%s", section, stdout)
+			}
+		}
+	})
+
+	for section, own := range headings {
+		t.Run(section, func(t *testing.T) {
+			stdout, stderr, err := runCLI(t, "report", "--config", cfgPath, "--section", section)
+			if err != nil {
+				t.Fatalf("report --section %s: %v (stderr: %s)", section, err, stderr)
+			}
+			if !strings.Contains(stdout, own) {
+				t.Errorf("want the %s section, got:\n%s", section, stdout)
+			}
+			for other, heading := range headings {
+				if other == section {
+					continue
+				}
+				if strings.Contains(stdout, heading) {
+					t.Errorf("--section %s also rendered the %s section:\n%s", section, other, stdout)
+				}
+			}
+		})
+	}
+
+	// The file path renders separately from the stdout path, so a section that
+	// only ever reached stdout would leave --out quietly writing the whole
+	// report. Anyone scripting this writes to a file.
+	t.Run("and to a file", func(t *testing.T) {
+		outPath := filepath.Join(t.TempDir(), "movers.md")
+		if _, stderr, err := runCLI(t, "report", "--config", cfgPath,
+			"--section", "movers", "--out", outPath); err != nil {
+			t.Fatalf("report --section movers --out: %v (stderr: %s)", err, stderr)
+		}
+		written, err := os.ReadFile(outPath)
+		if err != nil {
+			t.Fatalf("reading the written report: %v", err)
+		}
+		if !strings.Contains(string(written), headings["movers"]) {
+			t.Errorf("the written file is missing the movers section:\n%s", written)
+		}
+		if strings.Contains(string(written), headings["repos"]) {
+			t.Errorf("--section movers --out wrote the whole report to the file:\n%s", written)
+		}
+	})
+
+	// The package-churn block belongs to the every-repo section rather than to a
+	// section of its own, which is a shape decision worth pinning: it is the one
+	// heading whose home is not obvious from its name.
+	t.Run("package churn travels with repos", func(t *testing.T) {
+		const churn = "## Packages that came and went"
+		repos, _, err := runCLI(t, "report", "--config", cfgPath, "--section", "repos")
+		if err != nil {
+			t.Fatalf("report --section repos: %v", err)
+		}
+		if !strings.Contains(repos, churn) {
+			t.Errorf("--section repos dropped the package churn:\n%s", repos)
+		}
+		movers, _, err := runCLI(t, "report", "--config", cfgPath, "--section", "movers")
+		if err != nil {
+			t.Fatalf("report --section movers: %v", err)
+		}
+		if strings.Contains(movers, churn) {
+			t.Errorf("--section movers carried the package churn:\n%s", movers)
+		}
+	})
+}
+
+// An unknown section is rejected, not quietly rounded down to the whole report.
+// A typo that renders everything is the same lie as one that renders nothing:
+// the caller asked a narrow question and got an answer to a different one.
+func TestReportRejectsAnUnknownSection(t *testing.T) {
+	cfgPath := narrowingFixture(t)
+
+	stdout, stderr, err := runCLI(t, "report", "--config", cfgPath, "--section", "mvoers")
+	if err == nil {
+		t.Fatal("want an error rather than a silent fallback to the whole report")
+	}
+	if !strings.Contains(stderr, "mvoers") {
+		t.Errorf("want the rejected name quoted back, got %q", stderr)
+	}
+	// Every valid name, read from the parser rather than typed out here, so this
+	// keeps holding when a section is added.
+	for _, valid := range report.Sections() {
+		if !strings.Contains(stderr, valid) {
+			t.Errorf("want %q offered as a valid section, got %q", valid, stderr)
+		}
+	}
+	if stdout != "" {
+		t.Errorf("want no report at all on a rejected run, got %q", stdout)
+	}
+}
+
+// The two flags are independent, so asking for one repo's movers has to narrow
+// on both axes at once. Neither one quietly winning is the failure here.
+func TestReportRepoAndSectionCompose(t *testing.T) {
+	cfgPath := narrowingFixture(t)
+
+	stdout, stderr, err := runCLI(t, "report", "--config", cfgPath,
+		"--format", "json", "--repo", "moved", "--section", "movers")
+	if err != nil {
+		t.Fatalf("report --repo --section: %v (stderr: %s)", err, stderr)
+	}
+	doc := decodeReport(t, stdout)
+
+	if doc.Section != "movers" {
+		t.Errorf("section = %q, want movers", doc.Section)
+	}
+	if doc.Repos != nil {
+		t.Errorf("--section movers still rendered the repos table: %+v", *doc.Repos)
+	}
+	if doc.Problems != nil {
+		t.Errorf("--section movers still rendered collection problems: %+v", *doc.Problems)
+	}
+	movers := rowsOf(t, doc.Movers, "movers")
+	if len(movers) != 1 {
+		t.Fatalf("want just the one repo asked for, got %d: %+v", len(movers), movers)
+	}
+	// And it is still a real answer: the repo that was asked for, with the move
+	// it actually made, rather than an empty envelope that satisfies both filters.
+	got := jsonRepo(t, movers, "moved")
+	if coveragePct(t, got) != 60 {
+		t.Errorf("moved = %+v, want 60 percent", got)
+	}
+	if got.Coverage.DeltaPoints == nil {
+		t.Fatalf("a mover with no delta is not a mover: %+v", *got.Coverage)
+	}
+	if *got.Coverage.DeltaPoints != 20 {
+		t.Errorf("delta = %v points, want the +20 the fixture seeded", *got.Coverage.DeltaPoints)
+	}
+}
+
+// The usage text is the entire discoverability story for --section, since this
+// tool deliberately ships no MCP server describing its flags. A section the
+// parser accepts and the help never mentions cannot be found by anyone.
+func TestUsageListsEverySection(t *testing.T) {
+	_, stderr, _ := runCLI(t, "help")
+
+	if !strings.Contains(stderr, "--section") {
+		t.Fatalf("the usage text does not mention --section at all:\n%s", stderr)
+	}
+	// Read from the parser, and asserted as the joined list rather than name by
+	// name: "all" and "repos" both occur in the surrounding prose, so checking
+	// them individually would pass on text that has nothing to do with the flag.
+	if want := strings.Join(report.Sections(), ", "); !strings.Contains(stderr, want) {
+		t.Errorf("want the valid sections %q listed in the usage text:\n%s", want, stderr)
+	}
+	// report's --repo needs more than a mention in the synopsis line, which
+	// collect's --repo already puts there. What a caller has to know is the part
+	// that differs from a plain filter: an unknown name fails rather than
+	// producing an empty report they would read as a clean week.
+	if !strings.Contains(stderr, "not an empty report") {
+		t.Errorf("the usage text does not say what report --repo does with an unknown name:\n%s", stderr)
 	}
 }
 
@@ -1013,7 +1459,8 @@ func TestReportWriteDestinationsAndFormats(t *testing.T) {
 		if err != nil {
 			t.Fatalf("report --format json: %v (stderr: %s)", err, stderr)
 		}
-		if got := jsonRepo(t, decodeReport(t, stdout).Repos, "healthy"); got.CoveragePct != 60 {
+		rows := rowsOf(t, decodeReport(t, stdout).Repos, "repos")
+		if got := jsonRepo(t, rows, "healthy"); coveragePct(t, got) != 60 {
 			t.Errorf("json = %+v, want healthy at 60", got)
 		}
 	})
@@ -1054,7 +1501,8 @@ func TestReportWriteDestinationsAndFormats(t *testing.T) {
 		}
 		// The format flag has to reach the file, not just stdout. Writing
 		// markdown into a .json a pipeline is about to parse is the failure.
-		if got := jsonRepo(t, decodeReport(t, string(written)).Repos, "healthy"); got.CoveragePct != 60 {
+		rows := rowsOf(t, decodeReport(t, string(written)).Repos, "repos")
+		if got := jsonRepo(t, rows, "healthy"); coveragePct(t, got) != 60 {
 			t.Errorf("the written json = %+v, want healthy at 60", got)
 		}
 	})

@@ -56,13 +56,22 @@ func TestUnmeasuredTestsAreNotRenderedAsZero(t *testing.T) {
 	}
 
 	rows := jsonRepoRows(t, rep)
-	if rows[repoQuiet]["tests_measured"] != false {
-		t.Errorf("tests_measured: got %v for the ingest-mode repo, want false",
-			rows[repoQuiet]["tests_measured"])
+	// The gate a consumer used to read is gone, and the group it governed is
+	// gone with it. That is the point: there is no longer a tests count on the
+	// wire for an ingest-mode repo to be defaulted to zero.
+	v, present := rows[repoQuiet]["tests"]
+	if !present {
+		t.Error("the tests key is missing rather than null for the ingest-mode repo, so a consumer defaulting it sees a count of zero")
 	}
-	if rows[repoFresh]["tests_measured"] != true {
-		t.Errorf("tests_measured: got %v for the measured repo, want true",
-			rows[repoFresh]["tests_measured"])
+	if v != nil {
+		t.Errorf("tests: got %v for the ingest-mode repo, want null", v)
+	}
+	measuredTests, ok := rows[repoFresh]["tests"].(map[string]any)
+	if !ok {
+		t.Fatalf("tests: got %v for the measured repo, want an object", rows[repoFresh]["tests"])
+	}
+	if got := measuredTests["packages_without_tests"]; got != float64(3) {
+		t.Errorf("tests.packages_without_tests: got %v, want 3; this zero-free count was really measured", got)
 	}
 }
 
@@ -84,7 +93,13 @@ func TestGainingTestDataIsNotTestGrowth(t *testing.T) {
 	}
 
 	rows := jsonRepoRows(t, rep)
-	if got := rows[repoSteady]["tests_delta"]; got != nil {
-		t.Errorf("tests_delta: got %v, want null when the baseline never measured tests", got)
+	tests, ok := rows[repoSteady]["tests"].(map[string]any)
+	if !ok {
+		t.Fatalf("tests: got %v, want an object; the head really did count tests", rows[repoSteady]["tests"])
+	}
+	// The inner null. The head measured, so the group is there; the baseline did
+	// not, so there is nothing to subtract from.
+	if got := tests["delta"]; got != nil {
+		t.Errorf("tests.delta: got %v, want null when the baseline never measured tests", got)
 	}
 }

@@ -25,6 +25,21 @@ var funcs = template.FuncMap{
 	// pct renders a coverage percentage.
 	"pct": func(f float64) string { return fmt.Sprintf("%.1f%%", f) },
 
+	// pctOf is pct over a figure that might not exist. An added package has no
+	// earlier percentage and a removed one has no later percentage, and printing
+	// either as 0.0% says the package climbed from nothing or collapsed to it.
+	//
+	// It is separate from pct for the same reason points is separate from pts:
+	// text/template will silently take the address of an addressable float64 to
+	// satisfy a *float64 parameter, so one pointer-typed func would accept a
+	// plain value by accident and the nil branch would look dead.
+	"pctOf": func(f *float64) string {
+		if f == nil {
+			return "not measured"
+		}
+		return fmt.Sprintf("%.1f%%", *f)
+	},
+
 	// pts renders a change in percentage points, always signed, so a reader
 	// never has to work out which direction it went.
 	"pts": func(f float64) string { return fmt.Sprintf("%+.1f pts", f) },
@@ -76,9 +91,12 @@ var funcs = template.FuncMap{
 	// breaks rendering at run time, not at compile time.
 	"ne": func(n *int, v int) bool { return n != nil && *n != v },
 
+	// anyPackageChurn goes through the same nil-reading accessors the churn
+	// section itself uses, so a repo that measured no coverage can never make the
+	// heading appear over rows that then print nothing.
 	"anyPackageChurn": func(repos []RepoView) bool {
 		for _, r := range repos {
-			if len(r.AddedPackages) > 0 || len(r.RemovedPackages) > 0 {
+			if len(r.AddedPackages()) > 0 || len(r.RemovedPackages()) > 0 {
 				return true
 			}
 		}
@@ -111,29 +129,36 @@ func count(n float64, unit string) string {
 
 var tmpl = template.Must(template.New("report").Funcs(funcs).Parse(markdownTemplate))
 
-// Markdown renders the report for humans.
-func Markdown(w io.Writer, rep delta.Report) error {
-	if err := tmpl.Execute(w, Build(rep)); err != nil {
+// Markdown renders the report for humans, narrowed to sec.
+func Markdown(w io.Writer, rep delta.Report, sec Section) error {
+	if err := tmpl.Execute(w, BuildSection(rep, sec)); err != nil {
 		return fmt.Errorf("report: rendering markdown: %w", err)
 	}
 	return nil
 }
 
-// JSON renders the same numbers for machines.
-func JSON(w io.Writer, rep delta.Report) error {
+// JSON renders the same numbers for machines, narrowed to the same sec. Both
+// formats go through BuildSection, so neither can include a section the other
+// left out.
+func JSON(w io.Writer, rep delta.Report, sec Section) error {
 	enc := json.NewEncoder(w)
-	enc.SetIndent("", "  ")
+	// Not indented, on purpose. JSON here is the machine format and markdown is
+	// the human one, so paying for indentation in the machine format buys
+	// readability for a reader who has the better format available anyway. It
+	// was measured at roughly a fifth of the payload, and a tokenizer handles
+	// runs of spaces worse than the byte count suggests. Anyone who does want to
+	// read it can pipe it through jq.
 	enc.SetEscapeHTML(false)
-	if err := enc.Encode(Build(rep)); err != nil {
+	if err := enc.Encode(BuildSection(rep, sec)); err != nil {
 		return fmt.Errorf("report: rendering json: %w", err)
 	}
 	return nil
 }
 
 // MarkdownString is a convenience for callers that want the text in hand.
-func MarkdownString(rep delta.Report) (string, error) {
+func MarkdownString(rep delta.Report, sec Section) (string, error) {
 	var b strings.Builder
-	if err := Markdown(&b, rep); err != nil {
+	if err := Markdown(&b, rep, sec); err != nil {
 		return "", err
 	}
 	return b.String(), nil

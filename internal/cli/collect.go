@@ -107,14 +107,30 @@ func printProgress(w io.Writer, name, status, summary string) {
 	_, _ = fmt.Fprintf(w, "%-28s %-8s %s\n", name, status, summary)
 }
 
+// selectRepos narrows a config's repo list to one name, or hands back all of
+// them when no name was given. Both collect and report go through it, so the
+// two subcommands cannot drift on what --repo means or on what an unknown name
+// does.
+//
+// An unknown name is an error rather than an empty selection. Quietly doing
+// nothing for a typo is the silent wrong answer this tool exists to refuse, and
+// it is worse for an agent than for a person: an empty report reads as an
+// answer, so the agent concludes nothing regressed. The message lists what is
+// configured, because "no repo named x" on its own does not tell you whether
+// you misspelled the repo or pointed at the wrong config.
 func selectRepos(repos []config.Repo, only string) ([]config.Repo, error) {
 	if only == "" {
 		return repos, nil
 	}
+	names := make([]string, 0, len(repos))
 	for _, r := range repos {
 		if r.Name == only {
 			return []config.Repo{r}, nil
 		}
+		names = append(names, r.Name)
 	}
-	return nil, fmt.Errorf("no repo named %q in the config", only)
+	if len(names) == 0 {
+		return nil, fmt.Errorf("no repo named %q: the config has no repos at all", only)
+	}
+	return nil, fmt.Errorf("no repo named %q in the config, which has %s", only, strings.Join(names, ", "))
 }

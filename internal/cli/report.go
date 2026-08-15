@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/Romero-jace/repo-metrics/internal/config"
@@ -19,6 +20,9 @@ func runReport(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	windowFlag := set.String("window", "", "how far back the baseline sits, like 7d (default: the config's window)")
 	outPath := set.String("out", "", "write the report here instead of to stdout")
 	format := set.String("format", formatMarkdown, "markdown or json")
+	only := set.String("repo", "", "report on just this one repo, by name")
+	sectionFlag := set.String("section", string(report.SectionAll),
+		"which part of the report to render: "+strings.Join(report.Sections(), ", "))
 	proceed, err := parseFlags(set, args, stderr)
 	if !proceed || err != nil {
 		return err
@@ -32,8 +36,27 @@ func runReport(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		return err
 	}
 
+	// Checked here beside --format, and by the report package's own parser
+	// rather than by a second list kept here. report.ParseSection already
+	// refuses an unknown name and names the valid ones, and two validators over
+	// one set of names is one of them going stale.
+	sec, err := report.ParseSection(*sectionFlag)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "%v\n", err)
+		return err
+	}
+
 	cfg, err := loadConfig(*configPath, stderr)
 	if err != nil {
+		return err
+	}
+
+	// Narrowed before the database is opened, so a --repo run never loads
+	// snapshots and metrics for repos it is about to throw away, and a typo
+	// fails before anything has been read at all.
+	repos, err := selectRepos(cfg.Repos, *only)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "%v\n", err)
 		return err
 	}
 
@@ -51,7 +74,7 @@ func runReport(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	}
 	defer func() { _ = st.Close() }()
 
-	inputs, err := reportInputs(ctx, st, cfg, window, stderr)
+	inputs, err := reportInputs(ctx, st, repos, window, stderr)
 	if err != nil {
 		return err
 	}
@@ -63,13 +86,19 @@ func runReport(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		// MaxCulprits stays zero so Compute applies its own default.
 	}, time.Now())
 
-	return writeReport(rep, *format, *outPath, stdout, stderr)
+	return writeReport(rep, *format, sec, *outPath, stdout, stderr)
 }
 
-// reportInputs pairs each configured repo with its newest snapshot and the
+// reportInputs pairs each repo it is given with its newest snapshot and the
 // closest one from a window ago.
 //
-// Every configured repo gets an entry even if it has never been collected. A
+// It takes the repo list rather than the whole config because --repo narrows
+// here: an unwanted repo is never looked up, so nothing is fetched or compared
+// only to be dropped afterwards. Filtering after delta.Compute would do the
+// work anyway and would also mean the narrowing lived somewhere different from
+// collect's, which is two places for one rule.
+//
+// Every repo it is given gets an entry even if it has never been collected. A
 // repo that quietly drops out of the report is exactly how a broken cron job
 // goes unnoticed for a month, which is the failure this tool exists to catch.
 //
@@ -83,7 +112,7 @@ func runReport(ctx context.Context, args []string, stdout, stderr io.Writer) err
 func reportInputs(
 	ctx context.Context,
 	st *store.Store,
-	cfg *config.Config,
+	repos []config.Repo,
 	window time.Duration,
 	stderr io.Writer,
 ) ([]delta.Input, error) {
@@ -97,8 +126,8 @@ func reportInputs(
 		byName[r.Name] = r
 	}
 
-	inputs := make([]delta.Input, 0, len(cfg.Repos))
-	for _, configured := range cfg.Repos {
+	inputs := make([]delta.Input, 0, len(repos))
+	for _, configured := range repos {
 		repo, ok := byName[configured.Name]
 		if !ok {
 			inputs = append(inputs, delta.Input{
@@ -161,14 +190,17 @@ func reportInputs(
 	return inputs, nil
 }
 
-func writeReport(rep delta.Report, format, outPath string, stdout, stderr io.Writer) error {
+// writeReport renders the report to stdout or to a file. sec goes to whichever
+// renderer is chosen rather than being applied afterwards, so markdown and JSON
+// cannot disagree about what a section contains.
+func writeReport(rep delta.Report, format string, sec report.Section, outPath string, stdout, stderr io.Writer) error {
 	render := report.Markdown
 	if format == formatJSON {
 		render = report.JSON
 	}
 
 	if outPath == "" {
-		if err := render(stdout, rep); err != nil {
+		if err := render(stdout, rep, sec); err != nil {
 			_, _ = fmt.Fprintf(stderr, "%v\n", err)
 			return err
 		}
@@ -180,7 +212,7 @@ func writeReport(rep delta.Report, format, outPath string, stdout, stderr io.Wri
 		_, _ = fmt.Fprintf(stderr, "could not create %s: %v\n", outPath, err)
 		return err
 	}
-	if err := render(f, rep); err != nil {
+	if err := render(f, rep, sec); err != nil {
 		_ = f.Close()
 		_, _ = fmt.Fprintf(stderr, "%v\n", err)
 		return err

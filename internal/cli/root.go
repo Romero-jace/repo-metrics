@@ -21,10 +21,12 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/Romero-jace/repo-metrics/internal/collect"
 	"github.com/Romero-jace/repo-metrics/internal/config"
+	"github.com/Romero-jace/repo-metrics/internal/report"
 	"github.com/Romero-jace/repo-metrics/internal/store"
 )
 
@@ -163,6 +165,17 @@ func formatCoverage(covered, total int) string {
 }
 
 func printUsage(w io.Writer) {
+	// The section names are generated from report.Sections() rather than typed
+	// out here, so a section the parser accepts cannot go unlisted and a name
+	// that gets dropped cannot linger in the help. This text is the entire
+	// discoverability story for the flag, since there is deliberately no MCP
+	// server describing it.
+	//
+	// Concatenated rather than passed through Fprintf: the body below is prose
+	// that people will edit, and a stray percent sign in it would otherwise turn
+	// into a formatting verb.
+	sections := strings.Join(report.Sections(), ", ")
+
 	// A failed write to the caller's own writer is not actionable, so the
 	// error is deliberately discarded here and everywhere else we print.
 	_, _ = fmt.Fprint(w, `repo-metrics: track coverage and test health across a pile of repos, and say
@@ -172,6 +185,7 @@ usage:
   repo-metrics init    [--config FILE] [--force]
   repo-metrics collect [--config FILE] [--repo NAME]
   repo-metrics report  [--config FILE] [--window 7d] [--out FILE] [--format markdown|json]
+                       [--repo NAME] [--section NAME]
   repo-metrics repos   [--config FILE]
 
 Flags go AFTER the subcommand, the way git and docker take them:
@@ -192,6 +206,18 @@ report flags:
                   Defaults to the window in the config, which itself defaults to 7d.
   --out FILE      write the report here instead of to stdout
   --format FMT    markdown (default) or json
+  --repo NAME     report on just this one repo instead of all of them. A name
+                  that is not in the config is an error, not an empty report.
+  --section NAME  render one part of the report instead of the whole thing.
+                  One of: `+sections+`. Default is all.
+                    movers   what got better or worse, and by far the cheapest
+                             thing to ask for
+                    repos    the every-repo table, plus the packages that came
+                             and went
+                    problems the repos that did not report clean
+                  It applies to markdown and json alike. In json, a section you
+                  did not ask for comes back null rather than empty, so you can
+                  tell "not requested" from "nothing to report".
 
 repos flags:
   --config FILE   config to read (default repo-metrics.yaml)

@@ -1,13 +1,13 @@
 # Repo metrics, {{ .GeneratedAt }}
 
 Comparing each repo against its closest snapshot from about {{ days .WindowDays }} back.
-
+{{ if .ShowMovers }}
 {{ if .Movers -}}
 ## What moved
 {{ range .Movers }}
 ### {{ .Name }}
 
-Coverage {{ pct .CoveragePct }}{{ with .CoverageDeltaPoints }}, {{ points . }} on the week{{ end }}. {{ if .TestsMeasured }}Tests {{ .Tests }}{{ with .TestsDelta }}{{ if ne . 0 }}, {{ signed . }}{{ end }}{{ end }}.{{ else }}Tests were not measured for this repo.{{ end }}
+{{ with .Coverage }}Coverage {{ pct .Pct }}{{ with .DeltaPoints }}, {{ points . }} on the week{{ end }}.{{ end }} {{ if .Tests }}Tests {{ .Tests.Count }}{{ with .Tests.Delta }}{{ if ne . 0 }}, {{ signed . }}{{ end }}{{ end }}.{{ else }}Tests were not measured for this repo.{{ end }}
 {{- if .EnvWarned }}
 
 Heads up: these two snapshots were taken under different toolchains, so some of this move is not code.
@@ -16,11 +16,11 @@ Heads up: these two snapshots were taken under different toolchains, so some of 
 Where it came from:
 {{ range .Culprits }}
 {{- if eq .State "added" }}
-- `{{ .Package }}` (new code, {{ pct .ToPct }} covered): shifts the repo total by {{ pts .ContributionPoints }} just by showing up ({{ .Statements }} statements)
+- `{{ .Package }}` (new code, {{ pctOf .ToPct }} covered): shifts the repo total by {{ pts .ContributionPoints }} just by showing up ({{ .Statements }} statements)
 {{- else if eq .State "removed" }}
-- `{{ .Package }}` (gone, was {{ pct .FromPct }}): shifts the repo total by {{ pts .ContributionPoints }} just by going away ({{ .Statements }} statements)
+- `{{ .Package }}` (gone, was {{ pctOf .FromPct }}): shifts the repo total by {{ pts .ContributionPoints }} just by going away ({{ .Statements }} statements)
 {{- else }}
-- `{{ .Package }}`: {{ pct .FromPct }} to {{ pct .ToPct }}, worth {{ pts .ContributionPoints }} of the repo total ({{ .Statements }} statements)
+- `{{ .Package }}`: {{ pctOf .FromPct }} to {{ pctOf .ToPct }}, worth {{ pts .ContributionPoints }} of the repo total ({{ .Statements }} statements)
 {{- end }}
 {{- end }}
 {{ end -}}
@@ -30,6 +30,8 @@ Where it came from:
 
 Nothing cleared the reporting threshold this time.
 {{ end }}
+{{- end }}
+{{- if .ShowRepos }}
 ## Every repo
 
 | repo | coverage | change | tests | change | packages without tests | last collected |
@@ -44,12 +46,15 @@ A third case comes back status ok and still measured nothing: a coverage profile
 carrying only its header instruments no packages, so the repo's total is zero
 statements and its percentage is zero for want of a denominator. That row says
 not measured rather than 0.0% for the same reason as the other two.
+Every cell below branches on the measurement group being there rather than on a
+boolean beside it, so there is no number for the template to reach for when the
+group is absent.
 Partial snapshots are different: they carry real numbers and keep showing them. */}}
 {{- range .Repos }}
 {{- if or (eq .Status "failed") (not .HasSnapshot) }}
 | {{ .Name }} | not collected | not collected | not collected | not collected | not collected | {{ if .CollectedAt }}{{ .CollectedAt }}{{ else }}never{{ end }} |
 {{- else }}
-| {{ .Name }} | {{ if .CoverageMeasured }}{{ pct .CoveragePct }}{{ else }}not measured{{ end }} | {{ if not .CoverageMeasured }}not measured{{ else if .HasBaseline }}{{ points .CoverageDeltaPoints }}{{ if .EnvWarned }}, toolchain changed{{ end }}{{ else }}no baseline yet{{ end }} | {{ if .TestsMeasured }}{{ .Tests }}{{ else }}not measured{{ end }} | {{ if not .TestsMeasured }}not measured{{ else if .TestsDelta }}{{ signed .TestsDelta }}{{ else }}no baseline yet{{ end }} | {{ if .TestsMeasured }}{{ .PackagesWithoutTests }}{{ else }}not measured{{ end }} | {{ if .CollectedAt }}{{ .CollectedAt }}{{ else }}never{{ end }} |
+| {{ .Name }} | {{ with .Coverage }}{{ pct .Pct }}{{ else }}not measured{{ end }} | {{ if not .Coverage }}not measured{{ else if .HasBaseline }}{{ points .Coverage.DeltaPoints }}{{ if .EnvWarned }}, toolchain changed{{ end }}{{ else }}no baseline yet{{ end }} | {{ with .Tests }}{{ .Count }}{{ else }}not measured{{ end }} | {{ if not .Tests }}not measured{{ else if .Tests.Delta }}{{ signed .Tests.Delta }}{{ else }}no baseline yet{{ end }} | {{ with .Tests }}{{ .PackagesWithoutTests }}{{ else }}not measured{{ end }} | {{ if .CollectedAt }}{{ .CollectedAt }}{{ else }}never{{ end }} |
 {{- end }}
 {{- end }}
 
@@ -79,7 +84,8 @@ Gone:
 {{- end }}
 {{- end }}
 {{- end }}
-{{- if .Problems }}
+{{- end }}
+{{- if and .ShowProblems .Problems }}
 ## Collection problems
 
 These repos did not report clean. Whatever numbers they did produce are worth a second look, and the ones that produced none say so in the table above.

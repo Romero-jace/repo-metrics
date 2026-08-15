@@ -160,20 +160,49 @@ func fullReport() delta.Report {
 
 func mustMarkdown(t *testing.T, rep delta.Report) string {
 	t.Helper()
-	md, err := report.MarkdownString(rep)
+	return mustMarkdownSection(t, rep, report.SectionAll)
+}
+
+func mustMarkdownSection(t *testing.T, rep delta.Report, sec report.Section) string {
+	t.Helper()
+	md, err := report.MarkdownString(rep, sec)
 	if err != nil {
-		t.Fatalf("MarkdownString: %v", err)
+		t.Fatalf("MarkdownString(%q): %v", sec, err)
 	}
 	return md
 }
 
 func mustJSON(t *testing.T, rep delta.Report) string {
 	t.Helper()
+	return mustJSONSection(t, rep, report.SectionAll)
+}
+
+func mustJSONSection(t *testing.T, rep delta.Report, sec report.Section) string {
+	t.Helper()
 	var b strings.Builder
-	if err := report.JSON(&b, rep); err != nil {
-		t.Fatalf("JSON: %v", err)
+	if err := report.JSON(&b, rep, sec); err != nil {
+		t.Fatalf("JSON(%q): %v", sec, err)
 	}
 	return b.String()
+}
+
+// coverageOf and testsOf read one repo's measurement group and fail if it is
+// absent. A test that wants a number is asserting the repo measured one, so the
+// nil case is a test failure rather than something to branch on.
+func coverageOf(t *testing.T, v report.RepoView) report.CoverageView {
+	t.Helper()
+	if v.Coverage == nil {
+		t.Fatalf("%s: coverage group is absent, so there is no number to check", v.Name)
+	}
+	return *v.Coverage
+}
+
+func testsOf(t *testing.T, v report.RepoView) report.TestsView {
+	t.Helper()
+	if v.Tests == nil {
+		t.Fatalf("%s: tests group is absent, so there is no number to check", v.Name)
+	}
+	return *v.Tests
 }
 
 // linesMentioning scopes an assertion to one repo's lines instead of the whole
@@ -336,9 +365,11 @@ func TestNoBaselineIsNeverRenderedAsADelta(t *testing.T) {
 	if view.HasBaseline {
 		t.Fatalf("fixture is wrong: %s is supposed to have no baseline", repoFresh)
 	}
-	if view.CoverageDeltaPoints != nil || view.TestsDelta != nil {
+	// The inner null, not the outer one: this repo measured both groups on its
+	// first run, so both are present and only the deltas inside them are absent.
+	if coverageOf(t, view).DeltaPoints != nil || testsOf(t, view).Delta != nil {
 		t.Fatalf("%s has no baseline but the view carries deltas: coverage=%v tests=%v",
-			repoFresh, view.CoverageDeltaPoints, view.TestsDelta)
+			repoFresh, view.Coverage.DeltaPoints, view.Tests.Delta)
 	}
 
 	lines := linesMentioning(md, repoFresh)
@@ -364,8 +395,8 @@ func TestNoBaselineIsNeverRenderedAsADelta(t *testing.T) {
 	if !quiet.HasBaseline {
 		t.Fatalf("fixture is wrong: %s is supposed to have a baseline", repoQuiet)
 	}
-	if quiet.CoverageDeltaPoints == nil || *quiet.CoverageDeltaPoints != 0 {
-		t.Fatalf("fixture is wrong: %s should have a zero coverage delta, got %v", repoQuiet, quiet.CoverageDeltaPoints)
+	if d := coverageOf(t, quiet).DeltaPoints; d == nil || *d != 0 {
+		t.Fatalf("fixture is wrong: %s should have a zero coverage delta, got %v", repoQuiet, d)
 	}
 	quietRow := repoRow(t, md, repoQuiet)
 	if !strings.Contains(quietRow, "+0.0 pts") {
@@ -402,20 +433,34 @@ func TestMarkdownAndJSONAgree(t *testing.T) {
 		if got.Name != want.Name {
 			t.Fatalf("repo %d: json name %q, Build name %q", i, got.Name, want.Name)
 		}
-		if got.CoveragePct != want.CoveragePct {
-			t.Errorf("%s coverage_pct: json %v, Build %v", want.Name, got.CoveragePct, want.CoveragePct)
+		// Group presence has to agree before any number does. A round trip that
+		// turned an absent group into a present one carrying zeros would be the
+		// bug class arriving through the decoder.
+		if (got.Coverage == nil) != (want.Coverage == nil) {
+			t.Fatalf("%s coverage group: json present=%v, Build present=%v", want.Name, got.Coverage != nil, want.Coverage != nil)
 		}
-		if got.Tests != want.Tests {
-			t.Errorf("%s tests: json %d, Build %d", want.Name, got.Tests, want.Tests)
+		if (got.Tests == nil) != (want.Tests == nil) {
+			t.Fatalf("%s tests group: json present=%v, Build present=%v", want.Name, got.Tests != nil, want.Tests != nil)
 		}
-		checkFloatPtr(t, want.Name+" coverage_delta_points", got.CoverageDeltaPoints, want.CoverageDeltaPoints)
-		checkIntPtr(t, want.Name+" tests_delta", got.TestsDelta, want.TestsDelta)
+		if want.Coverage != nil {
+			if got.Coverage.Pct != want.Coverage.Pct {
+				t.Errorf("%s coverage.pct: json %v, Build %v", want.Name, got.Coverage.Pct, want.Coverage.Pct)
+			}
+			checkFloatPtr(t, want.Name+" coverage.delta_points", got.Coverage.DeltaPoints, want.Coverage.DeltaPoints)
+		}
+		if want.Tests != nil {
+			if got.Tests.Count != want.Tests.Count {
+				t.Errorf("%s tests.count: json %d, Build %d", want.Name, got.Tests.Count, want.Tests.Count)
+			}
+			checkIntPtr(t, want.Name+" tests.delta", got.Tests.Delta, want.Tests.Delta)
+		}
 
-		// A failed collection has no figures to agree about. The JSON still
-		// carries the Go zero values, but it also carries status, so a machine
-		// can tell; the markdown withholds them because a human scanning rows
-		// cannot. That divergence is deliberate and covered by
-		// TestFailedCollectionQuotesNoNumbers.
+		// A failed collection has no figures to agree about, and since the
+		// measurements moved inside nullable groups it no longer has figures at
+		// all: both renderings withhold them now rather than the markdown
+		// withholding what the JSON published as zeros. There is nothing left
+		// here to cross-check, so skip. TestFailedCollectionQuotesNoNumbers
+		// covers what the row does say.
 		if got.Status == string(store.StatusFailed) {
 			continue
 		}
@@ -423,13 +468,13 @@ func TestMarkdownAndJSONAgree(t *testing.T) {
 		// The markdown prints these same figures through the template's own
 		// formatters, so the two renderings have to show the same numbers.
 		row := repoRow(t, md, want.Name)
-		wantPct := fmt.Sprintf("%.1f%%", want.CoveragePct)
+		wantPct := fmt.Sprintf("%.1f%%", coverageOf(t, want).Pct)
 		if !strings.Contains(row, "| "+wantPct+" |") {
 			t.Errorf("%s: markdown row does not show coverage %s:\n%s", want.Name, wantPct, row)
 		}
-		wantTests := "| " + strconv.Itoa(want.Tests) + " |"
+		wantTests := "| " + strconv.Itoa(testsOf(t, want).Count) + " |"
 		if !strings.Contains(row, wantTests) {
-			t.Errorf("%s: markdown row does not show test count %d:\n%s", want.Name, want.Tests, row)
+			t.Errorf("%s: markdown row does not show test count %d:\n%s", want.Name, want.Tests.Count, row)
 		}
 	}
 }
@@ -459,31 +504,51 @@ func checkIntPtr(t *testing.T, label string, got, want *int) {
 // TestJSONWireShape decodes into map[string]any on purpose. Decoding into View
 // would round-trip a Go nil back into a Go nil and prove nothing about what
 // actually goes over the wire, which is where a downstream consumer reads it.
+// wireGroup returns one measurement group off a rendered repo row and fails if
+// it is absent or null. Reading it through a helper keeps the two levels of null
+// apart in the assertions below: this one is about the inner level, where the
+// group is there and a delta inside it is not.
+func wireGroup(t *testing.T, row map[string]any, name, group string) map[string]any {
+	t.Helper()
+	v, present := row[group]
+	if !present {
+		t.Fatalf("%s: the %s group key is absent from the json entirely", name, group)
+	}
+	obj, ok := v.(map[string]any)
+	if !ok {
+		t.Fatalf("%s: %s is %v (%T), want an object because this repo measured it", name, group, v, v)
+	}
+	return obj
+}
+
 func TestJSONWireShape(t *testing.T) {
 	byName := jsonRepoRows(t, fullReport())
 
-	for _, field := range []string{"coverage_delta_points", "tests_delta"} {
-		fresh, ok := byName[repoFresh]
-		if !ok {
-			t.Fatalf("%s missing from the json", repoFresh)
-		}
-		v, present := fresh[field]
+	fresh, ok := byName[repoFresh]
+	if !ok {
+		t.Fatalf("%s missing from the json", repoFresh)
+	}
+	mover, ok := byName[repoMover]
+	if !ok {
+		t.Fatalf("%s missing from the json", repoMover)
+	}
+
+	for group, field := range map[string]string{"coverage": "delta_points", "tests": "delta"} {
+		freshGroup := wireGroup(t, fresh, repoFresh, group)
+		v, present := freshGroup[field]
 		if !present {
-			t.Errorf("%s: %s is absent from the json; a consumer cannot tell an absent delta from a key it forgot to read", repoFresh, field)
+			t.Errorf("%s: %s.%s is absent from the json; a consumer cannot tell an absent delta from a key it forgot to read", repoFresh, group, field)
 		}
 		if v != nil {
-			t.Errorf("%s has no baseline, so %s must be null, got %v", repoFresh, field, v)
+			t.Errorf("%s has no baseline, so %s.%s must be null, got %v", repoFresh, group, field, v)
 		}
 
-		mover, ok := byName[repoMover]
-		if !ok {
-			t.Fatalf("%s missing from the json", repoMover)
+		moverGroup := wireGroup(t, mover, repoMover, group)
+		if moverGroup[field] == nil {
+			t.Errorf("%s has a baseline, so %s.%s must not be null", repoMover, group, field)
 		}
-		if mover[field] == nil {
-			t.Errorf("%s has a baseline, so %s must not be null", repoMover, field)
-		}
-		if _, ok := mover[field].(float64); !ok {
-			t.Errorf("%s: %s decoded as %T, want a json number", repoMover, field, mover[field])
+		if _, ok := moverGroup[field].(float64); !ok {
+			t.Errorf("%s: %s.%s decoded as %T, want a json number", repoMover, group, field, moverGroup[field])
 		}
 	}
 
@@ -517,13 +582,17 @@ func TestJSONWireShape(t *testing.T) {
 	if got, present := crashed["has_snapshot"]; !present || got != true {
 		t.Errorf("crashedrepo did run, it just came back empty, so has_snapshot should be true: got %v (present=%v)", got, present)
 	}
-	for _, field := range []string{"coverage_delta_points", "tests_delta"} {
-		v, present := crashed[field]
+	// The outer level of null this time. The run collected nothing, so there is
+	// no group to hold a delta, and the key still has to be on the wire carrying
+	// null rather than missing: a consumer that never sees the key at all is one
+	// `?? {}` away from the zeros coming back.
+	for _, group := range []string{"coverage", "tests"} {
+		v, present := crashed[group]
 		if !present {
-			t.Errorf("crashedrepo: %s is absent from the json; a consumer cannot tell an absent delta from a key it forgot to read", field)
+			t.Errorf("crashedrepo: %s is absent from the json; a consumer cannot tell an unmeasured group from a key it forgot to read", group)
 		}
 		if v != nil {
-			t.Errorf("crashedrepo has a baseline but its latest run collected nothing, so %s must be null, got %v", field, v)
+			t.Errorf("crashedrepo collected nothing, so %s must be null, got %v", group, v)
 		}
 	}
 }
@@ -722,15 +791,16 @@ func TestFailedCollectionAfterAGoodOneInventsNoCliff(t *testing.T) {
 		t.Errorf("crashedrepo collected nothing, so no package of its may be described as coming or going:\n%s", md)
 	}
 
-	// The JSON has to be honest about the same thing, since a consumer reading
-	// coverage_delta_points would otherwise chart the cliff.
-	if view.CoverageDeltaPoints != nil || view.TestsDelta != nil {
-		t.Errorf("crashedrepo collected nothing but the view publishes deltas: coverage=%v tests=%v",
-			view.CoverageDeltaPoints, view.TestsDelta)
+	// The JSON has to be honest about the same thing, since a consumer reading a
+	// coverage delta would otherwise chart the cliff. With the numbers nested
+	// there is nothing left to read: the group itself is gone.
+	if view.Coverage != nil || view.Tests != nil {
+		t.Errorf("crashedrepo collected nothing but the view publishes measurement groups: coverage=%+v tests=%+v",
+			view.Coverage, view.Tests)
 	}
-	if len(view.Culprits) != 0 || len(view.RemovedPackages) != 0 || len(view.AddedPackages) != 0 {
+	if len(view.Culprits()) != 0 || len(view.RemovedPackages()) != 0 || len(view.AddedPackages()) != 0 {
 		t.Errorf("crashedrepo collected nothing but the view publishes package findings: culprits=%d added=%v removed=%v",
-			len(view.Culprits), view.AddedPackages, view.RemovedPackages)
+			len(view.Culprits()), view.AddedPackages(), view.RemovedPackages())
 	}
 	if view.Status != string(store.StatusFailed) || view.Error == "" {
 		t.Errorf("crashedrepo must still carry the status and error that explain the blanks: status=%q error=%q", view.Status, view.Error)
@@ -761,13 +831,13 @@ func TestNeverCollectedRepoIsNotPublishedAsHealthy(t *testing.T) {
 	if view.Status != report.StatusNotCollected {
 		t.Errorf("%s status: got %q, want %q", repoUnseen, view.Status, report.StatusNotCollected)
 	}
-	if view.CoverageDeltaPoints != nil || view.TestsDelta != nil {
-		t.Errorf("%s has nothing to compare, but the view publishes deltas: coverage=%v tests=%v",
-			repoUnseen, view.CoverageDeltaPoints, view.TestsDelta)
+	if view.Coverage != nil || view.Tests != nil {
+		t.Errorf("%s was never measured, but the view publishes measurement groups: coverage=%+v tests=%+v",
+			repoUnseen, view.Coverage, view.Tests)
 	}
-	if len(view.Culprits) != 0 || len(view.AddedPackages) != 0 || len(view.RemovedPackages) != 0 {
+	if len(view.Culprits()) != 0 || len(view.AddedPackages()) != 0 || len(view.RemovedPackages()) != 0 {
 		t.Errorf("%s has no snapshot, but the view publishes package findings: culprits=%d added=%v removed=%v",
-			repoUnseen, len(view.Culprits), view.AddedPackages, view.RemovedPackages)
+			repoUnseen, len(view.Culprits()), view.AddedPackages(), view.RemovedPackages())
 	}
 	if len(built.Movers) != 0 {
 		t.Errorf("%s has no snapshot, so it cannot have moved, but it leads the report: %v", repoUnseen, built.Movers)
@@ -802,9 +872,13 @@ func TestNeverCollectedRepoIsNotPublishedAsHealthy(t *testing.T) {
 	if got := wire["status"]; got == string(store.StatusOK) {
 		t.Errorf("%s status went over the wire as %q, so a consumer reads it as a healthy repo at zero", repoUnseen, got)
 	}
-	for _, field := range []string{"coverage_delta_points", "tests_delta"} {
-		if v := wire[field]; v != nil {
-			t.Errorf("%s has nothing to compare, so %s must be null, got %v", repoUnseen, field, v)
+	for _, group := range []string{"coverage", "tests"} {
+		v, present := wire[group]
+		if !present {
+			t.Errorf("%s: %s is missing from the json rather than null, so a consumer defaulting the key sees a measured zero", repoUnseen, group)
+		}
+		if v != nil {
+			t.Errorf("%s was never measured, so %s must be null, got %v", repoUnseen, group, v)
 		}
 	}
 	t.Logf("never collected repo report:\n%s", md)

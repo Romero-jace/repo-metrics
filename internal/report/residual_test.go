@@ -35,20 +35,26 @@ func TestEmptyProfilePublishesNoComparison(t *testing.T) {
 
 	row := jsonRepoRows(t, rep)[name]
 
-	if got := row["coverage_delta_points"]; got != nil {
-		t.Errorf("coverage_delta_points: got %v, want null. Nothing was measured, "+
-			"so the whole baseline was posted as this week's drop.", got)
+	// One assertion now covers what three used to. The delta, the culprits and
+	// the churn lists all lived beside a boolean that said they meant nothing;
+	// they live inside the coverage group instead, so an unmeasured head has
+	// nowhere to put them. The key still has to be present and null, because a
+	// missing key is what a consumer defaults.
+	v, present := row["coverage"]
+	if !present {
+		t.Fatal("the coverage key is missing rather than null, so a consumer " +
+			"defaulting it sees a measured zero")
 	}
-	if got, _ := row["culprits"].([]any); len(got) != 0 {
-		t.Errorf("culprits: got %v, want none. A package was named as the cause "+
-			"of a drop that never happened.", got)
+	if v != nil {
+		t.Errorf("coverage: got %v, want null. Nothing was measured, so any "+
+			"comparison here posts the whole baseline as this week's drop.", v)
 	}
-	if got, _ := row["removed_packages"].([]any); len(got) != 0 {
-		t.Errorf("removed_packages: got %v, want none. An unmeasured head makes "+
-			"every baseline package look deleted.", got)
-	}
-	if row["coverage_measured"] != false {
-		t.Errorf("coverage_measured: got %v, want false", row["coverage_measured"])
+	// The tests group is the control: this run did parse a test stream, so the
+	// coverage null above has to be about coverage rather than about the row
+	// having been blanked wholesale.
+	if _, ok := row["tests"].(map[string]any); !ok {
+		t.Errorf("tests: got %v, want an object. This run measured tests, and a "+
+			"gate that blanks a real measurement is the opposite failure.", row["tests"])
 	}
 
 	// And the prose must not describe the phantom move either.
@@ -77,13 +83,14 @@ func TestMeasuredBothSidesStillPublishesTheComparison(t *testing.T) {
 
 	row := jsonRepoRows(t, rep)[name]
 
-	if row["coverage_delta_points"] == nil {
-		t.Error("coverage_delta_points is null for a repo that measured both sides")
+	coverage, ok := row["coverage"].(map[string]any)
+	if !ok {
+		t.Fatalf("coverage: got %v, want an object for a repo that measured both sides", row["coverage"])
 	}
-	if got, _ := row["culprits"].([]any); len(got) == 0 {
+	if coverage["delta_points"] == nil {
+		t.Error("coverage.delta_points is null for a repo that measured both sides")
+	}
+	if got, _ := coverage["culprits"].([]any); len(got) == 0 {
 		t.Error("no culprits for a real 32 point drop")
-	}
-	if row["coverage_measured"] != true {
-		t.Errorf("coverage_measured: got %v, want true", row["coverage_measured"])
 	}
 }

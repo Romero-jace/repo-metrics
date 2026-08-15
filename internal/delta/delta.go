@@ -246,7 +246,14 @@ func computeRepo(in Input, opts Options) RepoDelta {
 	// A test-count change only counts when both sides measured tests. Otherwise
 	// turning on stdout_format would make every repo a mover on the strength of
 	// its whole suite appearing out of nowhere.
-	d.IsMover = math.Abs(d.CoverageChange()) >= opts.MinRepoDelta ||
+	// Both halves need their own guard, and for a long time only the test half
+	// had one. A head that measured coverage over a baseline that did not gets
+	// CoverageChange = headPct - 0, clears any sane threshold on a number that
+	// is entirely an artifact, and leads the report as the week's biggest mover
+	// while its delta renders as null, because the gate one layer down is
+	// working correctly. Selecting a mover and publishing its delta have to ask
+	// the same question.
+	d.IsMover = (d.CoverageChangeMeaningful() && math.Abs(d.CoverageChange()) >= opts.MinRepoDelta) ||
 		(d.TestChangeMeaningful() && d.TestChange() != 0)
 
 	return d

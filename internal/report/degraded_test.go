@@ -1,6 +1,7 @@
 package report_test
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 	"testing"
@@ -119,7 +120,13 @@ func degradedRows() []degradedRow {
 			cells: [len(degradedColumns)]cellSpec{
 				unmeasured(), unmeasured(), unmeasured(), unmeasured(), unmeasured(),
 			},
-			moverBeforeFiltering: true,
+			// delta.Compute now excludes this itself: a failed head stored no
+			// coverage, so CoverageChangeMeaningful is false and IsMover never
+			// fires. It used to reach the report and be dropped there. The
+			// report filter is now a backstop rather than the only guard, and
+			// TestBuildDropsAMoverThatMeasuredNothing exercises it directly so
+			// the backstop does not rot untested.
+			moverBeforeFiltering: false,
 		},
 		{
 			name: repoIngest,
@@ -170,7 +177,10 @@ func degradedRows() []degradedRow {
 			cells: [len(degradedColumns)]cellSpec{
 				unmeasured(), unmeasured(), measured("5"), measured("+0"), measured("0"),
 			},
-			moverBeforeFiltering: true,
+			// Same as the failed row above: delta stopped marking this a mover
+			// once the coverage half of IsMover got the guard the test half
+			// already had. See TestBuildDropsAMoverThatMeasuredNothing.
+			moverBeforeFiltering: false,
 		},
 		{
 			// The control that stops the invariant being written as
@@ -258,19 +268,32 @@ func TestDegradedStatesNeverRenderAnUnmeasuredNumber(t *testing.T) {
 				}
 			}
 
-			// The gates are the only thing a JSON consumer can key a blank off,
-			// so they have to agree with what the markdown decided to print.
-			gate := wire[row.name]
-			if gate == nil {
+			// The two renderers have to have made the same call. The markdown
+			// blanks a cell; the JSON drops the whole group. If those ever come
+			// apart, one format is publishing a number the other refused to.
+			//
+			// This used to compare against the coverage_measured and
+			// tests_measured booleans. They are gone: the group being null says
+			// it structurally, and a boolean beside it was a second source of
+			// truth with nothing keeping the two in step.
+			wireRow := wire[row.name]
+			if wireRow == nil {
 				t.Fatalf("%s is missing from the json entirely", row.name)
 			}
-			if got := gate["coverage_measured"]; got != row.cells[0].measured {
-				t.Errorf("%s coverage_measured: got %v, want %v to match the rendered coverage column",
-					row.name, got, row.cells[0].measured)
-			}
-			if got := gate["tests_measured"]; got != row.cells[2].measured {
-				t.Errorf("%s tests_measured: got %v, want %v to match the rendered tests column",
-					row.name, got, row.cells[2].measured)
+			for _, group := range []struct {
+				key    string
+				column int
+			}{{"coverage", 0}, {"tests", 2}} {
+				v, present := wireRow[group.key]
+				if !present {
+					t.Errorf("%s: the %s key is missing from the json rather than null. A consumer that never sees the key defaults it, and the zeros come straight back.",
+						row.name, group.key)
+					continue
+				}
+				if got := v != nil; got != row.cells[group.column].measured {
+					t.Errorf("%s %s: json group present=%v, but the markdown %s column reads %q. The two renderers disagree about whether anything was measured.",
+						row.name, group.key, got, degradedColumns[group.column], cells[group.column])
+				}
 			}
 		})
 	}
@@ -329,138 +352,245 @@ func tableCells(t *testing.T, md, name string) [len(degradedColumns)]string {
 	return out
 }
 
-// fieldKind is how a consumer of the JSON has to treat one key.
+// fieldKind is how a consumer of the JSON has to treat one path.
 type fieldKind string
 
 const (
-	// kindMeasurement is a number that may or may not have been measured. Every
-	// one of them has to name the gate a consumer reads first.
+	// kindGroup is a nullable object that holds measurements and everything
+	// derived from them. It is the only place a number is allowed to be, and it
+	// renders as null whenever nothing measured it.
+	kindGroup fieldKind = "group"
+	// kindMeasurement is a number. Every one of them has to be inside a group,
+	// so a consumer cannot reach it at all unless something measured it.
 	kindMeasurement fieldKind = "measurement"
-	// kindGate is a boolean saying whether some measurement happened.
-	kindGate fieldKind = "gate"
-	// kindContext is everything else: names, statuses, lists, error text.
+	// kindContext is everything else: names, statuses, booleans, lists, error
+	// text. A context path may never render as a number.
 	kindContext fieldKind = "context"
 )
 
-type fieldClass struct {
-	kind fieldKind
-	// gates are the boolean keys that say whether this number means anything.
-	// A consumer that charts the number without reading these plots a zero
-	// nobody measured, which is the whole bug class this file exists for.
-	gates []string
-}
-
-// repoViewFields is written by hand on purpose.
+// repoWireFields is the census, and it is written by hand on purpose.
 //
 // Deriving it from the struct would make it agree with the code automatically,
 // and automatic agreement is exactly what must not happen here: the point is
 // that a human has to decide what a new number means before it can ship. A new
 // field lands on the wire, fails this test, and the author has to come here and
-// say whether it is a measurement and what gates it.
-var repoViewFields = map[string]fieldClass{
-	"name":         {kind: kindContext},
-	"status":       {kind: kindContext},
-	"collected_at": {kind: kindContext},
-	"error":        {kind: kindContext},
-	"env_changed":  {kind: kindContext},
-	// Culprits and package churn are lists. An empty list is not a claim about
-	// a number, so they need no gate.
-	"culprits":         {kind: kindContext},
-	"added_packages":   {kind: kindContext},
-	"removed_packages": {kind: kindContext},
+// say what it is.
+//
+// It replaces a flat map in which each measurement named the boolean gate that
+// governed it. The gates are gone and the numbers moved inside nullable groups,
+// so the question the census asks got stricter rather than merely different:
+// not "does every number name a gate that exists" but "is every number inside a
+// nullable group, and is every group actually nullable". A number that ends up
+// ungrouped now fails the build instead of needing a reviewer to notice.
+//
+// Paths use a dot for an object key and [] for a list element.
+var repoWireFields = map[string]fieldKind{
+	"name":         kindContext,
+	"status":       kindContext,
+	"collected_at": kindContext,
+	"error":        kindContext,
+	// These three are booleans, and none of them gates a number any more. They
+	// say which kind of nothing a null group is, alongside status.
+	"has_snapshot": kindContext,
+	"has_baseline": kindContext,
+	"env_changed":  kindContext,
 
-	"has_snapshot":      {kind: kindGate},
-	"has_baseline":      {kind: kindGate},
-	"tests_measured":    {kind: kindGate},
-	"coverage_measured": {kind: kindGate},
+	"coverage":              kindGroup,
+	"coverage.pct":          kindMeasurement,
+	"coverage.covered":      kindMeasurement,
+	"coverage.total":        kindMeasurement,
+	"coverage.delta_points": kindMeasurement,
+	// The culprits and the churn lists live inside the coverage group because
+	// they are coverage findings. Keeping them outside would put four numbers
+	// (a culprit's two percentages, its contribution and its statement count)
+	// beyond the reach of the rule below, and the rule would have needed an
+	// exception clause for lists of objects. An exception clause is how this
+	// guard gets quietly relaxed.
+	"coverage.culprits":                       kindContext,
+	"coverage.culprits[].package":             kindContext,
+	"coverage.culprits[].state":               kindContext,
+	"coverage.culprits[].from_pct":            kindMeasurement,
+	"coverage.culprits[].to_pct":              kindMeasurement,
+	"coverage.culprits[].contribution_points": kindMeasurement,
+	"coverage.culprits[].statements":          kindMeasurement,
+	"coverage.added_packages":                 kindContext,
+	"coverage.removed_packages":               kindContext,
 
-	"coverage_pct":       {kind: kindMeasurement, gates: []string{"coverage_measured"}},
-	"covered_statements": {kind: kindMeasurement, gates: []string{"coverage_measured"}},
-	"total_statements":   {kind: kindMeasurement, gates: []string{"coverage_measured"}},
-	// A delta needs both a measured head and something to compare it against,
-	// so it names two gates rather than one.
-	"coverage_delta_points":  {kind: kindMeasurement, gates: []string{"coverage_measured", "has_baseline"}},
-	"tests":                  {kind: kindMeasurement, gates: []string{"tests_measured"}},
-	"tests_delta":            {kind: kindMeasurement, gates: []string{"tests_measured", "has_baseline"}},
-	"packages_without_tests": {kind: kindMeasurement, gates: []string{"tests_measured"}},
+	"tests":                        kindGroup,
+	"tests.count":                  kindMeasurement,
+	"tests.delta":                  kindMeasurement,
+	"tests.packages_without_tests": kindMeasurement,
 }
 
-// TestEveryNumericFieldIsClassified is the fail-closed half of this file, and
-// the load-bearing one.
+// wireCensus is what walking the rendered JSON learned.
+type wireCensus struct {
+	// paths is every key path that reached the wire, across every degraded
+	// state, so a classification that no longer matches anything can be spotted.
+	paths map[string]bool
+	// nulled and filled are the anti-vacuity control for groups. A group that no
+	// fixture ever renders as null has not been shown to be nullable, and one no
+	// fixture ever fills in means the fixture never reaches the measured state,
+	// so neither half of the rule would have been tested.
+	nulled map[string]bool
+	filled map[string]bool
+	// problems are phrased as the question the author has to answer.
+	problems []string
+}
+
+func newWireCensus() *wireCensus {
+	return &wireCensus{
+		paths:  map[string]bool{},
+		nulled: map[string]bool{},
+		filled: map[string]bool{},
+	}
+}
+
+func (c *wireCensus) problem(format string, args ...any) {
+	c.problems = append(c.problems, fmt.Sprintf(format, args...))
+}
+
+// walk descends the rendered value, carrying whether it is currently inside a
+// nullable group. Descending rather than reading only the top level is what
+// stops the rule being dodged one level down: a number tucked into a new nested
+// object, or into a list of objects, is still a number a consumer can default.
+func (c *wireCensus) walk(path string, v any, inGroup bool) {
+	switch val := v.(type) {
+	case map[string]any:
+		for key, child := range val {
+			childPath := key
+			if path != "" {
+				childPath = path + "." + key
+			}
+			c.paths[childPath] = true
+			kind, ok := repoWireFields[childPath]
+			if !ok {
+				c.problem("%q reaches the wire and nothing in repoWireFields says what it is. Add it: is it a number, and if so which nullable group is it inside?", childPath)
+				continue
+			}
+			switch kind {
+			case kindGroup:
+				if inGroup {
+					c.problem("%q is classified a group but sits inside another group. Nesting groups makes the null ambiguous: a consumer cannot tell which level was not measured.", childPath)
+				}
+				if child == nil {
+					c.nulled[childPath] = true
+					continue
+				}
+				if _, isObject := child.(map[string]any); !isObject {
+					c.problem("%q is classified a group but rendered as %T. A group is an object or null, and nothing else.", childPath, child)
+					continue
+				}
+				c.filled[childPath] = true
+				c.walk(childPath, child, true)
+			case kindMeasurement:
+				if !inGroup {
+					c.problem("%q is a number sitting outside any nullable group. A consumer reading it with a default turns an absent measurement straight back into a measured zero, which is the bug this whole package exists to refuse. Move it inside coverage or tests, or into a new nullable group.", childPath)
+				}
+				switch child.(type) {
+				case float64, nil:
+				default:
+					c.problem("%q is classified a measurement but rendered as %T (%v).", childPath, child, child)
+				}
+			case kindContext:
+				c.walk(childPath, child, inGroup)
+			}
+		}
+	case []any:
+		for _, item := range val {
+			c.walk(path+"[]", item, inGroup)
+		}
+	case float64:
+		// Reached only through a path classified as context, or through a list
+		// element. Either way it is a number nobody declared as one.
+		c.problem("%q renders as the number %v, but it is not classified a measurement. Every number on the wire has to be declared, and has to live inside a nullable group.", path, val)
+		if !inGroup {
+			c.problem("%q is also outside any nullable group, so nothing stops a consumer defaulting it to zero.", path)
+		}
+	}
+}
+
+// TestEveryNumberIsInsideANullableGroup is the fail-closed half of this file,
+// and the load-bearing one.
 //
-// The table above it asserts today's fields render honestly. That catches the
+// The table above it asserts today's columns render honestly. That catches the
 // five instances of this bug that have already happened and would miss the
 // sixth, because the sixth will almost certainly be a new number on RepoView
-// that nobody classified, and a table of today's columns simply would not
-// mention it. This does: any key that reaches the wire without an entry here
-// fails, and the failure asks the author the one question that matters.
-func TestEveryNumericFieldIsClassified(t *testing.T) {
+// that nobody thought about, and a table of today's columns simply would not
+// mention it. This does, in four ways that each close a different door:
+//
+//  1. every key on the wire has to be classified, so a new field fails here
+//     before a reviewer has to notice it;
+//  2. no number may render outside a nullable group, asserted from the rendered
+//     value's type rather than from what the census claims, so an ungrouped
+//     number fails even if someone classified it as context;
+//  3. every declared group has to be observed both null and filled, so
+//     "nullable" is demonstrated rather than asserted;
+//  4. the walk recurses, so the rule cannot be dodged by burying a number one
+//     level further down.
+func TestEveryNumberIsInsideANullableGroup(t *testing.T) {
 	rows := degradedRows()
 	inputs := make([]delta.Input, 0, len(rows))
 	for _, row := range rows {
 		inputs = append(inputs, row.in)
 	}
+
 	// The union across every state, because error is omitempty and only a
-	// failed row carries it. A census taken from one healthy row would declare
-	// a real key rot.
-	wire := map[string]bool{}
+	// failed row carries it, and because no single row shows a group both null
+	// and filled. A census taken from one healthy row would declare a real key
+	// rot and would never see a null at all.
+	census := newWireCensus()
 	for name, row := range jsonRepoRows(t, delta.Compute(inputs, options(), fixedNow())) {
 		if len(row) == 0 {
 			t.Fatalf("%s rendered an empty json object", name)
 		}
-		for key := range row {
-			wire[key] = true
+		census.walk("", row, false)
+	}
+
+	for _, problem := range census.problems {
+		t.Error(problem)
+	}
+
+	for path := range repoWireFields {
+		if !census.paths[path] {
+			t.Errorf("repoWireFields classifies %q but no rendered row carries it, so the classification is rot. Either the field was removed or the fixture no longer reaches the state that emits it.", path)
 		}
 	}
 
-	for key := range wire {
-		if _, ok := repoViewFields[key]; !ok {
-			t.Errorf("RepoView puts %q on the wire and nothing here says what it is. Add it to repoViewFields: is it a measurement, and if so which gate tells a consumer it was actually measured?", key)
-		}
-	}
-	for key := range repoViewFields {
-		if !wire[key] {
-			t.Errorf("repoViewFields classifies %q but no rendered row carries it, so the classification is rot. Either the field was removed or the fixture no longer reaches the state that emits it.", key)
-		}
-	}
-
-	for key, class := range repoViewFields {
-		if class.kind != kindMeasurement {
-			if len(class.gates) != 0 {
-				t.Errorf("%q is classified %s but names gates; only a measurement needs one", key, class.kind)
-			}
+	for path, kind := range repoWireFields {
+		if kind != kindGroup {
 			continue
 		}
-		if len(class.gates) == 0 {
-			t.Errorf("%q is a measurement with no gate, so a consumer has no way to tell a measured zero from an unmeasured one", key)
+		if !census.nulled[path] {
+			t.Errorf("%q is declared a group but no degraded state renders it as null, so nothing here proves it is nullable at all. A group that is always an object is a flat struct wearing a namespace, and the numbers inside it are as defaultable as they ever were.", path)
 		}
-		for _, gate := range class.gates {
-			g, ok := repoViewFields[gate]
-			if !ok {
-				t.Errorf("%q names the gate %q, which is not a field at all", key, gate)
-				continue
-			}
-			if g.kind != kindGate {
-				t.Errorf("%q names %q as its gate, but %q is classified %s", key, gate, gate, g.kind)
-			}
+		if !census.filled[path] {
+			t.Errorf("%q is declared a group but no fixture ever fills it in, so the measured case is untested and the null above proves nothing.", path)
 		}
 	}
 
-	// Pin the count as well as the membership. RepoView carries exactly seven
-	// numbers today; the assertion above would still pass if a future edit
-	// reclassified one of them as context to quiet a failure, and this would
-	// not.
+	// Pin the set as well as the membership rules. The assertions above would
+	// still pass if a future edit reclassified a number as context to quiet a
+	// failure, or dropped one, and this would not.
 	var measurements []string
-	for key, class := range repoViewFields {
-		if class.kind == kindMeasurement {
-			measurements = append(measurements, key)
+	for path, kind := range repoWireFields {
+		if kind == kindMeasurement {
+			measurements = append(measurements, path)
 		}
 	}
 	want := []string{
-		"coverage_delta_points", "coverage_pct", "covered_statements",
-		"packages_without_tests", "tests", "tests_delta", "total_statements",
+		"coverage.covered",
+		"coverage.culprits[].contribution_points",
+		"coverage.culprits[].from_pct",
+		"coverage.culprits[].statements",
+		"coverage.culprits[].to_pct",
+		"coverage.delta_points",
+		"coverage.pct",
+		"coverage.total",
+		"tests.count",
+		"tests.delta",
+		"tests.packages_without_tests",
 	}
 	if got := strings.Join(sortedNames(measurements), ","); got != strings.Join(want, ",") {
-		t.Errorf("measurement fields: got %v, want %v. A number moved buckets, which is a decision worth making on purpose rather than to quiet a test.", sortedNames(measurements), want)
+		t.Errorf("measurement paths: got %v, want %v. A number moved buckets, which is a decision worth making on purpose rather than to quiet a test.", sortedNames(measurements), want)
 	}
 }

@@ -68,6 +68,56 @@ func TestAgainstGoToolCover(t *testing.T) {
 	}
 }
 
+// TestTestJSONAgainstRealStream checks the no-test-files detection against a
+// genuine test2json stream rather than a hand-built fixture.
+//
+// The rule it guards is empirical: a package with no test files reports Action
+// "skip" with an empty Test, which is also what a package whose every test
+// called t.Skip reports. The parser additionally requires the "[no test files]"
+// output marker, so this test independently counts that marker in the raw
+// stream and compares.
+//
+// Opt-in:
+//
+//	REPO_METRICS_TEST_JSON=/path/to/stream.json \
+//	go test ./internal/collect/golang/ -run TestTestJSONAgainstRealStream -v
+func TestTestJSONAgainstRealStream(t *testing.T) {
+	path := os.Getenv("REPO_METRICS_TEST_JSON")
+	if path == "" {
+		t.Skip("set REPO_METRICS_TEST_JSON to cross-check against a real go test -json stream")
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading stream: %v", err)
+	}
+
+	summary, err := golang.ParseTestJSON(strings.NewReader(string(raw)))
+	if err != nil {
+		t.Fatalf("ParseTestJSON: %v", err)
+	}
+
+	// Count the marker independently of the parser's own logic.
+	var wantEmpty int
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.Contains(line, "[no test files]") {
+			wantEmpty++
+		}
+	}
+
+	got := summary.PackagesWithoutTests()
+	tests, failed, skipped, elapsed := summary.Totals()
+	t.Logf("packages=%d without-tests=%d tests=%d failed=%d skipped=%d elapsed=%s malformed=%d",
+		len(summary.Packages), got, tests, failed, skipped, elapsed, summary.Malformed)
+
+	if got != wantEmpty {
+		t.Errorf("PackagesWithoutTests: got %d, want %d (independent marker count)", got, wantEmpty)
+	}
+	if summary.Malformed != 0 {
+		t.Errorf("a clean run produced %d malformed lines", summary.Malformed)
+	}
+}
+
 // goToolCoverTotal shells out for the official number and returns the percentage
 // from its trailing "total:" line.
 func goToolCoverTotal(t *testing.T, dir, profile string) float64 {

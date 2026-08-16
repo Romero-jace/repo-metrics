@@ -69,7 +69,8 @@ PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin
 `;` between the two, not `&&`. `collect` exits 1 when any single repo failed,
 deliberately, because it keeps going so one unreachable repo does not cost you
 the other nine. Chained with `&&`, that same exit code hands one bad repo a veto
-over the whole report. The plist ships `;` for the same reason and says so.
+over the whole report. The plist ships `;` for the same reason and says so, and
+the README's "Streams and exit codes" section has the rest of the exit contract.
 
 ## 7d or 168h
 

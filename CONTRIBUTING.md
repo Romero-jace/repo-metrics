@@ -195,6 +195,18 @@ Signals in the second group set `ScopeSetMustMatch` on their registry entry.
 a mover on the strength of it. Set it when the scope names how the measurement
 was taken, and leave it off when the scope names what was measured.
 
+The fingerprint is taken over the signal's MARKER key, not over the key its
+extractor reads: `Side.measure` calls `s.scopeKey(sig.Marker)`. For every signal
+that sets the flag today those are either the same key, or two keys one parser
+writes together at one scope, so it is right by circumstance rather than by
+construction. `lint_errors` and `lint_suppressed` fingerprint `lint.findings`
+while summing `lint.errors` and `lint.suppressed`, and that holds only because
+the SARIF parser writes all three keys under the same step's scope in one pass.
+A signal whose marker and value keys could carry different scope sets would
+fingerprint the wrong one, and then compare two sums that covered different
+things, which is the exact failure the flag exists to refuse. If you set it,
+check that the marker's scope set really is the value's.
+
 A second rule sits next to that one and asks a different question, so a new
 signal has to pick between them. `ScopeSetMustMatch` asks whether both sides
 covered the same things. `PartialWhen` asks whether either side covered
@@ -220,9 +232,25 @@ A signal is what the report publishes. It is not the same as a config `signals:`
 entry, which is a collection step: one `go test` step yields six reported
 signals, because the toolchain gives them up together.
 
-Seven places, and four drift guards will fail the build if you miss one, a fifth
-if the signal takes a column in the every-repo table, so the list is a shortcut
-rather than the enforcement:
+Eight places. Four drift guards fail the build if you miss one of places 4 to 7,
+and a fifth does if the signal takes a column in the every-repo table, so for
+that stretch the list is a shortcut rather than the enforcement. Places 1 and 3
+need no guard, because skipping either is not a thing you can do quietly: a
+metric key nothing declares will not compile, and a signal with no registry entry
+is not a signal. That leaves two of the eight genuinely unguarded, and they are
+the two worth slowing down for.
+
+Place 2 is one of them, which follows from the marker contract being the one
+thing a registry entry cannot check for itself. Declare a marker key and forget
+to make the parser write it, and no test in this repo notices: the fixtures that
+stand in for collector output are hand written, so they satisfy a marker no
+parser emits just as readily as one that is emitted. Confirmed by probe. A marker
+key was pointed at a name nothing writes, every fixture updated to match, and
+build, vet, the whole suite and the linter all stayed green while that signal
+published null for a repo that genuinely had dozens. That is the
+permanently-unmeasured half of the bug at the top of this file, reachable by
+following this list and skipping only place 2. Place 8 is the other unguarded
+one, for its own reason, given there.
 
 1. `internal/collect/keys.go` holds the metric key, with a comment saying which one
    is the marker and under what conditions it is written.
@@ -246,12 +274,77 @@ rather than the enforcement:
    also takes a column in the every-repo table needs a row in `pairedGroups` in
    the same file, and `TestEveryTableSignalIsPaired` is the fifth guard that
    fails without it: nothing else checks that a table signal's markdown cell and
-   its JSON group agree about whether anything measured it.
+   its JSON group agree about whether anything measured it. It also needs two more
+   entries in `degradedColumns` at the top of that file, the value column and its
+   change column, since that is a positional array of the table's columns in
+   template order. The template builds those columns from the registry, so a sixth
+   table signal widens every rendered row while the array stays the width it was,
+   and `tableCells` stops the run with "row has 14 cells, want 12". That is a
+   fixture being told about a change rather than a sixth guard, and it fails on
+   every degraded row at once, so read the width in the message rather than
+   hunting for a broken signal.
 6. `internal/delta/signal_test.go` needs a fixture saying what the collector stores
-   when it looked and found zero, and what it stores when it never looked.
+   when it looked and found zero, and what it stores when it never looked. A
+   signal claiming it has no reachable measured zero sets `zeroIsReachable: false`
+   AND takes a row in the `zeroUnreachable` map above the fixtures, with the
+   reason written out, or `TestNoSignalOptsOutOfTheMeasuredZeroCheckUnannounced`
+   fails naming it. An empty reason fails too. The map is pinned empty today
+   because nothing opts out, and the point of it is that the bool alone deletes
+   an assertion silently while the subtest keeps reporting ok.
 7. A fixture in `degraded_test.go` that renders the group filled at least once
    and null at least once, or the census reports it as never demonstrated
    nullable.
+8. The docs, which nothing checks at all. `README.md` says "Thirteen signals" in
+   prose and then lists them in a table with one row each. `CHANGELOG.md` repeats
+   the count and the names. The payload section of the README counts the keys on
+   a repo row, currently "Twenty-two keys" with `error` as "the twenty-third".
+   Every one of those is a number spelled as a word beside a registry that just
+   moved, and every guard above stays green while all of them go stale. It is
+   deliberately unguarded: a test asserting a word form, a numeral, a table row
+   count and two key counts against the registry would be an odd test for this
+   repo and would plausibly cost more than it protects. So grep for the count you
+   are changing and fix all of it in the same commit.
+
+### The extractor and the marker answer different questions
+
+Item 3 hides a field with no guard behind it, and getting that one wrong
+reproduces the bug at the top of this file exactly.
+
+There are two extractors and they read different maps. `repoValue` reads
+`Side.repoVal`, which `newSide` fills only from rows whose scope column is empty.
+`sumOver` reads `Side.pkgSum`, which it fills only from rows that carry a scope.
+Neither one falls back to the other. A key stored at one level and read at the
+other is a lookup in a map that never had an entry for it, so it comes back 0,
+and 0 is what gets published.
+
+**The extractor has to match the scope its own value key is stored at. That is a
+separate question from the marker's scope, and the two are independent.** The
+marker only answers whether anything looked. It is often a different key
+entirely, kept at a different level, and that is not a mistake to be fixed:
+`tests` and `packages without tests` share `pkg.without_tests` at repo scope as
+their marker, and then one of them reads `test.count` off the per-package rows
+with `sumOver` while the other reads `pkg.without_tests` itself with `repoValue`.
+Same marker, same `MarkerScope`, two opposite extractors, both correct. A rule
+phrased as "the extractor must match `MarkerScope`" would call that pair a bug,
+so do not carry that rule around.
+
+Nothing catches the mistake. Pair `dependencies` with `sumOver(deps.total)`
+instead of `repoValue(deps.total)`, change nothing else, and the whole suite is
+green. `TestEverySignalDistinguishesZeroFromUnmeasured` passes, which is worth
+sitting with, because it is the test written to catch this family of bug: its
+measured-zero fixture for that signal stores `deps.total` with a value of 0, so
+the correct extractor and the broken one both answer 0 and the assertion cannot
+tell them apart, and its absent fixture stores no `deps.total` row at all, so the
+marker is missing and the signal reads unmeasured either way. The fixtures are
+built to exercise presence, and presence is not what broke.
+
+Run the mispaired build against a real repo and it is unmistakable. Against this
+checkout, whose build list `deps.total` counts in the dozens, the report came
+back `"dependencies": {"value": 0, "delta": null}`, while `dependency_age`,
+parsed out of the very same `go list -m -json` stream, reported a real median age
+on the same row. The stream was demonstrably read, and the count still published
+a confident zero. Check the extractor against the scope its key is written at, by
+hand, because nothing downstream will.
 
 Direction has no neutral option on purpose. A signal nobody will commit to a
 direction for renders as "up" rather than "worse", and then a reader has to know
@@ -261,6 +354,26 @@ on their own whether rising numbers are bad news. Pick one.
 every week and buries the ones that matter, so anything sensitive to machine load
 or to the calendar should be reported and never lead. If it moves in proportion
 to its own size, give it a `MinMoveFraction` rather than a fixed floor.
+
+A signal that does nominate needs a real `MinMove`, and coverage is the wrong
+entry to copy for it. Coverage leaves `MinMove: 0` because `nominate`
+special-cases coverage by id and takes its floor from the config's
+`min_repo_delta` instead, which is the field operators have always written.
+Nothing else gets that treatment. Every other signal with a zero floor falls
+through to the fallback below it, which is 1 in the signal's own unit. For a
+count that is a sane default and reads like one. For a duration in milliseconds
+it is no floor at all, and a nominating millisecond signal would lead the report
+on a move of a few milliseconds. Nothing checks this, and no test in the repo
+reads `MinMove`.
+
+It takes three things at once, which is why it has not fired: `Nominates: true`,
+a zero `MinMove` on a millisecond signal, and no `MinMoveFraction` either. Both
+millisecond signals today fail two of the three, since they set
+`Nominates: false` AND `MinMoveFraction: 0.25`, and that relative floor is
+applied after the absolute one. So flipping `Nominates` alone on one of them
+changes nothing, which is worth knowing before you conclude the floor works.
+Measured on two snapshots seven minutes apart: with the fraction the repo is not
+a mover, without it the same 5 millisecond move makes it lead the report.
 
 The `repos` and `history` payloads carry their own censuses, in
 `internal/report/payload_census_test.go`, separate from the report's because they

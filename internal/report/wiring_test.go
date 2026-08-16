@@ -69,8 +69,8 @@ var signalFills = []struct {
 // does not fail anything: it renders as "not measured" on every repo forever,
 // in the movers write-up and in the every-repo table, and the report says a
 // collection that measured it never looked. That is this project's recurring bug
-// pointed the other way, and it is the one step of CONTRIBUTING's seven that had
-// no guard behind it.
+// pointed the other way, and until this test existed it was a step on
+// CONTRIBUTING's list with no guard behind it.
 //
 // The measured-versus-unmeasured predicate is "does the cell carry a digit",
 // which is the same rule the degraded-state table uses. It covers "not

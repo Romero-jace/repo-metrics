@@ -271,10 +271,11 @@ the cadence and you can always just run it by hand:
 0 6 * * *  repo-metrics collect ; repo-metrics report --out /srv/report.md
 ```
 
-That is a `;` and not an `&&` on purpose. `collect` exits 1 when any single repo
-failed, which is the design: it keeps going so one unreachable repo does not
-cost you the other nine. Chaining with `&&` would let that one repo cancel the
-report you actually wanted.
+That is a `;` and not an `&&` on purpose. `collect` keeps going when a repo
+fails, so one unreachable repo does not cost you the other nine, and then exits 1
+to say that one of them did fail. Chained with `&&`, that exit code would let a
+single bad repo cancel the report you actually wanted. "Streams and exit codes"
+below has the rest of what the exit status means.
 
 [`examples/`](examples/) has a ready-made launchd agent for macOS and the
 equivalent crontab line for Linux.
@@ -346,11 +347,14 @@ one such row rendered whole, so the key set is the one a consumer really gets:
 ```
 
 Twenty-two keys, and every repo row in a report payload has all of them. `error`
-is the twenty-third and the only one that is omitted rather than nulled, since it
-is there when there is something to say and gone when there is not. A repo that
+is the twenty-third and the only key on this row that is omitted rather than
+nulled, since it is there when there is something to say and gone when there is
+not. A history point carries an `error` of its own on the same terms, and those
+two are the only omitted keys anywhere on the wire. A repo that
 collected cleanly is the same shape with the groups filled in. The rows `repos
 --format json` returns are a different and much smaller shape, since that command
-answers a different question.
+answers a different question, and so is what `history` returns. Both are spelled
+out at the end of this section.
 
 That shape is deliberate. If those fields were merely omitted, a consumer writing
 `row.coverage_pct ?? 0` would turn an absent measurement straight back into a
@@ -444,8 +448,172 @@ byte-identical to the answer meaning "none of your three repos failed", which is
 a much stronger claim. `selected == configured` is how you know you are seeing
 all of it.
 
+**The other two payloads are their own shapes.** `repos` and `history` both take
+`--format json`, and neither returns anything resembling a report row.
+
+`repos` has two top-level keys, and each of its rows has five:
+
+```json
+{"generated_at": "2026-08-16 20:05 UTC",
+ "repos": [
+   {"name": "api", "status": "ok", "collected_at": "2026-08-16 20:05 UTC",
+    "has_snapshot": true, "coverage": {"pct": 78, "covered": 1560, "total": 2000}},
+   {"name": "worker", "status": "ok", "collected_at": "2026-08-09 06:00 UTC",
+    "has_snapshot": true, "coverage": {"pct": 80, "covered": 640, "total": 800}},
+   {"name": "old-service", "status": "not collected", "collected_at": null,
+    "has_snapshot": false, "coverage": null}]}
+```
+
+`name`, `status`, `collected_at`, `has_snapshot`, `coverage`, and that is the
+whole row: no deltas, no baseline, nothing derived from a second snapshot.
+`collected_at` and `coverage` are the two nullables and they answer different
+questions. A null `collected_at` means nobody has ever collected this repo, while
+a null `coverage` covers that case and two more, the run that failed and the run
+that succeeded without instrumenting anything. The `repos` key is always present
+and always an array.
+
+`history` has seven top-level keys:
+
+```json
+{"generated_at": "2026-08-16 20:05 UTC", "since": "2026-05-18 20:05 UTC",
+ "since_days": 90,
+ "scope": {"repo": "api", "selected": 1, "configured": 3},
+ "signal": {"id": "coverage", "label": "Coverage", "unit": "percent",
+            "direction": "higher_is_better"},
+ "last_collected": "2026-08-16 20:05 UTC",
+ "points": [
+   {"collected_at": "2026-08-09 06:00 UTC", "status": "ok",
+    "git_sha": "0ba66afc6e2a81bb25177b8a55906c041ee11a70",
+    "env": "go=go1.26.5;gowork=on", "measurement": {"value": 80}},
+   {"collected_at": "2026-08-16 20:05 UTC", "status": "ok",
+    "git_sha": "0ba66afc6e2a81bb25177b8a55906c041ee11a70",
+    "env": "go=go1.26.5;gowork=on", "measurement": {"value": 78}}]}
+```
+
+`generated_at`, `since`, `since_days`, `scope`, `signal`, `last_collected` and
+`points`. `signal` is the single object mentioned above rather than the report's
+catalog, since a history answer charts exactly one measurement. `last_collected`
+is null when the repo has never been collected at all, which is what tells an
+empty `points` array meaning "nobody ever ran this" apart from one meaning
+"collection stopped before the window you asked about". A point's `measurement`
+is null for a run that produced nothing for this signal, which is the same rule
+the report's groups follow.
+
+`scope` is the report envelope's three keys, and there is one difference worth
+knowing if you read both: `scope.repo` is always a name here, because `--repo` is
+required, while the report's is null whenever you did not narrow.
+
+One habit does not carry over, and it is worth knowing before you add to either
+payload. Numbers live inside nullable groups only where they are measurements. An
+input, meaning a number you supplied rather than one the tool went and found,
+sits bare on the envelope on purpose: `since_days` here, `window_days` on the
+report, and `scope`'s two counts on both. Nothing measured those and nothing can
+fail to, so a null would say something untrue.
+
+The rows are the safe part today. Every number on a `repos` row is inside the
+nullable `coverage` group and every number on a history point is inside its
+nullable `measurement`, so neither has a bare number anywhere. What is missing is
+the pressure that keeps it that way: a measurement added to either payload lands
+bare unless somebody puts it in a group deliberately, and then
+`row.whatever ?? 0` turns an absent measurement back into a measured zero, which
+is the one thing this whole format is arranged to prevent.
+
 Nothing here needs the flags to be discovered ahead of time: `repo-metrics
 report --help` lists them all.
+
+## Streams and exit codes
+
+Stdout carries the answer somebody asked for, the thing you would pipe
+somewhere. Stderr carries what the run has to say about itself: warnings, errors
+and the usage block. So `repo-metrics repos --format json | jq` works, and
+whatever went wrong along the way is still in your terminal rather than in jq's
+input.
+
+`collect` is the case worth stating outright, because its answer looks like
+progress. Its per-repo lines are on stdout, both the one before a repo starts and
+the one when it lands, since the table of what each repo did is the thing you ran
+it for. `collect > log.txt` captures those and leaves the diagnostics on your
+terminal.
+
+The binary itself only ever exits 0 or 1. There is exactly one `os.Exit` in it,
+in `cmd/repo-metrics/main.go`, and every failure goes through it, so there is no
+per-error code to switch on. A non-zero status that is not 1 did not come from
+the program: pipe a large report into something that stops reading, and SIGPIPE
+kills it with nothing on stderr while your shell reports 141.
+
+Exit 1 always leaves at least one line on stderr. `main` never prints the error
+it is handed back, so every path that returns one has already explained itself,
+including the paths you would not go looking for. A ctrl-C or a launchd `TERM`
+part way through a collect exits 1 after a line like `stopping early, collection
+was canceled after 1 of 2 repos`.
+
+Two spots in that surface catch people out, so they get said plainly here rather
+than left to be discovered.
+
+`help`, `-h` and `--help` print the usage block to **stderr** and exit 0, so
+`repo-metrics help > help.txt` writes an empty file. Usage is not an answer
+anybody asked to pipe.
+
+`version` with any argument at all exits 1, and that includes `-h`. Every other
+subcommand's `-h` exits 0. It is there because a command that takes no flags must
+not print a version and let you believe your flag was honored.
+
+Running `repo-metrics` with no arguments at all prints the same usage block that
+`help` prints, byte for byte, and exits 1 rather than 0. Asking for help is a
+question that got answered; naming no command is a command that was not given.
+
+A partial collection exits 0. Only a repo that failed outright, meaning it stored
+nothing worth having, makes `collect` exit 1:
+
+```
+$ repo-metrics collect
+collecting api (1 of 3)
+api                          ok       80.0% of 2000 statements; collected coverage
+collecting worker (2 of 3)
+worker                       partial  80.0% of 800 statements; collected coverage; could not collect lint
+collecting legacy (3 of 3)
+legacy                       failed   could not collect coverage
+$ echo $?
+1
+```
+
+Those six output lines are stdout. Stderr got the diagnostics from the repos that
+had any, and then `1 of 3 repos failed: legacy`. `worker` came back `partial` and
+cost the run nothing: drop `legacy` from the config and the same collection exits
+0, with `worker` still partial and still explaining itself on stderr. That is the
+`;`-rather-than-`&&` rule from further up, seen from the other end.
+
+| command | stdout | stderr | exit |
+|---|---|---|---|
+| `init` | `wrote PATH`, then a one-line next step | why it refused to write | 0, or 1 if the file is already there and you did not pass `--force` |
+| `collect` | one line per repo as it starts, one more when it lands | each repo's diagnostics as they happen, then a line naming the repos that failed | 0 for any number of partials, 1 if a repo failed outright |
+| `report` | the report, or `wrote PATH` when `--out` is set | why it refused | 0, or 1 on a bad flag value, an unknown `--repo`, an unwritable `--out`, or a config or database problem |
+| `repos` | the table or the JSON | why it refused | 0, or 1 on a bad `--format` or a config or database problem |
+| `history` | the table or the JSON | why it refused | 0, or 1 on a missing or unknown `--repo`, a bad `--signal`, `--format` or `--since`, or a config or database problem |
+| `version` | two lines, the version and the toolchain it was built with | the complaint about the argument | 0, or 1 given any argument at all |
+| `help`, `-h`, `--help` | nothing | the usage block | 0 |
+| no arguments | nothing | the usage block, and nothing else | 1 |
+| an unknown command | nothing | `unknown command "x"`, then the usage block | 1 |
+
+`--format json` is pure JSON on stdout and nothing else. All three payloads go
+through one encoder, which is why the same four things hold for each of them. The
+document is written in a single call, so a failure part way through encoding
+yields zero bytes rather than truncated JSON. It is not indented. HTML escaping
+is off, so `<`, `>` and `&` arrive as themselves rather than as the `\u003c`,
+`\u003e` and `\u0026` Go's encoder writes by default. And it ends with exactly
+one newline.
+
+For `report` that holds only while `--out` is empty. With `--out PATH` the report
+goes to the file and stdout gets `wrote PATH`, so `--format json --out F` leaves
+stdout holding a line of prose. `repos` and `history` have no `--out` flag at
+all, so for those two it holds unconditionally.
+
+Exit 0 with an empty stderr is not the success signal, and nothing should be
+written that waits for one. A clean run routinely has things to say: a repo that
+is not a git checkout, a module proxy nobody consulted, a signal that ran and
+found nothing worth recording. Those are `warn` lines on stderr and the run still
+exits 0. Read the exit code for whether it worked and stderr for what it noticed,
+and do not let a wrapper script collapse the second into the first.
 
 ## How it decides what to tell you
 

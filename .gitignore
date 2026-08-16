@@ -10,6 +10,12 @@
 go.work
 go.work.sum
 
-# Coverage artifacts, in case anyone runs the tool against this repo
-coverage.out
+# Coverage artifacts, in case anyone runs the tool against this repo.
+#
+# Any .out rather than coverage.out specifically. This repo's own docs and CI
+# hand -coverprofile several different names (cover.out, all.out, the temp files
+# the cross-check recipe writes), and naming one of them meant a stray profile
+# from a verification run was checked in and had to be pulled back out of a
+# commit. Nothing here legitimately ends in .out.
+*.out
 /reports/

@@ -86,6 +86,28 @@ func lintRun(step string, findings, errs, suppressed int) []store.Metric {
 	}
 }
 
+// depsRun is what the module parser stores for a repo whose proxy was actually
+// consulted: all three keys, each of which is its own marker.
+//
+// The three null independently on purpose, which depsOffline exercises.
+func depsRun(total int, medianAgeDays float64, outdatedDirect int) []store.Metric {
+	return []store.Metric{
+		{Key: collect.KeyDepsTotal, Value: float64(total)},
+		{Key: collect.KeyDepsAgeMedianDays, Value: medianAgeDays},
+		{Key: collect.KeyDepsOutdatedDirect, Value: float64(outdatedDirect)},
+	}
+}
+
+// depsOffline is the same run with GOPROXY off: the module list was read, so the
+// count and the ages are real, but nothing checked for newer versions and the
+// outdated row is therefore absent rather than zero.
+func depsOffline(total int, medianAgeDays float64) []store.Metric {
+	return []store.Metric{
+		{Key: collect.KeyDepsTotal, Value: float64(total)},
+		{Key: collect.KeyDepsAgeMedianDays, Value: medianAgeDays},
+	}
+}
+
 func snap(id, repoID int64, env string, status store.Status, errText string) *store.Snapshot {
 	return &store.Snapshot{
 		ID:          id,

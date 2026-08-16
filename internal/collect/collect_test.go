@@ -815,6 +815,195 @@ func TestTruncatedSARIFFailsRatherThanReportingZero(t *testing.T) {
 	}
 }
 
+// moduleStream is what `go list -m -u -json all` writes: a run of concatenated
+// JSON objects, NOT an array, with the main module first.
+//
+// One dependency, with a publish timestamp and an available update, so the
+// median age is that one module's age and the outdated count is 1. The main
+// module is excluded from every count: a repo is not one of its own
+// dependencies.
+const moduleStream = `{"Path":"example.com/m","Main":true,"Dir":"/tmp/m"}
+{"Path":"github.com/a/b","Version":"v1.2.3","Time":"2024-01-02T00:00:00Z","Update":{"Path":"github.com/a/b","Version":"v1.3.0"}}
+`
+
+// modulePinnedAt is the one dependency's publish date, and moduleNow is the
+// collection time, so the expected age is arithmetic rather than a magic number.
+var (
+	modulePinnedAt = time.Date(2024, 1, 2, 0, 0, 0, 0, time.UTC)
+	moduleNow      = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+)
+
+// depsStep runs a command that prints a canned module stream.
+//
+// The stream is canned rather than produced by a real `go list`, which would
+// make these tests depend on the network and on this repo's own module graph.
+// But the -u still has to be genuinely present in the argv, because that is what
+// repo-metrics reads to decide whether updates were checked, so it is passed as
+// a positional argument to sh: `sh -c 'cat FILE' -u` sets $0 to -u and runs the
+// cat. Faking that by rewriting the argv would test the fake instead.
+func depsStep(t *testing.T, dir, stream string, withUpdateFlag bool) config.Signal {
+	t.Helper()
+	argv := []string{"sh", "-c", "cat " + writeFile(t, dir, "modules.json", stream)}
+	if withUpdateFlag {
+		argv = append(argv, "-u")
+	}
+	return config.Signal{
+		Name:         "deps",
+		Command:      argv,
+		StdoutFormat: config.FormatGoListModules,
+		Timeout:      config.Duration(30 * time.Second),
+	}
+}
+
+func collectAt(t *testing.T, r config.Repo, now time.Time) collect.Result {
+	t.Helper()
+	return collect.Collect(context.Background(), r, now)
+}
+
+func TestModuleStreamCountsDependencies(t *testing.T) {
+	dir := repoDir(t)
+	step := depsStep(t, dir, moduleStream, true)
+	// A proxy that is set to anything but off. The value is never dialed: it is
+	// read to answer whether the toolchain was in a position to check at all.
+	step.Env = map[string]string{"GOPROXY": "https://proxy.example"}
+
+	res := collectAt(t, config.Repo{Name: "svc", Path: dir, Signals: []config.Signal{step}}, moduleNow)
+	if res.Snapshot.Status != store.StatusOK {
+		t.Fatalf("Status: got %q, want ok. Diagnostics:\n%s", res.Snapshot.Status, diagText(res))
+	}
+
+	if got := metric(t, res, collect.KeyDepsTotal, ""); got != 1 {
+		t.Errorf("dependencies: got %v, want 1; the main module must not count as its own dependency", got)
+	}
+	wantDays := moduleNow.Sub(modulePinnedAt).Hours() / 24
+	if got := metric(t, res, collect.KeyDepsAgeMedianDays, ""); got != wantDays {
+		t.Errorf("median age: got %v days, want %v", got, wantDays)
+	}
+	if got := metric(t, res, collect.KeyDepsOutdatedDirect, ""); got != 1 {
+		t.Errorf("outdated direct dependencies: got %v, want 1", got)
+	}
+}
+
+// The case this whole design exists for.
+//
+// With GOPROXY=off the toolchain exits 0, writes nothing to stderr, streams
+// every module, and reports an update on none of them. "Every dependency is
+// current" and "nothing was ever checked" are byte-identical streams, so no
+// parser can tell them apart and the only honest answer is to record nothing.
+//
+// The other two measurements are unaffected, which is why the three dependency
+// signals do not share a marker.
+func TestGoproxyOffRecordsNoUpdateCount(t *testing.T) {
+	dir := repoDir(t)
+	step := depsStep(t, dir, moduleStream, true)
+	step.Env = map[string]string{"GOPROXY": "off"}
+
+	res := collectAt(t, config.Repo{Name: "svc", Path: dir, Signals: []config.Signal{step}}, moduleNow)
+
+	if hasMetric(res, collect.KeyDepsOutdatedDirect) {
+		t.Error("an outdated-dependency count was recorded from a run that never consulted the proxy. Zero and unmeasured are the same bytes here, and only one of them is true.")
+	}
+	if !strings.Contains(diagText(res), "GOPROXY is off") {
+		t.Errorf("the reason was not disclosed:\n%s", diagText(res))
+	}
+	// The offline-measurable half survives. Losing it too would make the whole
+	// signal worthless on a machine with no network.
+	if got := metric(t, res, collect.KeyDepsTotal, ""); got != 1 {
+		t.Errorf("dependencies: got %v, want 1; the module count needs no proxy", got)
+	}
+	if !hasMetric(res, collect.KeyDepsAgeMedianDays) {
+		t.Error("the age aggregate was dropped along with the update check, but publish timestamps are in the stream and need no network")
+	}
+}
+
+// Without -u the toolchain never populates Update, so every module reads as
+// current. The flag is read off the argv rather than from a config field,
+// because a field can disagree with the command and then the tool records
+// confident zeroes.
+func TestAModuleListWithoutTheUpdateFlagRecordsNoUpdateCount(t *testing.T) {
+	dir := repoDir(t)
+	step := depsStep(t, dir, moduleStream, false)
+	step.Env = map[string]string{"GOPROXY": "https://proxy.example"}
+
+	res := collectAt(t, config.Repo{Name: "svc", Path: dir, Signals: []config.Signal{step}}, moduleNow)
+
+	if hasMetric(res, collect.KeyDepsOutdatedDirect) {
+		t.Error("an outdated count was recorded from a command that never asked for updates")
+	}
+	if !strings.Contains(diagText(res), "-u") {
+		t.Errorf("the reason was not disclosed:\n%s", diagText(res))
+	}
+	if got := metric(t, res, collect.KeyDepsTotal, ""); got != 1 {
+		t.Errorf("dependencies: got %v, want 1", got)
+	}
+}
+
+// A proxy that answers for some modules and fails on others reads as FEWER
+// updates available, which is worse than a hard failure because it looks like
+// good news. Any unresolved module makes every count a floor rather than a
+// total.
+func TestUnresolvedModulesRecordNoUpdateCount(t *testing.T) {
+	dir := repoDir(t)
+	stream := moduleStream +
+		`{"Path":"github.com/c/d","Version":"v0.1.0","Error":{"Err":"module lookup disabled"}}` + "\n"
+	step := depsStep(t, dir, stream, true)
+	step.Env = map[string]string{"GOPROXY": "https://proxy.example"}
+
+	res := collectAt(t, config.Repo{Name: "svc", Path: dir, Signals: []config.Signal{step}}, moduleNow)
+
+	if hasMetric(res, collect.KeyDepsOutdatedDirect) {
+		t.Error("an outdated count was recorded while a module failed to resolve, so the number is a floor being published as a total")
+	}
+	if !strings.Contains(diagText(res), "could not be resolved") {
+		t.Errorf("the reason was not disclosed:\n%s", diagText(res))
+	}
+	if got := metric(t, res, collect.KeyDepsTotal, ""); got != 2 {
+		t.Errorf("dependencies: got %v, want 2; an unresolvable module is still a dependency", got)
+	}
+}
+
+// A directory replacement has no version and no publish timestamp. That is a
+// normal state rather than a parse failure, and it is not an age of zero.
+func TestModulesWithoutTimestampsRecordNoAge(t *testing.T) {
+	dir := repoDir(t)
+	stream := `{"Path":"example.com/m","Main":true}
+{"Path":"github.com/a/b","Replace":{"Path":"../local"}}
+`
+	step := depsStep(t, dir, stream, true)
+	step.Env = map[string]string{"GOPROXY": "off"}
+
+	res := collectAt(t, config.Repo{Name: "svc", Path: dir, Signals: []config.Signal{step}}, moduleNow)
+
+	if hasMetric(res, collect.KeyDepsAgeMedianDays) {
+		t.Error("an age was recorded for a dependency set in which nothing carried a publish date")
+	}
+	if !strings.Contains(diagText(res), "publish timestamp") {
+		t.Errorf("the reason was not disclosed:\n%s", diagText(res))
+	}
+	if got := metric(t, res, collect.KeyDepsTotal, ""); got != 1 {
+		t.Errorf("dependencies: got %v, want 1", got)
+	}
+}
+
+// A truncated stream means the module set is incomplete, and every count from it
+// is wrong LOW, including the count of dependencies needing an update. Reporting
+// fewer stale dependencies than a repo really has is the failure this tool exists
+// to refuse, so a partial stream produces no summary at all.
+func TestTruncatedModuleStreamFailsRatherThanUndercounting(t *testing.T) {
+	dir := repoDir(t)
+	step := depsStep(t, dir, "{\"Path\":\"example.com/m\",\"Main\":true}\n{\"Path\":\"github.com/a/b\",\"Vers", true)
+	step.Env = map[string]string{"GOPROXY": "https://proxy.example"}
+
+	res := collectAt(t, config.Repo{Name: "svc", Path: dir, Signals: []config.Signal{step}}, moduleNow)
+
+	if res.Snapshot.Status != store.StatusFailed {
+		t.Errorf("Status: got %q, want failed", res.Snapshot.Status)
+	}
+	if hasMetric(res, collect.KeyDepsTotal) {
+		t.Error("a truncated module stream produced a dependency count, which is wrong low by an unknown amount")
+	}
+}
+
 func writeFile(t *testing.T, dir, name, body string) string {
 	t.Helper()
 	path := filepath.Join(dir, name)

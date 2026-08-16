@@ -152,6 +152,14 @@ type RepoView struct {
 	LintFindings     *SignalView `json:"lint_findings"`
 	LintErrors       *SignalView `json:"lint_errors"`
 	LintSuppressed   *SignalView `json:"lint_suppressed"`
+	// The three dependency groups null INDEPENDENTLY of each other, unlike the
+	// test and lint families. They come from one parsed stream but are measurable
+	// under different conditions: the count needs nothing, the age needs a publish
+	// timestamp, and the outdated count needs the module proxy to have been
+	// consulted at all.
+	Dependencies         *SignalView `json:"dependencies"`
+	OutdatedDependencies *SignalView `json:"outdated_dependencies"`
+	DependencyAge        *SignalView `json:"dependency_age"`
 	// HasSnapshot is false when this repo has never been collected. Every
 	// measurement group is nil in that case, so it is not gating a number; it
 	// tells a consumer which kind of nothing it is looking at, alongside Status.
@@ -352,6 +360,12 @@ func (r RepoView) group(id delta.SignalID) *SignalView {
 		return r.LintErrors
 	case delta.SigLintSuppressed:
 		return r.LintSuppressed
+	case delta.SigDependencies:
+		return r.Dependencies
+	case delta.SigOutdatedDeps:
+		return r.OutdatedDependencies
+	case delta.SigDependencyAge:
+		return r.DependencyAge
 	default:
 		return nil
 	}
@@ -419,6 +433,11 @@ func formatValue(v float64, unit delta.Unit) string {
 		return fmt.Sprintf("%.1f%%", v)
 	case delta.UnitMilliseconds:
 		return formatDuration(v)
+	case delta.UnitDays:
+		// Whole days. A median dependency age is a number in the hundreds and the
+		// fractional part is noise, but the word has to be there: 412 alone in a
+		// column reads as a count of something.
+		return fmt.Sprintf("%.0f days", v)
 	case delta.UnitCount:
 		return strconv.FormatFloat(v, 'f', -1, 64)
 	default:
@@ -438,6 +457,8 @@ func formatDelta(d float64, unit delta.Unit) string {
 			sign = "-"
 		}
 		return sign + formatDuration(math.Abs(d))
+	case delta.UnitDays:
+		return fmt.Sprintf("%+.0f days", d)
 	case delta.UnitCount:
 		return signed(d)
 	default:
@@ -650,6 +671,8 @@ func unitName(u delta.Unit) string {
 		return "percent"
 	case delta.UnitMilliseconds:
 		return "milliseconds"
+	case delta.UnitDays:
+		return "days"
 	case delta.UnitCount:
 		return "count"
 	default:
@@ -731,6 +754,9 @@ func buildRepo(r delta.RepoDelta) RepoView {
 	out.LintFindings = buildSignal(r.Signal(delta.SigLintFindings))
 	out.LintErrors = buildSignal(r.Signal(delta.SigLintErrors))
 	out.LintSuppressed = buildSignal(r.Signal(delta.SigLintSuppressed))
+	out.Dependencies = buildSignal(r.Signal(delta.SigDependencies))
+	out.OutdatedDependencies = buildSignal(r.Signal(delta.SigOutdatedDeps))
+	out.DependencyAge = buildSignal(r.Signal(delta.SigDependencyAge))
 	for _, id := range r.MovedBy {
 		out.MovedBy = append(out.MovedBy, string(id))
 	}

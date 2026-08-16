@@ -34,6 +34,8 @@ var degradedColumns = [...]string{
 	"packages without tests change",
 	"lint findings",
 	"lint findings change",
+	"outdated dependencies",
+	"outdated dependencies change",
 }
 
 // cellSpec says what one table cell is allowed to be.
@@ -193,12 +195,23 @@ func degradedRows() []degradedRow {
 			// The control that stops the invariant being written as
 			// "status != ok blanks the row". A partial run carries real
 			// numbers and they stay in the report.
+			// This row also carries the offline dependency case, which is the one
+			// state where two signals out of one parsed stream disagree about
+			// having been measured. The module list was read, so the count and
+			// the ages are real; nothing consulted the proxy, so the outdated
+			// count is absent rather than zero. It is unlisted below, which the
+			// rule reads as REQUIRED to be unmeasured.
 			name: repoPartial,
 			why:  "a partial run collected real numbers and must keep showing them",
 			in: delta.Input{
-				Repo:        repoAt(7, repoPartial),
-				Head:        snap(71, 7, "go1.26.5", store.StatusPartial, "test command exited 1"),
-				HeadMetrics: metrics(cov(pkgAlpha, 33, 100), testStream(2, testCount(pkgAlpha, 7)), lintRun("lint", 4, 1, 2)),
+				Repo: repoAt(7, repoPartial),
+				Head: snap(71, 7, "go1.26.5", store.StatusPartial, "test command exited 1"),
+				HeadMetrics: metrics(
+					cov(pkgAlpha, 33, 100),
+					testStream(2, testCount(pkgAlpha, 7)),
+					lintRun("lint", 4, 1, 2),
+					depsOffline(27, 410),
+				),
 			},
 			cells: map[string]cellSpec{
 				"coverage":               measured("33.0%"),
@@ -211,11 +224,13 @@ func degradedRows() []degradedRow {
 			name: repoHealthy,
 			why:  "the healthy control: if this row blanks, the invariant is over-broad",
 			in: delta.Input{
-				Repo:        repoAt(8, repoHealthy),
-				Head:        snap(81, 8, "go1.26.5", store.StatusOK, ""),
-				HeadMetrics: metrics(cov(pkgAlpha, 80, 100), testStream(1, testCount(pkgAlpha, 9)), lintRun("lint", 5, 0, 1)),
-				Base:        snap(80, 8, "go1.26.5", store.StatusOK, ""),
-				BaseMetrics: metrics(cov(pkgAlpha, 75, 100), testStream(1, testCount(pkgAlpha, 8)), lintRun("lint", 5, 0, 1)),
+				Repo: repoAt(8, repoHealthy),
+				Head: snap(81, 8, "go1.26.5", store.StatusOK, ""),
+				HeadMetrics: metrics(cov(pkgAlpha, 80, 100), testStream(1, testCount(pkgAlpha, 9)),
+					lintRun("lint", 5, 0, 1), depsRun(27, 400, 3)),
+				Base: snap(80, 8, "go1.26.5", store.StatusOK, ""),
+				BaseMetrics: metrics(cov(pkgAlpha, 75, 100), testStream(1, testCount(pkgAlpha, 8)),
+					lintRun("lint", 5, 0, 1), depsRun(27, 400, 3)),
 			},
 			cells: map[string]cellSpec{
 				"coverage":                      measured("80.0%"),
@@ -224,11 +239,13 @@ func degradedRows() []degradedRow {
 				"tests change":                  measured("+1"),
 				"packages without tests":        measured("1"),
 				"packages without tests change": measured("+0"),
-				// Held level across the two sides on purpose. A moving lint count
-				// would nominate this repo a second time and change what the mover
-				// assertions below are actually testing.
-				"lint findings":        measured("5"),
-				"lint findings change": measured("+0"),
+				// Held level across the two sides on purpose. A moving lint or
+				// dependency count would nominate this repo again and change what
+				// the mover assertions below are actually testing.
+				"lint findings":                measured("5"),
+				"lint findings change":         measured("+0"),
+				"outdated dependencies":        measured("3"),
+				"outdated dependencies change": measured("+0"),
 			},
 			mover:                true,
 			moverBeforeFiltering: true,
@@ -321,6 +338,7 @@ func TestDegradedStatesNeverRenderAnUnmeasuredNumber(t *testing.T) {
 				{"tests", "tests"},
 				{"untested_packages", "packages without tests"},
 				{"lint_findings", "lint findings"},
+				{"outdated_dependencies", "outdated dependencies"},
 			} {
 				v, present := wireRow[group.key]
 				if !present {
@@ -520,6 +538,24 @@ var repoWireFields = map[string]fieldKind{
 	"lint_suppressed":       kindGroup,
 	"lint_suppressed.value": kindMeasurement,
 	"lint_suppressed.delta": kindMeasurement,
+
+	// The dependency signals come out of one parsed stream but null
+	// INDEPENDENTLY, unlike every family above them, because they are measurable
+	// under different conditions. The count needs nothing, the age needs a
+	// publish timestamp, and outdated needs the module proxy to have been
+	// consulted at all. The partial-run fixture renders the first two filled and
+	// the third null in the same row, which is what proves they are separable.
+	"dependencies":       kindGroup,
+	"dependencies.value": kindMeasurement,
+	"dependencies.delta": kindMeasurement,
+
+	"outdated_dependencies":       kindGroup,
+	"outdated_dependencies.value": kindMeasurement,
+	"outdated_dependencies.delta": kindMeasurement,
+
+	"dependency_age":       kindGroup,
+	"dependency_age.value": kindMeasurement,
+	"dependency_age.delta": kindMeasurement,
 }
 
 // envelopeWireFields is the same census one level up, over the object the repo
@@ -760,12 +796,18 @@ func TestEveryNumberIsInsideANullableGroup(t *testing.T) {
 		"coverage.delta",
 		"coverage.total",
 		"coverage.value",
+		"dependencies.delta",
+		"dependencies.value",
+		"dependency_age.delta",
+		"dependency_age.value",
 		"lint_errors.delta",
 		"lint_errors.value",
 		"lint_findings.delta",
 		"lint_findings.value",
 		"lint_suppressed.delta",
 		"lint_suppressed.value",
+		"outdated_dependencies.delta",
+		"outdated_dependencies.value",
 		"test_failures.delta",
 		"test_failures.value",
 		"test_skipped.delta",

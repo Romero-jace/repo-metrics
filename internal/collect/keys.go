@@ -50,6 +50,37 @@ const (
 	// the opposite of the incentive this tool should create. It is tracked
 	// separately because a rising suppression count is its own finding.
 	KeyLintSuppressed = "lint.suppressed"
+
+	// The dependency keys are repo-level, since a repo has one module graph, and
+	// each is its own marker. That is not a shortcut: the three are measurable
+	// under DIFFERENT conditions, so one shared marker would claim all three were
+	// measured whenever any of them was.
+	//
+	// KeyDepsTotal is the size of the build list, excluding the main module and
+	// any workspace siblings. It needs no network.
+	KeyDepsTotal = "deps.total"
+	// KeyDepsAgeMedianDays is how old the typical pinned version is.
+	//
+	// The MEDIAN rather than the mean: a healthy dependency set contains a few
+	// very old but entirely fine pins, and a mean is dragged bodily by them, so
+	// the repo reads as alarming when nothing is wrong and the trend line tracks
+	// whichever ancient module last entered the graph. Absent when not one
+	// dependency carried a publish timestamp, which is a real state and not an
+	// age of zero.
+	KeyDepsAgeMedianDays = "deps.age_median_days"
+	// KeyDepsOutdatedDirect counts DIRECT dependencies with a newer version
+	// available.
+	//
+	// Direct only, because that is the number anyone acts on: bumping an indirect
+	// module is a consequence of bumping the direct one that pulls it in, so a
+	// headline built on the total reports work that is not really there.
+	//
+	// Written only when the update check demonstrably happened. See
+	// updatesWereChecked: with GOPROXY=off the toolchain exits 0, writes nothing
+	// to stderr, and reports no updates on any module, so "everything is current"
+	// and "nothing was ever checked" are byte-identical streams. Recording the
+	// flattering zero from that is the exact bug this tool exists to refuse.
+	KeyDepsOutdatedDirect = "deps.outdated_direct"
 )
 
 // Severity classifies a diagnostic.

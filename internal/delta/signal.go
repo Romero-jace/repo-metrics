@@ -87,6 +87,9 @@ const (
 	SigLintFindings     SignalID = "lint_findings"
 	SigLintErrors       SignalID = "lint_errors"
 	SigLintSuppressed   SignalID = "lint_suppressed"
+	SigDependencies     SignalID = "dependencies"
+	SigOutdatedDeps     SignalID = "outdated_dependencies"
+	SigDependencyAge    SignalID = "dependency_age"
 )
 
 // Unit is how a signal's numbers should be read and rendered.
@@ -102,7 +105,26 @@ const (
 	// UnitMilliseconds is a duration, stored in milliseconds because the
 	// metrics table holds one float per row and a duration has to be a number.
 	UnitMilliseconds
+	// UnitDays is a longer duration, kept separate from milliseconds because the
+	// two want opposite renderings: a test suite reads as 3m34s, and a dependency
+	// pinned at a version from 2023 reads as 412 days rather than as 35 billion
+	// milliseconds.
+	UnitDays
 )
+
+// units is every unit, in declaration order. It exists so a test can range them:
+// each of the rendering switches has a default branch, so a new unit that nobody
+// added a case for renders silently as a bare count, with its meaning stripped
+// and nothing failing.
+var units = []Unit{UnitPercent, UnitCount, UnitMilliseconds, UnitDays}
+
+// Units returns every declared unit, so the renderers can be checked for
+// covering all of them rather than trusted to.
+func Units() []Unit {
+	out := make([]Unit, len(units))
+	copy(out, units)
+	return out
+}
 
 // Direction says which way is good news.
 //
@@ -327,6 +349,51 @@ var signals = []Signal{
 		// leading the report on it would cost the reader's attention.
 		Nominates: false,
 		Table:     false,
+	},
+	{
+		ID:        SigOutdatedDeps,
+		Label:     "Outdated dependencies",
+		Unit:      UnitCount,
+		Direction: LowerIsBetter,
+		// Its own marker rather than one shared with the other two dependency
+		// signals, and that is the whole point: the module count is measurable
+		// offline while this one needs the proxy to have been consulted. A shared
+		// marker would claim this was measured whenever the count was.
+		Marker:      collect.KeyDepsOutdatedDirect,
+		MarkerScope: ScopeRepo,
+		Extract:     repoValue(collect.KeyDepsOutdatedDirect),
+		Nominates:   true,
+		MinMove:     1,
+		Table:       true,
+	},
+	{
+		ID:          SigDependencies,
+		Label:       "Dependencies",
+		Unit:        UnitCount,
+		Direction:   LowerIsBetter,
+		Marker:      collect.KeyDepsTotal,
+		MarkerScope: ScopeRepo,
+		Extract:     repoValue(collect.KeyDepsTotal),
+		// Dependency count moves for ordinary reasons and a repo that added one
+		// library has not had a bad week. It is context for the two signals
+		// around it rather than news of its own.
+		Nominates: false,
+		Table:     false,
+	},
+	{
+		ID:          SigDependencyAge,
+		Label:       "Median dependency age",
+		Unit:        UnitDays,
+		Direction:   LowerIsBetter,
+		Marker:      collect.KeyDepsAgeMedianDays,
+		MarkerScope: ScopeRepo,
+		Extract:     repoValue(collect.KeyDepsAgeMedianDays),
+		// This one drifts upward by a day every day just by nobody touching the
+		// repo, so an absolute floor would make every repo a mover every week.
+		// The relative floor asks whether the drift outran the calendar.
+		Nominates:       false,
+		MinMoveFraction: 0.25,
+		Table:           false,
 	},
 }
 

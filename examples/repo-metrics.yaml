@@ -161,6 +161,33 @@ repos:
         # setting here. A `go test` command exiting non-zero is treated as the
         # red suite it is.
 
+      - # Dependency staleness. Three measurements come out of this one stream
+        # and they are recorded independently, because they are knowable under
+        # different conditions:
+        #
+        #   dependencies           the size of the build list. Needs nothing.
+        #   dependency_age         median age of the pinned versions. Needs each
+        #                          module to carry a publish timestamp, which
+        #                          the toolchain reports with no network at all.
+        #   outdated_dependencies  direct dependencies with a newer version.
+        #                          Needs the module proxy to have been consulted.
+        #
+        # The -u is what makes the toolchain look for updates, and repo-metrics
+        # reads it off this command rather than from a setting, since a setting
+        # can disagree with the command and then the numbers are confident and
+        # wrong.
+        #
+        # If GOPROXY is off, or any module fails to resolve, the outdated count
+        # is NOT recorded and the run says so. That is deliberate: with the proxy
+        # off the toolchain exits 0, writes nothing to stderr, and reports an
+        # update on nothing, so "every dependency is current" and "nothing was
+        # ever checked" are the same bytes. The other two measurements are
+        # unaffected, which is why they are separate signals.
+        name: dependencies
+        command: ["go", "list", "-m", "-u", "-json", "all"]
+        stdout_format: go-list-modules
+        timeout: 3m
+
   # Ingest only: no command, so repo-metrics parses whatever is already on disk.
   # This is how you consume a profile your CI already produced.
   - name: built-by-ci

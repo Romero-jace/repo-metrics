@@ -26,6 +26,7 @@ var starterConfig = fmt.Sprintf(
 	config.FormatGoCoverprofile,
 	config.FormatGoTestJSON,
 	config.FormatSARIF,
+	config.FormatGoListModules,
 	config.FormatGoCoverprofile,
 )
 
@@ -46,7 +47,7 @@ func defaultWindowText() string {
 
 // starterConfigFormat is the file with its tunables left as verbs, filled in by
 // starterConfig above. The verbs are database, window, min_statements,
-// min_repo_delta, and then the four format names, in that order.
+// min_repo_delta, and then the five format names, in that order.
 //
 // The format names come from the config package rather than being typed here
 // for the same reason the tunables do: a starter config naming a format the
@@ -118,6 +119,16 @@ repos:
       #             "--max-issues-per-linter", "0", "--max-same-issues", "0"]
       #   stdout_format: %s
       #   timeout: 5m
+
+      # Dependency staleness: how many there are, how old the pins are, and how
+      # many direct ones have a newer version. The -u is what makes the toolchain
+      # look for updates. With GOPROXY off the update count is deliberately NOT
+      # recorded, because an unchecked proxy and a fully current repo produce
+      # identical output and only one of them is good news.
+      - name: dependencies
+        command: ["go", "list", "-m", "-u", "-json", "all"]
+        stdout_format: %s
+        timeout: 3m
 
   # Ingest only: no command, so it parses whatever CI already left on disk.
   # max_age is the freshness limit, past which the numbers get reported as stale

@@ -111,6 +111,38 @@ func signalFixtures() map[delta.SignalID]signalFixture {
 			absent:          cov("m/a", 5, 10),
 			zeroIsReachable: true,
 		},
+		delta.SigDependencies: {
+			// A repo that vendors nothing. Rare in Go and entirely real.
+			measuredZero:    []store.Metric{{Key: collect.KeyDepsTotal, Value: 0}},
+			absent:          cov("m/a", 5, 10),
+			zeroIsReachable: true,
+		},
+		delta.SigOutdatedDeps: {
+			// Everything current, and demonstrably so: the proxy was consulted
+			// and reported no newer versions.
+			measuredZero: []store.Metric{
+				{Key: collect.KeyDepsTotal, Value: 27},
+				{Key: collect.KeyDepsOutdatedDirect, Value: 0},
+			},
+			// The module list was read but nothing checked for updates, which is
+			// what GOPROXY=off produces. This is the reason these three signals do
+			// not share a marker: the stream here is identical to the one above
+			// minus the outdated row, and a shared marker would report zero
+			// outdated dependencies for a repo nobody asked the proxy about.
+			absent:          []store.Metric{{Key: collect.KeyDepsTotal, Value: 27}},
+			zeroIsReachable: true,
+		},
+		delta.SigDependencyAge: {
+			// A dependency published today. The median age really is zero days.
+			measuredZero: []store.Metric{
+				{Key: collect.KeyDepsTotal, Value: 1},
+				{Key: collect.KeyDepsAgeMedianDays, Value: 0},
+			},
+			// Dependencies exist but none carried a publish timestamp, which a
+			// directory replacement produces. Not an age of zero.
+			absent:          []store.Metric{{Key: collect.KeyDepsTotal, Value: 27}},
+			zeroIsReachable: true,
+		},
 	}
 }
 

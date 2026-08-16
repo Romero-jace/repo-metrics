@@ -108,7 +108,7 @@ func runStep(ctx context.Context, repo config.Repo, step config.Signal, index in
 		}
 	}
 
-	res.parseAll(repo, step, artifact, stdoutPath, runRes)
+	res.parseAll(ctx, repo, step, artifact, stdoutPath, runRes, now)
 	return res.finish()
 }
 
@@ -118,7 +118,8 @@ func runStep(ctx context.Context, repo config.Repo, step config.Signal, index in
 // the test stream from also costing coverage, which used to be spelled out as a
 // special case for the one pairing that existed and is now the general rule.
 func (r *stepResult) parseAll(
-	repo config.Repo, step config.Signal, artifact, stdoutPath string, runRes *run.Result,
+	ctx context.Context, repo config.Repo, step config.Signal,
+	artifact, stdoutPath string, runRes *run.Result, now time.Time,
 ) {
 	type pending struct {
 		format config.Format
@@ -143,12 +144,13 @@ func (r *stepResult) parseAll(
 			failures = append(failures, errorf("%v", err))
 			continue
 		}
-		metrics, diags, err := parse(source{
+		metrics, diags, err := parse(ctx, source{
 			Path: src.path,
 			Repo: repo,
 			Step: step,
 			Env:  env,
 			Run:  runRes,
+			Now:  now,
 		})
 		r.Diagnostics = append(r.Diagnostics, diags...)
 		if err != nil {

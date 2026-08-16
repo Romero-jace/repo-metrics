@@ -26,6 +26,9 @@ const (
 	// choosing it over each linter's native output. One parser covers every
 	// language this tool will ever be pointed at.
 	FormatSARIF Format = "sarif"
+	// FormatGoListModules is the object stream `go list -m -json` writes: a run
+	// of concatenated JSON objects, not an array.
+	FormatGoListModules Format = "go-list-modules"
 )
 
 // formatPolicy is what the tool needs to know about a format beyond how to parse
@@ -67,6 +70,12 @@ var formats = map[Format]formatPolicy{
 	FormatGoCoverprofile: {},
 	FormatGoTestJSON:     {},
 	FormatSARIF:          {Repeatable: true, NonZeroExitIsNormal: true},
+	// Not repeatable: a repo has one module graph. And a non-zero exit is a real
+	// failure here rather than a way of reporting findings, which is load
+	// bearing: an unreachable proxy makes `go list -m -u` exit non-zero with an
+	// EMPTY stdout, and treating that as normal would turn it into a parse of
+	// nothing.
+	FormatGoListModules: {},
 }
 
 // formatOrder fixes the order for help text and error messages, because ranging
@@ -75,6 +84,7 @@ var formatOrder = []Format{
 	FormatGoCoverprofile,
 	FormatGoTestJSON,
 	FormatSARIF,
+	FormatGoListModules,
 }
 
 // Formats lists every readable format, in a stable order.

@@ -11,10 +11,14 @@ Self-hosted, one binary, no account, no SaaS.
 
 ## Status
 
-The core is built: the Go collector, SQLite storage, delta computation against a
-baseline snapshot, and the markdown and JSON report. It has not been run against
-a fleet for long enough to have opinions about it yet, and the only collector is
-the Go one, so treat it as working but young.
+The core is built: multi-signal collection, SQLite storage, delta computation
+against a baseline snapshot, history over the whole series, and the markdown and
+JSON report. It has not been run against a fleet for long enough to have opinions
+about it yet, so treat it as working but young.
+
+Coverage and test counts are read from Go's own formats. Lint findings are read
+as SARIF, which golangci-lint, eslint, ruff, semgrep, clippy and CodeQL all emit,
+so that one is not Go-specific at all.
 
 ## Install
 
@@ -50,13 +54,14 @@ rather than a mystery later.
 The report needs two snapshots to compare, so the first one has nothing to say
 about deltas. Collect again tomorrow and it will.
 
-## The four commands
+## The five commands
 
 | command | what it is for |
 |---|---|
 | `init` | write a starter config |
-| `collect` | run each repo's command, parse what it produced, store a snapshot |
+| `collect` | run each repo's signals, parse what they produced, store a snapshot |
 | `report` | compare the newest snapshot against one from a window ago |
+| `history` | one repo, one signal, every snapshot in a range |
 | `repos` | list every configured repo and when it was last collected |
 
 `repos` is the one that is not obvious. It answers "did the cron job actually
@@ -70,6 +75,71 @@ api          2026-08-15 23:47 UTC  ok               80.0%
 worker       2026-08-15 23:47 UTC  ok               80.0%
 old-service  never                 never collected  -
 ```
+
+`history` is the one that reads back what is already in the database. `report`
+only ever compares two snapshots, so a slide that took six weeks looks the same
+as one that happened overnight:
+
+```sh
+repo-metrics history --repo api --signal coverage --since 90d
+```
+
+A run that failed stays in the series rather than being filtered out, because a
+gap in collection is the finding. Dropping those points draws a straight line
+through the week nobody was looking, and drawing them at zero turns a crashed
+test command into a coverage cliff:
+
+```
+| when                 | Coverage      | status |
+| ---                  | ---           | ---    |
+| 2026-08-01 06:00 UTC | 83.6%         | ok     |
+| 2026-08-08 06:00 UTC | not collected | failed |
+| 2026-08-15 06:00 UTC | 57.4%         | ok     |
+```
+
+## What it measures
+
+Thirteen signals, from three commands. You configure the commands; the signals
+are whatever those commands turn out to yield.
+
+| signal | unit | from |
+|---|---|---|
+| `coverage` | percent | coverage profile |
+| `tests` | count | `go test -json` stream |
+| `test_failures` | count | same stream |
+| `test_skipped` | count | same stream |
+| `untested_packages` | count | same stream |
+| `test_time` | duration | same stream |
+| `lint_findings` | count | SARIF log |
+| `lint_errors` | count | same log |
+| `lint_suppressed` | count | same log |
+| `dependencies` | count | `go list -m -json` |
+| `dependency_age` | days | same stream |
+| `outdated_dependencies` | count | same stream, with `-u` |
+| `collect_time` | duration | the runner's own clock |
+
+Every one of them can be null, and null always means the same thing: nothing
+measured it. Three of them are worth a word about why they are separate.
+
+**`lint_suppressed` is not part of `lint_findings`.** Counting suppressed
+findings against a repo would make it look worse for having triaged them, which
+is the opposite of the incentive this tool should create. It is tracked on its
+own because a rising suppression count is its own finding.
+
+**`outdated_dependencies` is direct dependencies only.** Bumping an indirect
+module is a consequence of bumping the direct one that pulls it in, so a headline
+built on the total reports work that is not really there.
+
+**`outdated_dependencies` is often null when the other two dependency signals are
+not.** With `GOPROXY=off`, or when any module fails to resolve, `go list -m -u`
+exits 0, writes nothing to stderr, and reports an update on nothing. "Every
+dependency is current" and "nothing was ever checked" are byte-identical output,
+so the count is not recorded at all and the run says why. The module count and
+the age aggregate need no network and are unaffected.
+
+`collect_time` is wall clock per signal, which is not `test_time`. That one sums
+the per-package durations `go test` reports, counting parallel packages more than
+once: it is machine work. `collect_time` is time somebody waited.
 
 ## Configuring it
 
@@ -88,6 +158,17 @@ repos:
         stdout_format: go-test-json
         timeout: 10m
 
+      - name: lint
+        command: ["golangci-lint", "run", "--output.sarif.path", "stdout",
+                  "--max-issues-per-linter", "0", "--max-same-issues", "0"]
+        stdout_format: sarif
+        timeout: 5m
+
+      - name: dependencies
+        command: ["go", "list", "-m", "-u", "-json", "all"]
+        stdout_format: go-list-modules
+        timeout: 3m
+
   - name: built-in-ci
     path: /srv/checkouts/built-in-ci
     signals:
@@ -101,11 +182,21 @@ repos:
 Each repo carries a list of signals: one entry per thing to measure. A signal
 either runs a command and reads what it left behind, or reads an artifact
 something else produced. One command can feed two parsers, which is why the
-entry above names both an `artifact_format` and a `stdout_format`: `go test`
+coverage entry names both an `artifact_format` and a `stdout_format`: `go test`
 yields the profile and the test counts from a single run.
 
 A signal is also the unit of failure. One going wrong costs its own numbers and
 nothing else, and the snapshot comes back `partial` rather than `failed`.
+
+Those two `--max-issues` flags on the lint entry are not decoration.
+golangci-lint caps its output at 50 issues per linter and 3 per repeated message
+by default, so without them the number you track over time is a cap, and a repo
+that doubles its findings charts as flat. Measured on one real repo: 623 findings
+capped, 2760 uncapped, same run.
+
+You do not have to tell it that a linter exiting 1 is normal. That is a fact
+about the tools that emit SARIF rather than a preference, so it is built in, and
+`go test` exiting non-zero is still treated as the red suite it is.
 
 There is a fully commented version at
 [`examples/repo-metrics.yaml`](examples/repo-metrics.yaml), with every field
@@ -145,6 +236,8 @@ repo-metrics report --format json                      # everything
 repo-metrics report --format json --section movers     # just what changed
 repo-metrics report --format json --section problems   # just what failed to collect
 repo-metrics report --format json --repo my-service    # just one repo
+repo-metrics history --repo my-service --format json   # one signal over time
+repo-metrics repos --format json                       # did the cron run
 ```
 
 Measured on a three-repo config with `tiktoken` (`cl100k_base`), so these are
@@ -153,9 +246,21 @@ moved:
 
 | what you ask for | tokens |
 |---|---|
-| the whole report | 688 |
-| `--section movers` | 205 |
-| `--section problems` | 166 |
+| the whole report | 1508 |
+| `--repo one-of-three` | 767 |
+| `--section movers` | 740 |
+| `--section problems` | 517 |
+| `history` for one repo | 418 |
+| `repos` | 170 |
+
+284 of those tokens is the signal catalog, the same in every response, which is
+worth knowing before you narrow: `--section problems` is 517 tokens and 284 of
+them are the legend. It says what each measurement is called, what unit it is in,
+and which direction is good news, which is how a consumer reads `"value": 214000`
+and knows it is milliseconds and that lower is better without the key saying so
+on every row of every repo. Paying once per response rather than once per number
+is why adding eleven signals roughly doubled these counts instead of multiplying
+them.
 
 `--section` works on markdown too, since a person narrowing to what moved is
 just as reasonable as a machine doing it.
@@ -171,17 +276,32 @@ row, nothing left out:
 
 ```json
 {"name": "legacy", "status": "failed", "collected_at": "2026-08-15 23:47 UTC",
- "coverage": null, "tests": null,
+ "coverage": null, "tests": null, "lint_findings": null, "dependencies": null,
  "has_snapshot": true, "has_baseline": false, "env_changed": false,
- "error": "no coverage profile at /srv/legacy/coverage.out and no command configured to produce one"}
+ "error": "coverage: no artifact at /srv/legacy/coverage.out and no command configured to produce one"}
 ```
 
 That shape is deliberate. If those fields were merely omitted, a consumer writing
 `row.coverage_pct ?? 0` would turn an absent measurement straight back into a
 measured zero. Reaching into a null object throws instead, which is the point.
-There are two levels of it: a null `coverage` means nothing was measured, while
-a `delta_points` of null inside a present `coverage` means it was measured and
-there is no baseline to compare it against.
+There are two levels of it: a null `coverage` means nothing was measured, while a
+null `delta` inside a present `coverage` means it was measured and there is no
+baseline to compare it against.
+
+A measured group is two keys and never signal-specific ones:
+
+```json
+{"lint_findings": {"value": 2857, "delta": -14},
+ "outdated_dependencies": null,
+ "dependency_age": {"value": 199.33, "delta": null}}
+```
+
+`value` and `delta` rather than `count` and `count_change`, so a consumer walking
+signals needs no per-signal key knowledge. What each one means is answered once
+by the catalog on the envelope. The row above is a repo whose lint findings fell
+by 14, whose dependency ages were measured with no baseline to compare against,
+and whose outdated count was not measured at all, most likely because the module
+proxy was never consulted.
 
 **Every report says what it covers.** A section you did not ask for comes back
 `null` rather than `[]`, so "not requested" is distinguishable from "nothing to
@@ -252,6 +372,14 @@ dependency between a local working tree and a pinned version, which changes
 coverage for reasons that have nothing to do with your code. Snapshots carry a
 fingerprint so you do not get to diff across that boundary without being told.
 
+**A signal that cannot be trusted is not recorded.** The clearest case is the
+dependency one. Run `go list -m -u -json all` with `GOPROXY=off` and it exits 0,
+says nothing on stderr, streams every module, and reports an update on none of
+them, which is byte-identical to what a perfectly current repo produces. So the
+tool asks the toolchain what its proxy is set to, and if the answer means nothing
+was checked, it records no update count and says why. A zero there would be
+indistinguishable from good news.
+
 ## What it deliberately does not do
 
 - **No export plumbing.** It writes markdown and JSON. If you want it in Notion
@@ -268,8 +396,15 @@ fingerprint so you do not get to diff across that boundary without being told.
   judgment to you. A percentage gate punishes an honest deletion of covered code
   and rewards writing low-value tests to clear a bar, which is the exact confusion
   this tool argues against everywhere else.
-- **No plugin system.** There is a `Collector` interface so this does not stay
-  Go-only forever, but one interface is not a registry and does not need to be.
+- **No plugin system.** Formats are a closed table: a name an operator can write,
+  paired with the code that reads it. Adding lcov or JUnit XML is a new entry and
+  a new parser, not a registry, not a plugin API, and not a shared object anyone
+  has to build.
+- **No flaky-test rate and no PR velocity.** The first needs per-test rows on
+  every snapshot, which is a different database and its own project. The second
+  is the only signal on the original list not derivable from a local checkout,
+  and reaching for a forge API would undo the "reads this file and nothing else"
+  property that makes the config the whole integration surface.
 
 ## Building
 

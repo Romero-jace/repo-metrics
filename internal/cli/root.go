@@ -164,8 +164,8 @@ func printUsage(w io.Writer) {
 
 	// A failed write to the caller's own writer is not actionable, so the
 	// error is deliberately discarded here and everywhere else we print.
-	_, _ = fmt.Fprint(w, `repo-metrics: track coverage and test health across a pile of repos, and say
-what got worse this week.
+	_, _ = fmt.Fprint(w, `repo-metrics: track coverage, test health, lint findings and dependency
+staleness across a pile of repos, and say what got worse this week.
 
 usage:
   repo-metrics init    [--config FILE] [--force]
@@ -187,6 +187,15 @@ init flags:
 collect flags:
   --config FILE   config to read (default repo-metrics.yaml)
   --repo NAME     collect just this one repo instead of all of them
+
+  Each repo runs the signals its config lists, and a signal is the unit of
+  failure: one going wrong costs its own measurements and nothing else, and the
+  snapshot comes back partial rather than failed. The progress line names which
+  ones landed.
+
+  A signal that ran but could not trust what it found records nothing rather
+  than a zero. The clearest case is dependency updates with GOPROXY off, where
+  "everything is current" and "nothing was checked" are identical output.
 
 report flags:
   --config FILE   config to read (default repo-metrics.yaml)

@@ -161,16 +161,12 @@ type PointCell struct {
 // unit maps the envelope's unit name back to the type the formatter wants. The
 // envelope carries a string because that is what a consumer can read; the
 // formatter wants the enum.
-func (h HistoryView) unit() delta.Unit {
-	switch h.Signal.Unit {
-	case "percent":
-		return delta.UnitPercent
-	case "milliseconds":
-		return delta.UnitMilliseconds
-	default:
-		return delta.UnitCount
-	}
-}
+//
+// It goes through unitByName rather than a switch of its own. This was a second,
+// hand-written copy of that mapping, and it drifted the moment a fourth unit was
+// added: its default swallowed days, so a median dependency age charted as
+// 199.33405541417824 with no unit anywhere on the row.
+func (h HistoryView) unit() delta.Unit { return unitByName(h.Signal.Unit) }
 
 // Empty reports whether the range turned up nothing, so the template can say
 // which kind of nothing it is.

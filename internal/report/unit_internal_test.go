@@ -59,6 +59,53 @@ func TestEveryUnitRendersDistinctly(t *testing.T) {
 	}
 }
 
+// History carries the unit as a string on the envelope, because that is what a
+// consumer can read, and then has to turn it back into an enum to format its
+// own numbers. That round trip has to be lossless for every unit.
+//
+// This is a real regression rather than a hypothetical: history had its own
+// hand-written copy of the mapping, and when a fourth unit was added its default
+// branch swallowed it. A median dependency age charted as 199.33405541417824,
+// with the word "days" nowhere on the row.
+func TestUnitNamesRoundTrip(t *testing.T) {
+	for _, want := range delta.Units() {
+		if got := unitByName(unitName(want)); got != want {
+			t.Errorf("unit %d renders as %q, which reads back as unit %d. A number in this unit reaches the reader formatted as something else.",
+				want, unitName(want), got)
+		}
+	}
+}
+
+// The stronger version of the same guard, at the surface it actually broke: a
+// history table's cell has to be formatted in its own signal's unit, for every
+// signal in the registry.
+//
+// It goes through BuildHistory rather than calling the formatter, so it covers
+// the whole path a rendered row takes, including the string round trip that
+// broke.
+func TestHistoryCellsCarryTheirSignalsUnit(t *testing.T) {
+	const value = 90061
+
+	for _, sig := range delta.Signals() {
+		view := HistoryView{
+			Signal: SignalCatalogEntry{ID: string(sig.ID), Unit: unitName(sig.Unit)},
+			Points: []PointView{{
+				CollectedAt: "2026-01-01 00:00 UTC",
+				Status:      "ok",
+				Measurement: &PointMeasurement{Value: value},
+			}},
+		}
+		cells := view.Cells()
+		if len(cells) != 1 {
+			t.Fatalf("%s: got %d cells, want 1", sig.ID, len(cells))
+		}
+		if want := formatValue(value, sig.Unit); cells[0].Value != want {
+			t.Errorf("%s: history renders %q, but the report renders the same number as %q. The two surfaces disagree about what this measurement means.",
+				sig.ID, cells[0].Value, want)
+		}
+	}
+}
+
 // Every registered signal has to declare a unit that the renderers know about.
 // The test above proves the units are distinct; this one proves the registry
 // only uses those.

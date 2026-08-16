@@ -685,6 +685,24 @@ func unitName(u delta.Unit) string {
 	}
 }
 
+// unitByName is unitName's inverse, for the one payload that carries the unit as
+// a string and then has to format numbers in it.
+//
+// The two are pinned together by TestUnitNamesRoundTrip rather than trusted to
+// stay in step, because they did not: history had a hand-written version of this
+// switch with a default that swallowed anything it had not been told about, and
+// a median dependency age charted as 199.33405541417824 with the word "days"
+// nowhere. That is a measurement reaching the reader with its meaning stripped
+// off, which is the softer half of this project's recurring bug.
+func unitByName(name string) delta.Unit {
+	for _, u := range delta.Units() {
+		if unitName(u) == name {
+			return u
+		}
+	}
+	return delta.UnitCount
+}
+
 func directionName(d delta.Direction) string {
 	if d == delta.LowerIsBetter {
 		return "lower_is_better"

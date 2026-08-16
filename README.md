@@ -97,6 +97,21 @@ test command into a coverage cliff:
 | 2026-08-15 06:00 UTC | 57.4%         | ok     |
 ```
 
+There is also `repo-metrics version`, which does no work and takes no flags:
+
+```
+repo-metrics v0.1.0
+built with go1.26.5 for darwin/amd64
+```
+
+Nothing has to be bumped to keep that honest. The Go toolchain stamps the
+version and the commit into every binary it builds, so this reads that back
+rather than keeping a second copy that can drift from it. A binary built from a
+modified tree says `plus uncommitted changes`, because a commit hash from a
+dirty checkout names code that never ran. A binary built with no stamping at all
+says it does not know, rather than printing a confident-looking `devel`. A
+version string is a measurement too.
+
 ## What it measures
 
 Thirteen signals, from three commands. You configure the commands; the signals

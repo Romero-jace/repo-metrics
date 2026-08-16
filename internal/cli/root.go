@@ -60,6 +60,12 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		return runRepos(ctx, args[1:], stdout, stderr)
 	case "history":
 		return runHistory(ctx, args[1:], stdout, stderr)
+	// Spelled three ways because people type all three, and a version check
+	// that answers "unknown command" is a small insult at the exact moment
+	// someone is trying to tell you what they are running. Deliberately not -v:
+	// that letter is worth keeping free for a verbose flag.
+	case "version", "--version", "-version":
+		return runVersion(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		printUsage(stderr)
 		return nil
@@ -175,6 +181,7 @@ usage:
   repo-metrics repos   [--config FILE] [--format `+formats+`]
   repo-metrics history --repo NAME [--config FILE] [--signal NAME] [--since 90d]
                        [--format `+formats+`]
+  repo-metrics version
 
 Flags go AFTER the subcommand, the way git and docker take them:
 
@@ -239,6 +246,10 @@ history flags:
   history keeps failed runs in the series instead of filtering them out. A gap
   in collection is the finding, and a chart that silently omits its failures
   draws a straight line through the week nobody was looking.
+
+version takes no flags. It reports the module version when this binary was
+installed from a tag, the commit when it was built from a checkout, and says
+plainly that it does not know when it was built with neither.
 
 collect keeps going when a repo fails and exits 1 at the end if any did, so one
 unreachable repo never costs you the other nine.

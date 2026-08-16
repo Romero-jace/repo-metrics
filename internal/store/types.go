@@ -54,3 +54,22 @@ type Metric struct {
 	Scope string
 	Value float64
 }
+
+// SnapshotMetrics pairs one snapshot with the metrics that snapshot stored.
+//
+// Snapshot is a value, never a pointer: every point in a series is a run that
+// really happened, so there is no "no snapshot here" state to represent. All the
+// absence in this type lives in Metrics.
+//
+// Metrics is nil when the snapshot stored no metric rows at all, and that nil is
+// the point of the type rather than an inconvenience to normalize away. A failed
+// run produces it, and so does a header-only coverage profile from a test binary
+// that never ran. Both mean "nothing was measured here", which is not the same
+// as "zero was measured here": a caller that reads nil as an empty measurement
+// and sums it up republishes zeroes nobody ever measured, turning a broken
+// collection into a coverage cliff on a chart. Check for nil before averaging,
+// diffing, or plotting, and render the gap as a gap.
+type SnapshotMetrics struct {
+	Snapshot Snapshot
+	Metrics  []Metric
+}

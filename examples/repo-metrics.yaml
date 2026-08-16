@@ -16,14 +16,12 @@ database: /srv/repo-metrics/repo-metrics.db
 # Default reporting window. Head is the newest usable snapshot, baseline is the
 # newest usable snapshot at or before head minus this window.
 #
-# Every duration in this file goes through Go's time.ParseDuration, whose
-# largest unit is the hour, so a week is 168h here and 7d is a load error rather
-# than a silent fallback. Same for timeout and max_age further down.
-#
-# The --window flag is the one exception: it understands a d suffix for days, so
-# `report --window 7d` is fine even though `window: 7d` here is not.
-# Default: 168h. Override per run with `report --window`.
-window: 168h
+# Every duration in this file reads the same as the ones on the flags: Go's
+# duration syntax plus w for weeks and d for days, so 7d, 168h and 1w are the
+# same week. Larger units come first, so 1w3d12h works and 3d1w is an error.
+# Same for timeout and max_age further down.
+# Default: 7d. Override per run with `report --window`.
+window: 7d
 
 # Noise floor for culprit ranking, in statements. A package smaller than this is
 # left out of the "which package is why" list, because a three-statement helper
@@ -202,6 +200,11 @@ repos:
         # as stale instead of being presented as a current number, which is the
         # whole point: a coverage file sitting at the expected path is not
         # evidence that anything ran.
+        #
+        # There is no way to switch the check off with a zero: 0s is rejected
+        # rather than read as the default, since the two used to be
+        # indistinguishable and an operator asking for no limit got 24 hours.
+        # Omit the key to get the default.
         # Default: 24h
         max_age: 36h
 

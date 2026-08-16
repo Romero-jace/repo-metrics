@@ -123,6 +123,10 @@ type Signal struct {
 
 	// MaxAge applies only in ingest mode (no Command). An artifact older than
 	// this is reported as stale rather than presented as a current number.
+	//
+	// Omit it for the default. There is no way to write "no limit": a
+	// non-positive max_age is rejected, because a zero used to be read as an
+	// absent key and answered with the 24 hour default. See UnmarshalYAML.
 	MaxAge Duration `yaml:"max_age"`
 }
 
@@ -173,28 +177,37 @@ func (s Signal) MergedEnv(repo map[string]string) map[string]string {
 	return out
 }
 
-// Duration is a time.Duration that unmarshals from a YAML string like "10m".
-type Duration time.Duration
-
-// UnmarshalYAML implements goccy/go-yaml's BytesUnmarshaler.
-func (d *Duration) UnmarshalYAML(b []byte) error {
-	var s string
-	if err := yaml.Unmarshal(b, &s); err != nil {
-		return fmt.Errorf("duration must be a string like \"10m\": %w", err)
+// UnmarshalYAML gives a step its defaults before the file is read over it, the
+// same way Defaults does for the whole config. It implements goccy/go-yaml's
+// BytesUnmarshaler.
+//
+// Defaulting has to happen here rather than in a pass afterwards, because
+// afterwards there is nothing left to tell "max_age: 0s" written on purpose
+// from the key being absent: both are Duration(0), and filling in the default
+// for a zero silently gave an operator asking for no staleness limit 24 hours.
+// Done this way, an absent key keeps the default and an explicit zero survives
+// to validate, which rejects it.
+//
+// Only Signal gets this. The same trick on Repo would set OldTimeout and
+// OldMaxAge non-zero, and migrationError would then fire on every repo in every
+// config.
+func (s *Signal) UnmarshalYAML(b []byte) error {
+	// A local type so the decode below does not call this method again.
+	type signalFields Signal
+	fields := signalFields{
+		Timeout: Duration(DefaultTimeout),
+		MaxAge:  Duration(DefaultMaxAge),
 	}
-	parsed, err := time.ParseDuration(s)
-	if err != nil {
-		return fmt.Errorf("invalid duration %q: %w", s, err)
+	if err := yaml.Unmarshal(b, &fields); err != nil {
+		return err
 	}
-	*d = Duration(parsed)
+	*s = Signal(fields)
 	return nil
 }
 
-func (d Duration) String() string { return time.Duration(d).String() }
-
-// Defaults returns a Config with every top-level default applied. Per-repo
-// defaults cannot live here because repos is a slice, so they are filled in by
-// normalize after unmarshaling.
+// Defaults returns a Config with every top-level default applied. Per-step
+// defaults cannot live here because repos is a slice, so they are applied by
+// Signal.UnmarshalYAML as each step is read.
 func Defaults() *Config {
 	return &Config{
 		Database:      DefaultDatabase,
@@ -204,10 +217,23 @@ func Defaults() *Config {
 	}
 }
 
+// ErrNoConfigFile marks the config file itself being absent, as opposed to a
+// path named inside a config that was read perfectly well.
+//
+// Both used to be indistinguishable to a caller: a missing repo path is an
+// os.Stat error joined into the validation errors, and errors.Is recurses
+// through a joined error, so both satisfied errors.Is(err, os.ErrNotExist).
+// The `repo-metrics init` hint keyed off that told an operator whose repo path
+// was wrong to overwrite the config they had just edited.
+var ErrNoConfigFile = errors.New("no config file")
+
 // Load reads, expands, and validates a config file.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // the path is operator-supplied by design
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("config: %s does not exist: %w", path, ErrNoConfigFile)
+		}
 		return nil, fmt.Errorf("config: reading %s: %w", path, err)
 	}
 
@@ -217,7 +243,6 @@ func Load(path string) (*Config, error) {
 	}
 
 	cfg.expandEnv()
-	cfg.normalize()
 
 	if err := cfg.validate(); err != nil {
 		return nil, fmt.Errorf("config: invalid %s: %w", path, err)
@@ -251,21 +276,6 @@ func (c *Config) expandEnv() {
 func expandEnvMap(env map[string]string) {
 	for k, v := range env {
 		env[k] = os.ExpandEnv(v)
-	}
-}
-
-// normalize fills in per-step defaults left unset by the file.
-func (c *Config) normalize() {
-	for i := range c.Repos {
-		for j := range c.Repos[i].Signals {
-			s := &c.Repos[i].Signals[j]
-			if s.Timeout == 0 {
-				s.Timeout = Duration(DefaultTimeout)
-			}
-			if s.MaxAge == 0 {
-				s.MaxAge = Duration(DefaultMaxAge)
-			}
-		}
 	}
 }
 
@@ -325,14 +335,21 @@ func (c *Config) validate() error {
 // validateSignals checks a repo's step list, including the migration error for
 // a config still written in the old single-command shape.
 func (r Repo) validateSignals(label string) []error {
-	if err := r.migrationError(label); err != nil {
-		// One error rather than that plus "no signals configured", which would
-		// bury the instructions under a complaint about their consequence.
-		return []error{err}
+	var problems []error
+
+	migrating := r.migrationError(label)
+	if migrating != nil {
+		problems = append(problems, migrating)
 	}
 
-	var problems []error
-	if len(r.Signals) == 0 {
+	// The migration error suppresses "nothing to measure" and nothing else. It
+	// would bury the rewrite instructions under a complaint about their own
+	// consequence, which is why that suppression is deliberate. Returning early
+	// on it was not: a config carrying one leftover repo-level key beside a
+	// perfectly good signals list had every other check skipped, so duplicate
+	// signal names, bad formats and format collisions all went unreported while
+	// the one error printed claimed the file was in the old shape.
+	if len(r.Signals) == 0 && migrating == nil {
 		problems = append(problems, fmt.Errorf("%s: no signals configured, so there is nothing to measure", label))
 	}
 
@@ -424,10 +441,18 @@ func (s Signal) validate(label string) []error {
 	problems = append(problems, checkEnv(label, s.Env)...)
 
 	if s.Timeout <= 0 {
-		problems = append(problems, fmt.Errorf("%s: timeout must be positive", label))
+		problems = append(problems, fmt.Errorf("%s: timeout must be positive, omit it for the default of %s", label, DefaultTimeout))
 	}
-	if s.MaxAge < 0 {
-		problems = append(problems, fmt.Errorf("%s: max_age cannot be negative", label))
+	// Rejected at zero and not only below it, which is what makes an operator
+	// who wanted no staleness limit say so out loud. This used to accept
+	// "max_age: 0s" and hand back the 24 hour default, because the default was
+	// filled in for any zero before this ran. See Signal.UnmarshalYAML.
+	//
+	// Nothing a config can express reaches collect with a non-positive max_age
+	// now. The maxAge <= 0 arm in internal/collect's isStale is therefore for
+	// direct callers of that package only.
+	if s.MaxAge <= 0 {
+		problems = append(problems, fmt.Errorf("%s: max_age must be positive, omit it for the default of %s", label, DefaultMaxAge))
 	}
 	return problems
 }
@@ -480,6 +505,19 @@ func (r Repo) migrationError(label string) error {
 		return nil
 	}
 
+	// A repo that already has signals is not in the old shape, so it does not
+	// get told that it is, and it does not get a replacement block either: the
+	// block is assembled from the old fields alone, so pasting it over a repo
+	// with real signals would throw those signals away. What is wrong here is
+	// narrower, and so is the instruction.
+	if len(r.Signals) > 0 {
+		return fmt.Errorf(
+			"%s: %s %s at the repo level, which is where the old single-command shape put %s. "+
+				"This repo already has a signals list, so %s ignored. Each one belongs in a signal now: "+
+				"move it there, or delete it. env is the only setting that is still repo-level",
+			label, strings.Join(old, ", "), pluralIs(len(old)), pluralThem(len(old)), pluralAre(len(old)))
+	}
+
 	// The example is filled in from what they actually wrote, so it can be
 	// pasted rather than translated.
 	example := "      - name: coverage\n"
@@ -512,6 +550,20 @@ func pluralIs(n int) string {
 		return "is set"
 	}
 	return "are set"
+}
+
+func pluralThem(n int) string {
+	if n == 1 {
+		return "it"
+	}
+	return "them"
+}
+
+func pluralAre(n int) string {
+	if n == 1 {
+		return "it is"
+	}
+	return "they are"
 }
 
 func quoteAll(args []string) []string {

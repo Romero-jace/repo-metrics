@@ -70,6 +70,18 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		printUsage(stderr)
 		return nil
 	default:
+		// Said out loud, ahead of the usage block, because main turns the
+		// returned error into an exit status and never prints it. Without this
+		// a typo produced seventy lines of usage and no statement of what was
+		// wrong with what was typed. Explanation first and usage after is the
+		// order parseFlags already uses, and the order Go's own flag package
+		// uses for an undefined flag.
+		_, _ = fmt.Fprintf(stderr, "unknown command %q\n", args[0])
+		if strings.HasPrefix(args[0], "-") {
+			// The likeliest way to land here without a typo, since Go's flag
+			// package cannot take flags before the subcommand.
+			_, _ = fmt.Fprintf(stderr, "flags go after the subcommand, as in: repo-metrics collect %s\n", args[0])
+		}
 		printUsage(stderr)
 		return fmt.Errorf("unknown command %q", args[0])
 	}
@@ -116,7 +128,12 @@ func loadConfig(path string, stderr io.Writer) (*config.Config, error) {
 	cfg, err := config.Load(path)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "%v\n", err)
-		if errors.Is(err, os.ErrNotExist) {
+		// config.ErrNoConfigFile rather than os.ErrNotExist. A repo path that is
+		// not there also satisfies os.ErrNotExist, through the joined validation
+		// errors, so this hint used to tell an operator who had just mistyped a
+		// path to overwrite their own config. init then refuses without --force,
+		// and with it would have destroyed their repo list.
+		if errors.Is(err, config.ErrNoConfigFile) {
 			_, _ = fmt.Fprintf(stderr, "run `repo-metrics init` to write a starter config at %s\n", path)
 		}
 		return nil, err

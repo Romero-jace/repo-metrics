@@ -547,6 +547,121 @@ repos:
 	}
 }
 
+// A leftover repo-level key beside a real signals list is not the old shape,
+// and the rest of the repo still has to be checked.
+//
+// migrationError fires on any old repo-level field, and validateSignals used to
+// return on it, which skipped every other check for that repo: duplicate signal
+// names, each signal's own validation, and the cross-signal format collision.
+// This config has four problems and reported one, and that one told the
+// operator their file was the old single-command shape when it plainly was not.
+// env genuinely is repo-level in the new shape, so "timeouts must be repo-level
+// too" is an ordinary mistake to make.
+func TestOldKeysBesideRealSignalsStillValidateTheSignals(t *testing.T) {
+	_, err := config.Load(write(t, `
+repos:
+  - name: svc
+    path: $REPO
+    timeout: 5m
+    signals:
+      - {name: coverage, artifact: c.out, artifact_format: not-a-format}
+      - {name: coverage, command: ["go", "test"], stdout_format: also-not-a-format}
+`))
+	if err == nil {
+		t.Fatal("Load accepted an invalid config")
+	}
+	msg := err.Error()
+
+	for _, want := range []string{
+		"timeout",                 // the leftover repo-level key
+		"duplicate signal name",   // both steps are called coverage
+		"unknown artifact_format", // and each names a format that does not exist
+		"unknown stdout_format",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("the error does not mention %q:\n%s", want, msg)
+		}
+	}
+
+	// The diagnosis has to match the file, which has a signals list.
+	if !strings.Contains(msg, "already has a signals list") {
+		t.Errorf("the error does not say what is actually wrong with this repo:\n%s", msg)
+	}
+	// And no pasteable replacement block, which migrationError assembles from
+	// the old fields alone: pasting it over this repo would throw both of its
+	// real signals away.
+	if strings.Contains(msg, "Rewrite it as") {
+		t.Errorf("the error offers a rewrite that would discard the signals this repo already has:\n%s", msg)
+	}
+}
+
+// An explicit zero is a request, and used to be answered with a default.
+//
+// max_age: 0s asks for no staleness limit and silently got 24 hours: the
+// default was filled in for any zero MaxAge before validation ran, and an
+// absent key and a written "0s" both arrive as Duration(0). Defaults are
+// applied by Signal.UnmarshalYAML now, which only runs for a step the file
+// actually carries, so the two are distinguishable and the explicit one is
+// rejected rather than overruled.
+//
+// timeout: 0s was the same bug one field over. validate has always rejected a
+// non-positive timeout, and for a zero that check could never fire.
+func TestExplicitZeroDurationsAreRejected(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want []string
+	}{
+		{
+			name: "max_age of zero",
+			body: `
+repos:
+  - {name: svc, path: $REPO, signals: [{name: c, artifact: c.out, artifact_format: go-coverprofile, max_age: 0s}]}
+`,
+			want: []string{"max_age must be positive", "omit it for the default"},
+		},
+		{
+			name: "timeout of zero",
+			body: `
+repos:
+  - {name: svc, path: $REPO, signals: [{name: c, artifact: c.out, artifact_format: go-coverprofile, timeout: 0s}]}
+`,
+			want: []string{"timeout must be positive", "omit it for the default"},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := config.Load(write(t, tc.body))
+			if err == nil {
+				t.Fatal("Load accepted a duration of zero, so the operator's request was silently replaced by a default")
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("the error does not mention %q: %v", want, err)
+				}
+			}
+		})
+	}
+
+	// The other half, without which rejecting every zero would just be a
+	// different silent wrong answer: an omitted key still gets its default.
+	cfg, err := config.Load(write(t, `
+repos:
+  - {name: svc, path: $REPO, signals: [{name: c, artifact: c.out, artifact_format: go-coverprofile}]}
+`))
+	if err != nil {
+		t.Fatalf("Load rejected a config that omits both durations: %v", err)
+	}
+	s := onlySignal(t, cfg)
+	if got, want := time.Duration(s.MaxAge), config.DefaultMaxAge; got != want {
+		t.Errorf("an omitted max_age is %s, want the default %s", got, want)
+	}
+	if got, want := time.Duration(s.Timeout), config.DefaultTimeout; got != want {
+		t.Errorf("an omitted timeout is %s, want the default %s", got, want)
+	}
+}
+
 // Every problem in one pass. Fixing a config one error per run is miserable
 // when the file lists a dozen repos.
 func TestLoadReportsAllProblemsAtOnce(t *testing.T) {

@@ -47,6 +47,17 @@ func runCollect(ctx context.Context, args []string, stdout, stderr io.Writer) er
 			_, _ = fmt.Fprintf(stderr, "stopping early, collection was canceled after %d of %d repos\n", i, len(repos))
 			return err
 		}
+		// Announced before the work, because collectOne's line only lands after
+		// that repo's signals have all run and been stored. A cold three-repo
+		// run was 78 seconds of silence, and one signal may take ten minutes, so
+		// on nine repos there was nothing to tell working from hung, and nothing
+		// saying which repo it was on.
+		//
+		// Unconditional: there is no terminal detection in this codebase and
+		// this must not be what introduces it, so a cron log gets the same lines
+		// a terminal does. The leading word is not the repo name, so this line
+		// cannot be mistaken for the completion line's row in the table below.
+		printStarting(stdout, repo.Name, i+1, len(repos))
 		if err := collectOne(ctx, st, repo, stdout, stderr); err != nil {
 			failed = append(failed, repo.Name)
 		}
@@ -127,6 +138,16 @@ func progressSummary(res collect.Result) string {
 // stuck on.
 func printProgress(w io.Writer, name, status, summary string) {
 	_, _ = fmt.Fprintf(w, "%-28s %-8s %s\n", name, status, summary)
+}
+
+// printStarting says which repo is being collected, before it is.
+//
+// Deliberately not padded into the same columns as printProgress. Padding it
+// would put the repo name in the first cell twice, once for the start and once
+// for the finish, which reads as a duplicated row rather than as progress.
+// Counting the repos is what answers "how much longer".
+func printStarting(w io.Writer, name string, index, total int) {
+	_, _ = fmt.Fprintf(w, "collecting %s (%d of %d)\n", name, index, total)
 }
 
 // repoNames lists what a config knows about, for an error that tells the caller

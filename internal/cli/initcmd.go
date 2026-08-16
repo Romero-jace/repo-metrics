@@ -32,16 +32,18 @@ var starterConfig = fmt.Sprintf(
 
 // defaultWindowText renders the default reporting window for the config file.
 //
-// Hours rather than days, even though the window is really a week: durations in
-// this file go through Go's time.ParseDuration, whose largest unit is the hour,
-// so a literal "7d" here would make the starter config fail to load. The
-// --window flag is parsed separately and does understand 7d.
+// Days, because the window really is a week and the file can now say so. This
+// used to render hours, and explained itself: durations in the file went
+// through Go's time.ParseDuration, whose largest unit is the hour, so a literal
+// "7d" made the starter config fail to load. The file and the flags share one
+// parser now, so the workaround goes with the asymmetry that forced it.
 func defaultWindowText() string {
-	if config.DefaultWindow%time.Hour == 0 {
-		return fmt.Sprintf("%dh", config.DefaultWindow/time.Hour)
+	const day = 24 * time.Hour
+	if config.DefaultWindow%day == 0 {
+		return fmt.Sprintf("%dd", config.DefaultWindow/day)
 	}
-	// Not a whole number of hours, so let the Duration spell itself. Its String
-	// round-trips through time.ParseDuration, which is all the file needs.
+	// Not a whole number of days, so let the Duration spell itself. Its String
+	// round-trips through the parser, which is all the file needs.
 	return config.DefaultWindow.String()
 }
 
@@ -68,9 +70,8 @@ database: %s
 
 # How far back to look for a baseline when reporting. --window overrides it.
 #
-# This is a week, written in hours. Durations in this file go through Go's
-# time.ParseDuration, whose largest unit is the hour, so the "7d" the --window
-# flag accepts is a load error here. 168h and 7d are the same thing.
+# Durations here read the same as they do on the flags: Go's duration syntax
+# plus w for weeks and d for days, so 7d, 168h and 1w all mean this one week.
 window: %s
 
 # Packages smaller than this stay out of the culprit ranking. A three-statement

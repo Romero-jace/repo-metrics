@@ -337,14 +337,44 @@ func TestRunNoArguments(t *testing.T) {
 	}
 }
 
+// The error this returns only becomes an exit status: main prints nothing. So a
+// typo used to produce seventy lines of usage and no statement of the problem,
+// and this test asserted only that the usage appeared, which is the half that
+// was never missing.
 func TestRunUnknownSubcommand(t *testing.T) {
-	_, stderr, err := runCLI(t, "collct")
-	if err == nil {
-		t.Error("want an error for an unknown subcommand")
-	}
-	if !strings.Contains(stderr, "usage:") {
-		t.Errorf("want usage on stderr, got %q", stderr)
-	}
+	t.Run("a mistyped subcommand", func(t *testing.T) {
+		_, stderr, err := runCLI(t, "collct")
+		if err == nil {
+			t.Error("want an error for an unknown subcommand")
+		}
+		if !strings.Contains(stderr, "usage:") {
+			t.Errorf("want usage on stderr, got %q", stderr)
+		}
+		// What was typed has to appear, or the reader is left to spot the
+		// difference between their command line and a page of usage.
+		if !strings.Contains(stderr, "collct") {
+			t.Errorf("want the rejected command named on stderr, got %q", stderr)
+		}
+		if !strings.Contains(stderr, "unknown command") {
+			t.Errorf("want stderr to say what was wrong, got %q", stderr)
+		}
+	})
+
+	// The same path, reached without a typo: Go's flag package cannot take
+	// flags before the subcommand, so this lands in the same branch and is
+	// worth a word of its own.
+	t.Run("a flag before the subcommand", func(t *testing.T) {
+		_, stderr, err := runCLI(t, "--config", "repo-metrics.yaml", "collect")
+		if err == nil {
+			t.Error("want an error for a flag before the subcommand")
+		}
+		if !strings.Contains(stderr, "--config") {
+			t.Errorf("want the rejected token named on stderr, got %q", stderr)
+		}
+		if !strings.Contains(stderr, "flags go after the subcommand") {
+			t.Errorf("want the order explained on stderr, got %q", stderr)
+		}
+	})
 }
 
 func TestRunHelp(t *testing.T) {
@@ -439,15 +469,19 @@ func TestInitWritesTheRealDefaults(t *testing.T) {
 		t.Errorf("min_repo_delta = %v, want the default %v", cfg.MinRepoDelta, config.DefaultMinRepoDelta)
 	}
 
-	// The window has to be spelled in a unit the config loader understands.
-	// time.ParseDuration tops out at hours, so a "7d" written here would be a
-	// load error even though --window takes one.
+	// The window is spelled the way the documents teach it. This assertion used
+	// to be its exact opposite: "window: 7d" had to be absent, because the
+	// config file went through time.ParseDuration, whose largest unit is the
+	// hour, so the file this tool writes had to say 168h while every document
+	// and the --window help text said 7d. Both now read through one parser, and
+	// a starter config that cannot say what the tool recommends is the thing
+	// worth catching.
 	contents, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("reading back: %v", err)
 	}
-	if strings.Contains(string(contents), "window: 7d") {
-		t.Error("the window is written in days, which config.Load cannot parse")
+	if !strings.Contains(string(contents), "window: 7d") {
+		t.Errorf("want the window written in days, got:\n%s", contents)
 	}
 }
 
@@ -588,6 +622,46 @@ func TestCollectContinuesPastAFailingRepo(t *testing.T) {
 	if usable != nil {
 		t.Errorf("a failed snapshot should not be usable as a head, got %+v", usable)
 	}
+}
+
+// Nothing was printed while a repo was being collected.
+//
+// collectOne's line lands after that repo's signals have all run and been
+// stored, so a cold three-repo run was 78 seconds of silence and the starter
+// config allows ten minutes per signal. On nine repos there was no way to tell
+// working from hung, or to see which repo it was on.
+func TestCollectAnnouncesEachRepoBeforeItStarts(t *testing.T) {
+	dir := t.TempDir()
+	alpha := repoDir(t, dir, "alpha", sampleProfile)
+	beta := repoDir(t, dir, "beta", sampleProfile)
+	dbPath := filepath.Join(dir, "metrics.db")
+	cfgPath := writeConfig(t, dir, fmt.Sprintf("database: %q\nrepos:\n%s%s",
+		dbPath,
+		ingestRepoEntry("alpha", alpha, "coverage.out"),
+		ingestRepoEntry("beta", beta, "coverage.out")))
+
+	stdout, stderr, err := runCLI(t, "collect", "--config", cfgPath)
+	if err != nil {
+		t.Fatalf("collect: %v (stderr: %s)", err, stderr)
+	}
+
+	for i, name := range []string{"alpha", "beta"} {
+		starting := fmt.Sprintf("collecting %s (%d of 2)", name, i+1)
+		at := strings.Index(stdout, starting)
+		if at < 0 {
+			t.Fatalf("nothing announced %s while it was being collected:\n%s", name, stdout)
+		}
+		// Before its own completion line, not after. A line printed once the
+		// repo is done is the one that was already there.
+		if done := strings.Index(stdout, rowFor(t, stdout, name)); done < at {
+			t.Errorf("%s was announced only after it finished, which says nothing while it runs:\n%s", name, stdout)
+		}
+	}
+
+	// The completion lines survive and still say what happened: the new line
+	// says what is starting, the old one says how it went.
+	wantInRow(t, stdout, "alpha", "ok", "60.0%")
+	wantInRow(t, stdout, "beta", "ok", "60.0%")
 }
 
 func TestCollectSingleRepo(t *testing.T) {
@@ -1804,6 +1878,40 @@ func TestSubcommandsReportAMissingConfig(t *testing.T) {
 			}
 			if !strings.Contains(stderr, "repo-metrics init") {
 				t.Errorf("want a pointer at init, got %q", stderr)
+			}
+		})
+	}
+}
+
+// A repo path that is not there is not a missing config, and must not be
+// answered as one.
+//
+// Both used to satisfy errors.Is(err, os.ErrNotExist): the config file through
+// os.ReadFile, a repo path through the os.Stat that validation joins into its
+// error list, which errors.Is recurses through. So a config the operator had
+// just edited was answered with "run repo-metrics init to write a starter
+// config", which refuses without --force and with it would have overwritten
+// their repo list. The starter config's own commented-out example points at a
+// path that does not exist, so this is a first-hour stumble.
+func TestAMissingRepoPathDoesNotSuggestOverwritingTheConfig(t *testing.T) {
+	dir := t.TempDir()
+	absent := filepath.Join(dir, "not-checked-out")
+	cfgPath := writeConfig(t, dir, fmt.Sprintf("database: %q\nrepos:\n%s",
+		filepath.Join(dir, "metrics.db"), ingestRepoEntry("gone", absent, "coverage.out")))
+
+	for _, sub := range []string{"collect", "report", "repos"} {
+		t.Run(sub, func(t *testing.T) {
+			_, stderr, err := runCLI(t, sub, "--config", cfgPath)
+			if err == nil {
+				t.Fatal("want an error for a repo path that is not there")
+			}
+			// The real problem still has to be reported, or this passes by
+			// saying nothing at all.
+			if !strings.Contains(stderr, absent) {
+				t.Errorf("want the unusable repo path named on stderr, got %q", stderr)
+			}
+			if strings.Contains(stderr, "repo-metrics init") {
+				t.Errorf("a bad repo path was answered by telling the operator to overwrite their config: %q", stderr)
 			}
 		})
 	}

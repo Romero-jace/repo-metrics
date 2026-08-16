@@ -62,11 +62,11 @@ over the whole report. The plist ships `;` for the same reason and says so.
 
 ## 7d or 168h
 
-Both work on `--window`, and they mean the same thing. The flag understands a
-`d` suffix for days on top of Go's duration syntax, so `7d`, `168h`, and `1d12h`
-all parse.
+Both work, and they mean the same thing. Every duration this tool reads goes
+through one parser: Go's duration syntax plus a `w` suffix for weeks and a `d`
+suffix for days, so `7d`, `168h`, `1w` and `1d12h` all parse.
 
-The duration fields inside the config file are not the same. `window:`,
-`timeout:`, and `max_age:` go through Go's `time.ParseDuration`, whose largest
-unit is the hour, so `7d` there is a load error rather than a silent fallback
-and a week has to be written `168h`.
+That is true of the flags and of the config file alike. `window:`, `timeout:`
+and `max_age:` in the file take exactly what `--window` and `--since` take.
+Larger units come first, so `1w3d12h` reads the way `1h30m` does, while `3d1w`
+is an error rather than a guess at which reading was meant.

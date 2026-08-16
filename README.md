@@ -217,11 +217,11 @@ There is a fully commented version at
 [`examples/repo-metrics.yaml`](examples/repo-metrics.yaml), with every field
 annotated with what it does and what happens if you leave it out.
 
-`--window` takes Go's duration syntax plus a `d` suffix for days, so `7d`,
-`168h`, and `1d12h` all work. The duration fields in the config file are
-stricter: `window:`, `timeout:`, and `max_age:` go through Go's
-`time.ParseDuration`, whose largest unit is the hour, so a week there has to be
-written `168h` and `7d` is a load error.
+Durations read the same everywhere: Go's duration syntax plus a `w` suffix for
+weeks and a `d` suffix for days. `7d`, `168h`, `1w` and `1d12h` all work, on the
+`--window` and `--since` flags and in the `window:`, `timeout:` and `max_age:`
+fields of the config file alike. Larger units come first, so `1w3d12h` reads the
+way `1h30m` does and `3d1w` is an error rather than a guess.
 
 ## Running it on a schedule
 

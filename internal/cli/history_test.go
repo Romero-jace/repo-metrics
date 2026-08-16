@@ -259,6 +259,33 @@ func TestHistoryTellsNeverCollectedFromCollectionStopped(t *testing.T) {
 	}
 }
 
+// The usage text advertises `--since 26w` and the parser rejected it, because
+// there was no week suffix anywhere. 26 weeks is 182 days, which reaches the
+// seeded point that a 90 day window leaves out.
+func TestHistoryAcceptsAWindowInWeeks(t *testing.T) {
+	cfgPath := historyFixture(t)
+
+	stdout, stderr, err := runCLI(t, "history", "--config", cfgPath, "--repo", "charted",
+		"--since", "26w", "--format", "json")
+	if err != nil {
+		t.Fatalf("history --since 26w: %v (stderr: %s)", err, stderr)
+	}
+	if got := len(*decodeHistory(t, stdout).Points); got != 4 {
+		t.Errorf("got %d points for a 26 week window, want all 4 seeded", got)
+	}
+
+	// Anti-vacuity: the same fixture through a 90 day window leaves the oldest
+	// point out, so the w is being read as weeks rather than shrugged off.
+	narrow, _, err := runCLI(t, "history", "--config", cfgPath, "--repo", "charted",
+		"--since", "90d", "--format", "json")
+	if err != nil {
+		t.Fatalf("history --since 90d: %v", err)
+	}
+	if got := len(*decodeHistory(t, narrow).Points); got != 3 {
+		t.Errorf("got %d points for a 90 day window, want 3", got)
+	}
+}
+
 // History is narrowed by construction, so it says what it covers for the same
 // reason the report does.
 func TestHistorySaysWhatItCoversAndWhichSignal(t *testing.T) {

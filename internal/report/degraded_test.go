@@ -38,6 +38,55 @@ var degradedColumns = [...]string{
 	"outdated dependencies change",
 }
 
+// pairedGroups ties each JSON group to the markdown column showing the same
+// signal, so the two renderings can be checked against each other by name rather
+// than by position.
+//
+// Hand-written, and pinned to the registry by TestEveryTableSignalIsPaired
+// rather than derived from it. Deriving would make it agree automatically, and
+// automatic agreement proves nothing: the point is that a signal earning a table
+// column is a decision someone made, and the check that its two renderings match
+// has to be a second decision rather than a consequence of the first.
+var pairedGroups = []struct{ key, column string }{
+	{"coverage", "coverage"},
+	{"tests", "tests"},
+	{"untested_packages", "packages without tests"},
+	{"lint_findings", "lint findings"},
+	{"outdated_dependencies", "outdated dependencies"},
+}
+
+// A signal in the every-repo table has to be compared across both renderings.
+//
+// Without this the pairing list is a hand-written subset that silently stops
+// growing: a sixth table signal would get a markdown column, a JSON group, and
+// nothing checking that the two agree about whether it was measured. The
+// degraded rows would still pass, because they only assert the markdown.
+func TestEveryTableSignalIsPaired(t *testing.T) {
+	paired := make(map[string]bool, len(pairedGroups))
+	for _, g := range pairedGroups {
+		paired[g.key] = true
+	}
+	for _, sig := range delta.Signals() {
+		if sig.Table && !paired[string(sig.ID)] {
+			t.Errorf("%q has a column in the every-repo table but no entry in pairedGroups, so nothing checks that its markdown cell and its json group agree about whether anything measured it",
+				sig.ID)
+		}
+	}
+	// And the reverse, so a signal dropped from the table does not leave a
+	// pairing that quietly matches nothing.
+	table := make(map[string]bool, len(pairedGroups))
+	for _, sig := range delta.Signals() {
+		if sig.Table {
+			table[string(sig.ID)] = true
+		}
+	}
+	for _, g := range pairedGroups {
+		if !table[g.key] {
+			t.Errorf("pairedGroups pairs %q, which no longer has a table column, so the pairing is rot", g.key)
+		}
+	}
+}
+
 // cellSpec says what one table cell is allowed to be.
 //
 // An unmeasured cell is asserted to contain no ASCII digit at all rather than
@@ -335,13 +384,12 @@ func TestDegradedStatesNeverRenderAnUnmeasuredNumber(t *testing.T) {
 			// Each wire group is paired with the markdown column that shows the
 			// same signal, by name rather than by index, so reordering the table
 			// cannot silently compare coverage against the tests column.
-			for _, group := range []struct{ key, column string }{
-				{"coverage", "coverage"},
-				{"tests", "tests"},
-				{"untested_packages", "packages without tests"},
-				{"lint_findings", "lint findings"},
-				{"outdated_dependencies", "outdated dependencies"},
-			} {
+			//
+			// TestEveryTableSignalIsPaired keeps this list in step with the
+			// registry. Without it, a sixth signal joining the table would get a
+			// column that nothing compares against the wire, and the two
+			// renderers could disagree about it forever.
+			for _, group := range pairedGroups {
 				v, present := wireRow[group.key]
 				if !present {
 					t.Errorf("%s: the %s key is missing from the json rather than null. A consumer that never sees the key defaults it, and the zeros come straight back.",

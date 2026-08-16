@@ -151,6 +151,32 @@ The rule of thumb: share a marker only when there is no possible input where one
 of the signals is knowable and another is not. If you can describe such an input,
 they need separate markers.
 
+## The other half: what the scope names
+
+A marker says something was measured. It does not say the same things were
+measured on both sides of a comparison, and for a signal whose value is a sum
+across scoped rows that is a second question with its own answer.
+
+The distinction is what the scope column NAMES.
+
+**The scope names the subject.** Coverage breaks down by package, and a package
+appearing or vanishing is a real change in the repo. The report has designed
+answers for it: culprit ranking, added and removed lists. These signals compare
+freely.
+
+**The scope names the apparatus.** Lint findings and collection time break down
+by the collection step that produced them, because a repo can run two linters.
+When that set changes, the sum covers something different, and subtracting it
+from last week's is not a measurement of anything. A step that crashed did not
+make the repo better; a step newly switched on did not make it worse. Both of
+those shipped, and both are pinned now.
+
+Signals in the second group set `ScopeSetMustMatch` on their registry entry.
+`delta.Compare` then refuses the comparison when the sets differ, the report says
+"not comparable" rather than printing a number, and the repo is not nominated as
+a mover on the strength of it. Set it when the scope names how the measurement
+was taken, and leave it off when the scope names what was measured.
+
 ## Adding a signal
 
 A signal is what the report publishes. It is not the same as a config `signals:`
@@ -165,8 +191,9 @@ list is a shortcut rather than the enforcement:
 2. Whatever parser in `internal/collect/parse.go` emits it. Emit the marker
    unconditionally once the parse succeeds.
 3. `internal/delta/signal.go` holds the registry entry: id, label, unit, direction,
-   marker, marker scope, extractor, and whether it may nominate a repo as a
-   mover.
+   marker, marker scope, extractor, whether it may nominate a repo as a mover,
+   and `ScopeSetMustMatch` if its scope names the apparatus rather than the
+   subject.
 4. `internal/report/view.go` needs a field on `RepoView`, a case in `group()`, and a
    line in `buildRepo`. Named fields rather than a map, because the field census
    collapses list-element paths and a map forces one value type on every entry.

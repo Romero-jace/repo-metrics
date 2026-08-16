@@ -64,9 +64,10 @@ it from here. Three of those bite a model harder than a person, so they get a
 line each.
 
 - **Paste real command output. Do not assert that tests pass.** CONTRIBUTING
-  asks for the output in the pull request, and it matters more here than in most
-  repos: a tool whose whole thesis is "do not report a measurement you did not
-  take" cannot ship a claim nobody ran.
+  asks for the output in the pull request, or the commit message when there is no
+  pull request, and it matters more here than in most repos: a tool whose whole
+  thesis is "do not report a measurement you did not take" cannot ship a claim
+  nobody ran.
 - **No em dashes.** Default model prose is full of them, and three tests already
   fail on one: `TestNoEmDashes` (`internal/report/report_test.go`) for rendered
   report markdown, `TestUsageHasNoEmDash` (`internal/cli/cli_test.go`) for usage

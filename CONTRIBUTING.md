@@ -3,6 +3,11 @@
 Thanks for looking. This is a small tool and the bar for a change is just that it
 passes the gate and fits the style below.
 
+The repository is private and shared by invitation, so "the pull request" below
+often means a commit message instead. Where it says to paste command output into
+one, paste it into whichever you are writing. The point is the output, not the
+venue.
+
 ## Build and run the gate
 
 ```sh

@@ -13,9 +13,10 @@ commit it came from. Once `v0.1.0` is tagged the same command reports
 `repo-metrics v0.1.0` with nothing to bump anywhere, and the release date is the
 only thing left to add here.
 
-First public release. Nobody has run a previous one, so there is nothing to list
-as changed or fixed. What follows is what the tool does and what it deliberately
-does not do.
+First release. The repository is private and shared by invitation, so the
+audience is whoever has been given access rather than anybody who finds it.
+Nobody has run a previous version, so there is nothing to list as changed or
+fixed. What follows is what the tool does and what it deliberately does not do.
 
 repo-metrics runs the commands a repo's config lists, one per signal, reads the
 artifacts and the streams they leave behind, and stores counts in a SQLite file.

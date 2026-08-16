@@ -64,10 +64,13 @@ func writeConfig(t *testing.T, dir, body string) string {
 	return path
 }
 
-// ingestRepoEntry is a repo with no command, so collection just reads whatever
-// is on disk. That keeps these tests hermetic: no test suite gets run.
-func ingestRepoEntry(name, path, coverprofile string) string {
-	return fmt.Sprintf("  - name: %s\n    path: %q\n    coverprofile: %s\n", name, path, coverprofile)
+// ingestRepoEntry is a repo with one coverage signal and no command, so
+// collection just reads whatever is on disk. That keeps these tests hermetic:
+// no test suite gets run.
+func ingestRepoEntry(name, path, artifact string) string {
+	return fmt.Sprintf(
+		"  - name: %s\n    path: %q\n    signals:\n      - name: coverage\n        artifact: %s\n        artifact_format: %s\n",
+		name, path, artifact, config.FormatGoCoverprofile)
 }
 
 func openStore(t *testing.T, path string) *store.Store {
@@ -626,8 +629,9 @@ func TestCollectReportsAStaleArtifactAsPartial(t *testing.T) {
 	}
 
 	cfgPath := writeConfig(t, dir, fmt.Sprintf(
-		"database: %q\nrepos:\n  - name: stale\n    path: %q\n    coverprofile: coverage.out\n    max_age: 24h\n",
-		dbPath, stale))
+		"database: %q\nrepos:\n  - name: stale\n    path: %q\n    signals:\n"+
+			"      - name: coverage\n        artifact: coverage.out\n        artifact_format: %s\n        max_age: 24h\n",
+		dbPath, stale, config.FormatGoCoverprofile))
 
 	stdout, stderr, err := runCLI(t, "collect", "--config", cfgPath)
 	if err != nil {

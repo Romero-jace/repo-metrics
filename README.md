@@ -78,17 +78,34 @@ database: ./repo-metrics.db
 repos:
   - name: my-service
     path: /path/to/my-service
-    coverprofile: coverage.out
-    command: ["go", "test", "./...", "-json", "-coverpkg=./...", "-coverprofile=coverage.out"]
-    stdout_format: go-test-json
-    timeout: 10m
+    env:
+      GOWORK: "off"
+    signals:
+      - name: coverage
+        command: ["go", "test", "./...", "-json", "-coverpkg=./...", "-coverprofile=coverage.out"]
+        artifact: coverage.out
+        artifact_format: go-coverprofile
+        stdout_format: go-test-json
+        timeout: 10m
 
   - name: built-in-ci
     path: /srv/checkouts/built-in-ci
-    coverprofile: artifacts/coverage.out
-    max_age: 24h
-    # no command, so it just reads what CI already wrote
+    signals:
+      - name: coverage
+        artifact: artifacts/coverage.out
+        artifact_format: go-coverprofile
+        max_age: 24h
+        # no command, so it just reads what CI already wrote
 ```
+
+Each repo carries a list of signals: one entry per thing to measure. A signal
+either runs a command and reads what it left behind, or reads an artifact
+something else produced. One command can feed two parsers, which is why the
+entry above names both an `artifact_format` and a `stdout_format`: `go test`
+yields the profile and the test counts from a single run.
+
+A signal is also the unit of failure. One going wrong costs its own numbers and
+nothing else, and the snapshot comes back `partial` rather than `failed`.
 
 There is a fully commented version at
 [`examples/repo-metrics.yaml`](examples/repo-metrics.yaml), with every field

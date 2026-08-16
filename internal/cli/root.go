@@ -148,15 +148,6 @@ func coverageTotals(metrics []store.Metric) (covered, total int) {
 	return covered, total
 }
 
-// formatCoverage renders a percentage, or says so when there is nothing to
-// divide by. Zero total statements is not zero percent coverage.
-func formatCoverage(covered, total int) string {
-	if total == 0 {
-		return "no coverage"
-	}
-	return fmt.Sprintf("%.1f%%", float64(covered)/float64(total)*100)
-}
-
 func printUsage(w io.Writer) {
 	// The section names are generated from report.Sections() rather than typed
 	// out here, so a section the parser accepts cannot go unlisted and a name

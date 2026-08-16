@@ -65,7 +65,7 @@ func runCollect(ctx context.Context, args []string, stdout, stderr io.Writer) er
 // you the other nine, which is the whole reason collect.Collect reports failure
 // on the snapshot instead of returning an error.
 func collectOne(ctx context.Context, st *store.Store, repo config.Repo, stdout, stderr io.Writer) error {
-	res := collect.Collect(ctx, repo, collect.GoCollector{}, time.Now())
+	res := collect.Collect(ctx, repo, time.Now())
 
 	for _, d := range res.Diagnostics {
 		_, _ = fmt.Fprintf(stderr, "%s: %s: %s\n", repo.Name, d.Severity, d.Message)
@@ -87,17 +87,39 @@ func collectOne(ctx context.Context, st *store.Store, repo config.Repo, stdout, 
 		return err
 	}
 
-	covered, total := coverageTotals(res.Metrics)
-	summary := formatCoverage(covered, total)
-	if total > 0 {
-		summary = fmt.Sprintf("%s of %d statements", summary, total)
-	}
-	printProgress(stdout, repo.Name, string(res.Snapshot.Status), summary)
+	printProgress(stdout, repo.Name, string(res.Snapshot.Status), progressSummary(res))
 
 	if res.Snapshot.Status == store.StatusFailed {
 		return fmt.Errorf("%s: %s", repo.Name, res.Snapshot.Error)
 	}
 	return nil
+}
+
+// progressSummary is the right-hand end of a repo's progress line.
+//
+// It names the signals that landed and the ones that did not, which a repo
+// running one step never needed: "partial" was a complete answer when there was
+// only one thing it could be partial about. With several, a status word without
+// the list makes someone open the diagnostics to find out which measurement is
+// missing.
+func progressSummary(res collect.Result) string {
+	var parts []string
+	// Only when there is a denominator. Coverage of zero statements is not zero
+	// percent, and this line is the first place anyone would read it as one.
+	if covered, total := coverageTotals(res.Metrics); total > 0 {
+		parts = append(parts, fmt.Sprintf("%.1f%% of %d statements",
+			float64(covered)/float64(total)*100, total))
+	}
+	if len(res.Collected) > 0 {
+		parts = append(parts, "collected "+strings.Join(res.Collected, ", "))
+	}
+	if len(res.Failed) > 0 {
+		parts = append(parts, "could not collect "+strings.Join(res.Failed, ", "))
+	}
+	if len(parts) == 0 {
+		return "nothing collected"
+	}
+	return strings.Join(parts, "; ")
 }
 
 // printProgress writes one line per repo as the run goes, rather than a table at

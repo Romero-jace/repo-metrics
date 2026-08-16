@@ -40,49 +40,24 @@ min_statements: 20
 min_repo_delta: 0.5
 
 repos:
-  # Mode one: repo-metrics runs a command, then reads what the command wrote.
   - name: my-service
     # Absolute path to the checkout. Has to exist and be a directory or the
     # config fails to load. Required.
     path: /srv/checkouts/my-service
 
-    # Where the coverage profile lands, relative to path unless absolute.
-    # Required, even in command mode: without it there is nothing to parse, so
-    # running the command would burn a whole test suite and record nothing.
-    coverprofile: coverage.out
-
-    # An argv slice, never a shell string. Nothing here goes through a shell, so
-    # quoting and word splitting cannot surprise you, and it also means you
-    # cannot use pipes or && here. Leave it out to switch to ingest mode below.
-    #
-    # -coverpkg=./... matters: without it, packages that have no test files are
-    # invisible in the profile and the repo percentage silently reads high.
-    command:
-      - go
-      - test
-      - ./...
-      - -json
-      - -coverpkg=./...
-      - -coverprofile=coverage.out
-
-    # Parse the command's stdout for test counts, pass/fail/skip, and per-package
-    # durations. go-test-json is the only supported value today. Leave it out and
-    # stdout is ignored, so you get coverage but no test counts.
-    #
-    # Setting this without a command is an error, since there would be no stdout
-    # to capture.
-    stdout_format: go-test-json
-
-    # Extra environment variables for the command, added to the environment
-    # repo-metrics itself is running with rather than replacing it. Leave it out
-    # and the command just inherits what repo-metrics has.
+    # Extra environment variables for every signal below, added to the
+    # environment repo-metrics itself is running with rather than replacing it.
+    # Leave it out and the commands just inherit what repo-metrics has.
     #
     # This is here because command is an argv slice with no shell in front of
     # it, so there is nowhere to write a `VAR=x` prefix. The worked example is
     # the real one: a module sitting under a go.work that does not list it fails
-    # every go command outright, and the fix is one variable. Without this field
-    # you would have to write `env GOWORK=off go test ...` in the argv, which
-    # works and is what this repo did before the field existed.
+    # every go command outright, and the fix is one variable.
+    #
+    # It sits at the repo level rather than only on each signal because it is
+    # also the environment the toolchain fingerprint is taken under, and that
+    # fingerprint is what tells the report whether two snapshots are comparable
+    # at all. A signal can add its own on top; see the lint signal below.
     #
     # Keys are used exactly as written: no ${VAR} expansion, no empty key, and
     # no "=" inside a key, since the pair is joined as KEY=VALUE and a key
@@ -91,34 +66,94 @@ repos:
     env:
       GOWORK: "off"
 
-    # Wall-clock budget for the command. The run is killed when it expires and
-    # the snapshot is recorded as failed rather than silently skipped.
-    # Default: 10m
-    timeout: 15m
+    # What to measure. One entry per thing, and a repo needs at least one or
+    # there is nothing to collect.
+    #
+    # A signal is the unit of execution and of failure: one going wrong costs
+    # its own numbers and nothing else, and the snapshot comes back partial
+    # rather than failed. One entry can feed two parsers, which is why the
+    # coverage entry below names both an artifact_format and a stdout_format:
+    # `go test` yields the profile and the test counts from a single run, and
+    # running it twice to get them separately would be silly.
+    signals:
+      - # Names this step in diagnostics and in the progress line. Required, and
+        # unique within the repo. Name the thing rather than the tool, since
+        # this is what someone reads when it breaks.
+        name: coverage
 
-  # Mode two: ingest only. No command, so repo-metrics parses whatever is already
-  # on disk. This is how you consume a profile your CI already produced.
+        # An argv slice, never a shell string. Nothing here goes through a
+        # shell, so quoting and word splitting cannot surprise you, and it also
+        # means you cannot use pipes or && here. Leave it out for ingest mode,
+        # as in the second repo below.
+        #
+        # -coverpkg=./... matters: without it, packages that have no test files
+        # are invisible in the profile and the repo percentage silently reads
+        # high.
+        command:
+          - go
+          - test
+          - ./...
+          - -json
+          - -coverpkg=./...
+          - -coverprofile=coverage.out
+
+        # A file the command produces, relative to path unless absolute, and how
+        # to read it. The two go together: an artifact with no format would be
+        # checked for freshness and then never read, and a format with no
+        # artifact has nothing to point at.
+        #
+        # In command mode this is also the freshness check. The file has to
+        # change during the run, because "the command exited 0" is not evidence
+        # that anything was produced: a .PHONY make target with no rule exits 0
+        # having done nothing, and a stale profile at this path would otherwise
+        # be reported as today's number forever.
+        artifact: coverage.out
+        artifact_format: go-coverprofile
+
+        # Parse the command's stdout too, for test counts, pass/fail/skip, and
+        # per-package durations. Leave it out and stdout is ignored, so you get
+        # coverage but no test counts. Setting it without a command is an error,
+        # since there would be no stdout to capture.
+        stdout_format: go-test-json
+
+        # Wall-clock budget for this signal's command. It is per signal rather
+        # than per repo, so adding a second measurement does not silently halve
+        # the time the first one gets. The command is killed when it expires and
+        # the signal is recorded as failed rather than silently skipped.
+        # Default: 10m
+        timeout: 15m
+
+  # Ingest only: no command, so repo-metrics parses whatever is already on disk.
+  # This is how you consume a profile your CI already produced.
   - name: built-by-ci
     path: /srv/checkouts/built-by-ci
-    coverprofile: artifacts/coverage.out
+    signals:
+      - name: coverage
+        artifact: artifacts/coverage.out
+        artifact_format: go-coverprofile
 
-    # Ingest mode only. A profile older than this is reported as stale instead of
-    # being presented as a current number, which is the whole point: a coverage
-    # file sitting at the expected path is not evidence that anything ran.
-    # Default: 24h
-    max_age: 36h
+        # Ingest mode only, because it is the only freshness signal there is
+        # when nobody here ran anything. An artifact older than this is reported
+        # as stale instead of being presented as a current number, which is the
+        # whole point: a coverage file sitting at the expected path is not
+        # evidence that anything ran.
+        # Default: 24h
+        max_age: 36h
 
-    # No command here, so no stdout_format and no timeout. Coverage only, no test
-    # counts, because nothing produced a -json stream for this repo.
+        # No command here, so no stdout_format and no timeout. Coverage only, no
+        # test counts, because nothing produced a -json stream for this repo.
 
   # ${VAR} and $VAR are expanded from the environment in five places and only
-  # five: the top-level database, and each repo's path, coverprofile, command
-  # entries, and env VALUES. That is enough to keep the machine-specific parts
-  # of a checkout layout out of the file.
+  # five: the top-level database, and each repo's path, plus each signal's
+  # artifact, command entries, and env VALUES. That is enough to keep the
+  # machine-specific parts of a checkout layout out of the file.
   #
-  # Nothing else is expanded. A ${VAR} in name or in an env KEY is kept as
-  # literal text, and one in stdout_format, timeout, or max_age makes the config
-  # fail to load, since those are parsed and validated exactly as written.
+  # Nothing else is expanded. A ${VAR} in a name or in an env KEY is kept as
+  # literal text, and one in a format, timeout, or max_age makes the config fail
+  # to load, since those are parsed and validated exactly as written.
   # - name: from-env
   #   path: ${CHECKOUT_ROOT}/another-repo
-  #   coverprofile: coverage.out
+  #   signals:
+  #     - name: coverage
+  #       artifact: coverage.out
+  #       artifact_format: go-coverprofile

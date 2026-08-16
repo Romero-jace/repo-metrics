@@ -41,20 +41,26 @@ func writeProfile(t *testing.T, dir, name string, age time.Duration) string {
 	return path
 }
 
-func repo(dir string, command ...string) config.Repo {
-	return config.Repo{
-		Name:         "svc",
-		Path:         dir,
-		Coverprofile: "coverage.out",
-		Command:      command,
-		Timeout:      config.Duration(30 * time.Second),
-		MaxAge:       config.Duration(24 * time.Hour),
+// coverageStep is the ordinary single-step shape: run something, read the
+// profile it wrote. No command means ingest mode.
+func coverageStep(command ...string) config.Signal {
+	return config.Signal{
+		Name:           "coverage",
+		Command:        command,
+		Artifact:       "coverage.out",
+		ArtifactFormat: config.FormatGoCoverprofile,
+		Timeout:        config.Duration(30 * time.Second),
+		MaxAge:         config.Duration(24 * time.Hour),
 	}
+}
+
+func repo(dir string, command ...string) config.Repo {
+	return config.Repo{Name: "svc", Path: dir, Signals: []config.Signal{coverageStep(command...)}}
 }
 
 func collectOnce(t *testing.T, r config.Repo) collect.Result {
 	t.Helper()
-	return collect.Collect(context.Background(), r, collect.GoCollector{}, time.Now())
+	return collect.Collect(context.Background(), r, time.Now())
 }
 
 func diagText(res collect.Result) string {
@@ -79,6 +85,15 @@ func metric(t *testing.T, res collect.Result, key, scope string) float64 {
 	return 0
 }
 
+func hasMetric(res collect.Result, key string) bool {
+	for _, m := range res.Metrics {
+		if m.Key == key {
+			return true
+		}
+	}
+	return false
+}
+
 // The headline case, drawn from a real repository.
 //
 // `make coverage-all` there is declared .PHONY with no rule: it prints "Nothing
@@ -99,7 +114,7 @@ func TestPhantomCommandIsFailedNotStaleData(t *testing.T) {
 	if len(res.Metrics) != 0 {
 		t.Errorf("a failed collection recorded %d metrics; it must record none", len(res.Metrics))
 	}
-	if !strings.Contains(diagText(res), "no fresh coverage profile") {
+	if !strings.Contains(diagText(res), "wrote no fresh") {
 		t.Errorf("diagnostics do not explain the staleness:\n%s", diagText(res))
 	}
 }
@@ -124,6 +139,12 @@ func TestCommandThatWritesTheProfileSucceeds(t *testing.T) {
 	}
 	if res.Snapshot.Duration <= 0 {
 		t.Error("collection duration was not recorded")
+	}
+	if len(res.Collected) != 1 || res.Collected[0] != "coverage" {
+		t.Errorf("Collected: got %v, want just the coverage signal", res.Collected)
+	}
+	if len(res.Failed) != 0 {
+		t.Errorf("Failed: got %v, want none", res.Failed)
 	}
 }
 
@@ -151,7 +172,7 @@ func TestFailingSuiteStillRecordsCoverage(t *testing.T) {
 func TestTimeoutIsFailed(t *testing.T) {
 	dir := repoDir(t)
 	r := repo(dir, "sleep", "30")
-	r.Timeout = config.Duration(200 * time.Millisecond)
+	r.Signals[0].Timeout = config.Duration(200 * time.Millisecond)
 
 	res := collectOnce(t, r)
 
@@ -248,7 +269,7 @@ func TestStdoutStreamProducesTestMetrics(t *testing.T) {
 	}, "\n")
 
 	r := repo(dir, "sh", "-c", "cp "+src+" "+dst+" && cat "+writeFile(t, dir, "stream.json", stream))
-	r.StdoutFormat = config.StdoutGoTestJSON
+	r.Signals[0].StdoutFormat = config.FormatGoTestJSON
 
 	res := collectOnce(t, r)
 	if res.Snapshot.Status != store.StatusOK {
@@ -269,22 +290,169 @@ func TestStdoutStreamProducesTestMetrics(t *testing.T) {
 	}
 }
 
-// Losing the test stream costs test counts. It must not cost coverage.
+// Losing one of a step's parsers costs that parser's measurements. It must not
+// cost the ones that worked.
+//
+// This used to be spelled out as a special case for the one pairing that
+// existed. It is now the general rule: a step survives as long as one of its
+// parsers completes.
 func TestUnusableStdoutDowngradesButKeepsCoverage(t *testing.T) {
 	dir := repoDir(t)
 	src := writeProfile(t, dir, "src.out", 0)
 	dst := filepath.Join(dir, "coverage.out")
 
 	r := repo(dir, "sh", "-c", "cp "+src+" "+dst+" && echo 'not json'")
-	r.StdoutFormat = config.StdoutGoTestJSON
+	r.Signals[0].StdoutFormat = config.FormatGoTestJSON
 
 	res := collectOnce(t, r)
 
 	if got := metric(t, res, collect.KeyTotalStmts, "example.com/m/alpha"); got != 10 {
 		t.Errorf("coverage lost along with the stream: got %v", got)
 	}
-	if !strings.Contains(diagText(res), "test counts unavailable") {
+	if !strings.Contains(diagText(res), "could not read the go-test-json output") {
 		t.Errorf("the loss was not disclosed:\n%s", diagText(res))
+	}
+	// The step still counts as collected, because coverage came back, and the
+	// loss shows up as degradation rather than as a missing signal.
+	if len(res.Failed) != 0 {
+		t.Errorf("Failed: got %v, want none: the step produced coverage", res.Failed)
+	}
+	if res.Snapshot.Status != store.StatusPartial {
+		t.Errorf("Status: got %q, want partial: something was lost", res.Snapshot.Status)
+	}
+}
+
+// The point of the whole rewrite: one repo can measure several things, and one
+// of them failing costs only its own numbers.
+func TestOneFailingSignalDoesNotCostTheOthers(t *testing.T) {
+	dir := repoDir(t)
+	src := writeProfile(t, dir, "src.out", 0)
+	dst := filepath.Join(dir, "coverage.out")
+
+	stream := `{"Action":"pass","Package":"example.com/m/alpha","Test":"TestOne","Elapsed":0.01}`
+
+	// The broken step sits BETWEEN two working ones, deliberately. With it first
+	// there is nothing collected yet for a discard-everything bug to discard, so
+	// the old behavior of nilling every metric on any failure would survive this
+	// test unnoticed. Confirmed by mutation: moved to the front, it does.
+	r := config.Repo{Name: "svc", Path: dir, Signals: []config.Signal{
+		coverageStep("cp", src, dst),
+		// The command exits 0 and writes nothing, which is the phantom case.
+		{
+			Name:           "broken",
+			Command:        []string{"true"},
+			Artifact:       "never-written.out",
+			ArtifactFormat: config.FormatGoCoverprofile,
+			Timeout:        config.Duration(30 * time.Second),
+		},
+		{
+			Name:         "tests",
+			Command:      []string{"cat", writeFile(t, dir, "stream.json", stream)},
+			StdoutFormat: config.FormatGoTestJSON,
+			Timeout:      config.Duration(30 * time.Second),
+		},
+	}}
+
+	res := collectOnce(t, r)
+
+	if res.Snapshot.Status != store.StatusPartial {
+		t.Fatalf("Status: got %q, want partial. Diagnostics:\n%s", res.Snapshot.Status, diagText(res))
+	}
+	if got := metric(t, res, collect.KeyTotalStmts, "example.com/m/alpha"); got != 10 {
+		t.Errorf("coverage was lost to an unrelated signal's failure: got %v", got)
+	}
+	if got := metric(t, res, collect.KeyTestCount, "example.com/m/alpha"); got != 1 {
+		t.Errorf("test counts were lost to an unrelated signal's failure: got %v", got)
+	}
+	if strings.Join(res.Collected, ",") != "coverage,tests" {
+		t.Errorf("Collected: got %v, want coverage and tests", res.Collected)
+	}
+	if strings.Join(res.Failed, ",") != "broken" {
+		t.Errorf("Failed: got %v, want just broken", res.Failed)
+	}
+	// Every diagnostic has to say which signal it came from. With one step the
+	// source was obvious; with three a bare message names nothing.
+	if !strings.Contains(diagText(res), "broken: command exited 0 but wrote no fresh") {
+		t.Errorf("the diagnostic does not name the signal it came from:\n%s", diagText(res))
+	}
+}
+
+// Every step failing is a failed snapshot carrying nothing, not a partial one.
+func TestEverySignalFailingIsAFailedSnapshot(t *testing.T) {
+	dir := repoDir(t)
+
+	r := config.Repo{Name: "svc", Path: dir, Signals: []config.Signal{
+		coverageStep(),
+		{
+			Name:           "other",
+			Artifact:       "also-missing.out",
+			ArtifactFormat: config.FormatGoCoverprofile,
+			Timeout:        config.Duration(30 * time.Second),
+		},
+	}}
+
+	res := collectOnce(t, r)
+
+	if res.Snapshot.Status != store.StatusFailed {
+		t.Errorf("Status: got %q, want failed", res.Snapshot.Status)
+	}
+	if len(res.Metrics) != 0 {
+		t.Errorf("a failed collection recorded %d metrics; it must record none", len(res.Metrics))
+	}
+	if len(res.Collected) != 0 {
+		t.Errorf("Collected: got %v, want none", res.Collected)
+	}
+}
+
+// Two steps writing the same metric key collide on the metrics table's primary
+// key, and the INSERT that fails takes every other step's numbers with it.
+//
+// Config validation rejects the shapes that can cause this, so reaching here
+// means something got past that. The cheapest correct answer is to lose the
+// second step rather than the snapshot, and to say so.
+func TestDuplicateMetricKeysCostOneSignalRatherThanTheSnapshot(t *testing.T) {
+	dir := repoDir(t)
+	src := writeProfile(t, dir, "src.out", 0)
+
+	// Two steps reading the same profile under different names, which config
+	// validation would reject. Built by hand precisely because it would.
+	r := config.Repo{Name: "svc", Path: dir, Signals: []config.Signal{
+		{
+			Name:           "first",
+			Command:        []string{"cp", src, filepath.Join(dir, "one.out")},
+			Artifact:       "one.out",
+			ArtifactFormat: config.FormatGoCoverprofile,
+			Timeout:        config.Duration(30 * time.Second),
+		},
+		{
+			Name:           "second",
+			Command:        []string{"cp", src, filepath.Join(dir, "two.out")},
+			Artifact:       "two.out",
+			ArtifactFormat: config.FormatGoCoverprofile,
+			Timeout:        config.Duration(30 * time.Second),
+		},
+	}}
+
+	res := collectOnce(t, r)
+
+	if got := metric(t, res, collect.KeyTotalStmts, "example.com/m/alpha"); got != 10 {
+		t.Errorf("the first signal's numbers were lost: got %v", got)
+	}
+	if strings.Join(res.Failed, ",") != "second" {
+		t.Errorf("Failed: got %v, want just the colliding signal", res.Failed)
+	}
+	if !strings.Contains(diagText(res), "a second time") {
+		t.Errorf("the collision was not explained:\n%s", diagText(res))
+	}
+	// One row per key and scope, or the insert this guard exists to protect
+	// would still fail.
+	seen := map[[2]string]bool{}
+	for _, m := range res.Metrics {
+		k := [2]string{m.Key, m.Scope}
+		if seen[k] {
+			t.Fatalf("duplicate metric %v survived the guard", k)
+		}
+		seen[k] = true
 	}
 }
 
@@ -344,7 +512,7 @@ func TestConfiguredEnvReachesTheCommand(t *testing.T) {
 	script := "printf '%s' \"$RM_TEST_ENV\" > " + seen +
 		" && test -n \"$RM_TEST_ENV\" && cp " + src + " " + dst
 
-	t.Run("with the variable set", func(t *testing.T) {
+	t.Run("from the repo block", func(t *testing.T) {
 		r := repo(dir, "sh", "-c", script)
 		r.Env = map[string]string{"RM_TEST_ENV": "gowork-off"}
 
@@ -362,9 +530,33 @@ func TestConfiguredEnvReachesTheCommand(t *testing.T) {
 		}
 	})
 
-	// The anti-vacuity control. Without this the case above would still pass if
-	// the variable were exported by the test process itself rather than
-	// threaded through the config.
+	// A step's own env has to reach the subprocess too, and win where the two
+	// disagree. Otherwise the per-step block is decoration.
+	t.Run("a signal's own env wins over the repo's", func(t *testing.T) {
+		if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
+			t.Fatalf("clearing the profile: %v", err)
+		}
+		r := repo(dir, "sh", "-c", script)
+		r.Env = map[string]string{"RM_TEST_ENV": "from-repo"}
+		r.Signals[0].Env = map[string]string{"RM_TEST_ENV": "from-signal"}
+
+		res := collectOnce(t, r)
+
+		if res.Snapshot.Status != store.StatusOK {
+			t.Fatalf("Status: got %q, want ok. Diagnostics:\n%s", res.Snapshot.Status, diagText(res))
+		}
+		got, err := os.ReadFile(seen) //nolint:gosec // path is our own temp file
+		if err != nil {
+			t.Fatalf("reading what the subprocess saw: %v", err)
+		}
+		if string(got) != "from-signal" {
+			t.Errorf("subprocess saw RM_TEST_ENV=%q, want the signal's value", got)
+		}
+	})
+
+	// The anti-vacuity control. Without this the cases above would still pass if
+	// the variable were exported by the test process itself rather than threaded
+	// through the config.
 	t.Run("without it the same command fails", func(t *testing.T) {
 		if err := os.Remove(dst); err != nil && !os.IsNotExist(err) {
 			t.Fatalf("clearing the profile: %v", err)
@@ -426,6 +618,59 @@ func TestNoConfiguredEnvLeavesTheEnvironmentAlone(t *testing.T) {
 	}
 	if len(got) == 0 {
 		t.Error("the subprocess inherited an empty PATH")
+	}
+}
+
+// A step with no artifact at all is legal: the measurement is entirely in the
+// command's stdout. The freshness guard has nothing to check and must not
+// invent something to fail on.
+func TestStdoutOnlySignalNeedsNoArtifact(t *testing.T) {
+	dir := repoDir(t)
+	stream := `{"Action":"pass","Package":"example.com/m/alpha","Test":"TestOne","Elapsed":0.01}`
+
+	r := config.Repo{Name: "svc", Path: dir, Signals: []config.Signal{{
+		Name:         "tests",
+		Command:      []string{"cat", writeFile(t, dir, "stream.json", stream)},
+		StdoutFormat: config.FormatGoTestJSON,
+		Timeout:      config.Duration(30 * time.Second),
+	}}}
+
+	res := collectOnce(t, r)
+
+	if res.Snapshot.Status != store.StatusOK {
+		t.Fatalf("Status: got %q, want ok. Diagnostics:\n%s", res.Snapshot.Status, diagText(res))
+	}
+	if got := metric(t, res, collect.KeyTestCount, "example.com/m/alpha"); got != 1 {
+		t.Errorf("alpha test count: got %v, want 1", got)
+	}
+	// Coverage was never asked for, so it must be absent rather than zero.
+	if hasMetric(res, collect.KeyTotalStmts) {
+		t.Error("a tests-only signal recorded coverage statements out of nowhere")
+	}
+}
+
+// A profile with nothing instrumented parses fine and yields no metrics. That is
+// a step that worked and measured nothing, which is a finding, not a failure.
+// Counting metrics rather than parses would call it broken.
+func TestHeaderOnlyProfileIsCollectedNotFailed(t *testing.T) {
+	dir := repoDir(t)
+	if err := os.WriteFile(filepath.Join(dir, "coverage.out"), []byte("mode: set\n"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	res := collectOnce(t, repo(dir))
+
+	if res.Snapshot.Status != store.StatusOK {
+		t.Fatalf("Status: got %q, want ok. Diagnostics:\n%s", res.Snapshot.Status, diagText(res))
+	}
+	if len(res.Metrics) != 0 {
+		t.Errorf("a header-only profile produced %d metrics, want none", len(res.Metrics))
+	}
+	if strings.Join(res.Collected, ",") != "coverage" {
+		t.Errorf("Collected: got %v, want the coverage signal", res.Collected)
+	}
+	if !strings.Contains(diagText(res), "no instrumented packages") {
+		t.Errorf("the empty profile was not disclosed:\n%s", diagText(res))
 	}
 }
 

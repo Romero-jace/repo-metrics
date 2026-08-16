@@ -23,6 +23,9 @@ var starterConfig = fmt.Sprintf(
 	defaultWindowText(),
 	config.DefaultMinStatements,
 	config.DefaultMinRepoDelta,
+	config.FormatGoCoverprofile,
+	config.FormatGoTestJSON,
+	config.FormatGoCoverprofile,
 )
 
 // defaultWindowText renders the default reporting window for the config file.
@@ -40,9 +43,13 @@ func defaultWindowText() string {
 	return config.DefaultWindow.String()
 }
 
-// starterConfigFormat is the file with its four tunables left as verbs, filled
-// in by starterConfig above. The verbs are database, window, min_statements,
-// and min_repo_delta, in that order.
+// starterConfigFormat is the file with its tunables left as verbs, filled in by
+// starterConfig above. The verbs are database, window, min_statements,
+// min_repo_delta, and then the three format names, in that order.
+//
+// The format names come from the config package rather than being typed here
+// for the same reason the tunables do: a starter config naming a format the
+// validator rejects would make the tool's own output fail to load.
 //
 // The first repo entry is live and points at the current directory rather than
 // at a placeholder like /path/to/your-repo. config.Load requires at least one
@@ -71,25 +78,42 @@ min_statements: %d
 # How far a repo's coverage has to move, in percentage points, to lead the report.
 min_repo_delta: %v
 
+# Each repo carries a list of signals: one entry per thing to measure. A signal
+# either runs a command and reads what it left behind, or reads an artifact
+# something else produced. One command can feed two parsers, which is why the
+# coverage entry below also names a stdout_format: ` + "`go test`" + ` yields the profile
+# and the test counts from a single run.
+
 repos:
-  # Mode one: run a command, then read what it wrote. This entry points at the
-  # current directory so the file works as written. Point it somewhere you
-  # actually care about and give it a better name.
+  # This entry points at the current directory so the file works as written.
+  # Point it somewhere you actually care about and give it a better name.
   - name: this-repo
     path: .
-    coverprofile: coverage.out
-    command: ["go", "test", "./...", "-json", "-coverpkg=./...", "-coverprofile=coverage.out"]
-    stdout_format: go-test-json
-    timeout: 10m
+    # env reaches every signal below, and is also the environment the toolchain
+    # fingerprint is taken under. A repo inside a go.work workspace measures
+    # different code than the same repo with GOWORK=off, so this is part of what
+    # makes two snapshots comparable.
+    # env:
+    #   GOWORK: "off"
+    signals:
+      - name: coverage
+        command: ["go", "test", "./...", "-json", "-coverpkg=./...", "-coverprofile=coverage.out"]
+        artifact: coverage.out
+        artifact_format: %s
+        stdout_format: %s
+        timeout: 10m
 
-  # Mode two, ingest only: no command, so it parses whatever CI already left on
-  # disk. max_age is the freshness limit, past which the numbers get reported as
-  # stale rather than presented as current. Uncomment and point it at a real
-  # checkout. Note that every path here has to exist, or the config will not load.
+  # Ingest only: no command, so it parses whatever CI already left on disk.
+  # max_age is the freshness limit, past which the numbers get reported as stale
+  # rather than presented as current. Uncomment and point it at a real checkout.
+  # Note that every path here has to exist, or the config will not load.
   # - name: built-by-ci
   #   path: /srv/checkouts/built-by-ci
-  #   coverprofile: artifacts/coverage.out
-  #   max_age: 24h
+  #   signals:
+  #     - name: coverage
+  #       artifact: artifacts/coverage.out
+  #       artifact_format: %s
+  #       max_age: 24h
 `
 
 func runInit(args []string, stdout, stderr io.Writer) error {

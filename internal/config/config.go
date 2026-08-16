@@ -35,11 +35,6 @@ const (
 	DefaultMaxAge        = 24 * time.Hour
 )
 
-// StdoutGoTestJSON parses the command's stdout as a `go test -json` event
-// stream. It is the only supported value today; an empty StdoutFormat means
-// stdout is ignored and only the coverage profile is parsed.
-const StdoutGoTestJSON = "go-test-json"
-
 // Config is the whole file.
 type Config struct {
 	Database string `yaml:"database"`
@@ -54,30 +49,128 @@ type Config struct {
 	Repos        []Repo  `yaml:"repos"`
 }
 
-// Repo is one tracked repository.
-//
-// Command is optional. With one, repo-metrics runs it and then parses the
-// artifacts it leaves behind. Without one, repo-metrics parses whatever is
-// already on disk, which is how it consumes something CI produced.
+// Repo is one tracked repository and the list of things to measure about it.
 type Repo struct {
 	Name string `yaml:"name"`
 	Path string `yaml:"path"`
-	// Coverprofile is relative to Path unless absolute.
-	Coverprofile string `yaml:"coverprofile"`
-	// Command is an argv slice, never a shell string. Nothing here is passed
-	// through a shell, so quoting and word splitting cannot surprise anyone.
-	Command      []string `yaml:"command"`
-	StdoutFormat string   `yaml:"stdout_format"`
-	// Env is added to the command's environment as KEY=VALUE. It exists
-	// because there is no shell to put a `VAR=x` prefix in front of: without
-	// it, a repo needing GOWORK=off has to smuggle it into the argv as
+
+	// Env is added to every step's environment as KEY=VALUE, and is also the
+	// environment the snapshot's toolchain fingerprint is taken under.
+	//
+	// It exists because there is no shell to put a `VAR=x` prefix in front of:
+	// without it, a repo needing GOWORK=off has to smuggle it into the argv as
 	// `env GOWORK=off go test ...`, which works but reads like a workaround
 	// because it is one.
-	Env     map[string]string `yaml:"env"`
-	Timeout Duration          `yaml:"timeout"`
+	//
+	// It stays at the repo level even though steps have their own env, because
+	// the fingerprint is taken once per repo and is what tells the report whether
+	// two snapshots are comparable at all. Under a per-step env alone, whichever
+	// step happened to be fingerprinted would decide that for every signal.
+	Env map[string]string `yaml:"env"`
+
+	// Signals is what to measure. One entry per command, or per artifact in
+	// ingest mode.
+	Signals []Signal `yaml:"signals"`
+
+	// The old single-command shape. These are read only so that a config
+	// written against it fails with instructions rather than loading into an
+	// empty signals list. See migrationError.
+	OldCoverprofile string   `yaml:"coverprofile"`
+	OldCommand      []string `yaml:"command"`
+	OldStdoutFormat string   `yaml:"stdout_format"`
+	OldTimeout      Duration `yaml:"timeout"`
+	OldMaxAge       Duration `yaml:"max_age"`
+}
+
+// Signal is one collection step: something to run, and how to read what it
+// leaves behind.
+//
+// The name is the one the config file uses, and it is deliberately not exactly
+// what the report calls a signal. One step can produce several reported signals:
+// a `go test` step yields coverage, test counts, failures, skips and timings
+// from a single run, because the toolchain gives them up together. The step is
+// the unit of execution and of failure; the reported signal is the unit of
+// measurement.
+type Signal struct {
+	// Name labels this step in diagnostics and in the progress line. It has to
+	// be unique within the repo, and it is what a person reads when a step goes
+	// wrong, so give it the name of the thing rather than of the tool.
+	Name string `yaml:"name"`
+
+	// Command is an argv slice, never a shell string. Nothing here is passed
+	// through a shell, so quoting and word splitting cannot surprise anyone.
+	//
+	// It is optional. With one, repo-metrics runs it and then parses what it
+	// left behind. Without one, repo-metrics parses whatever is already on disk,
+	// which is how it consumes something CI produced.
+	Command []string `yaml:"command"`
+
+	// Artifact is a file the step produces or finds, relative to the repo path
+	// unless absolute. ArtifactFormat says how to read it.
+	Artifact       string `yaml:"artifact"`
+	ArtifactFormat Format `yaml:"artifact_format"`
+
+	// StdoutFormat says how to read the command's standard output. It needs a
+	// command, since there is no stdout without one.
+	StdoutFormat Format `yaml:"stdout_format"`
+
+	// Env is merged over the repo's env for this step only.
+	Env map[string]string `yaml:"env"`
+
+	// Timeout bounds this step. It is per step rather than per repo, so adding a
+	// second measurement does not silently halve the time the first one gets.
+	Timeout Duration `yaml:"timeout"`
+
 	// MaxAge applies only in ingest mode (no Command). An artifact older than
 	// this is reported as stale rather than presented as a current number.
 	MaxAge Duration `yaml:"max_age"`
+}
+
+// HasCommand reports whether this step runs something, as opposed to reading an
+// artifact somebody else produced.
+func (s Signal) HasCommand() bool { return len(s.Command) > 0 }
+
+// Formats lists the parsers this step declares, in a fixed order.
+func (s Signal) Formats() []Format {
+	var out []Format
+	if s.ArtifactFormat != "" {
+		out = append(out, s.ArtifactFormat)
+	}
+	if s.StdoutFormat != "" {
+		out = append(out, s.StdoutFormat)
+	}
+	return out
+}
+
+// NonZeroExitIsNormal reports whether a non-zero exit from this step means
+// findings rather than failure.
+//
+// Every format on the step has to agree. A step that writes a coverage profile
+// and a SARIF log from one command is not covered by lint's exemption: the
+// non-zero exit could be either the linter finding something or the suite going
+// red, and treating that as normal would silence the red suite.
+func (s Signal) NonZeroExitIsNormal() bool {
+	declared := s.Formats()
+	if len(declared) == 0 {
+		return false
+	}
+	for _, f := range declared {
+		if !f.NonZeroExitIsNormal() {
+			return false
+		}
+	}
+	return true
+}
+
+// MergedEnv is the step's environment: the repo's, with the step's over it.
+func (s Signal) MergedEnv(repo map[string]string) map[string]string {
+	if len(repo) == 0 && len(s.Env) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(repo)+len(s.Env))
+	maps.Copy(out, repo)
+	maps.Copy(out, s.Env)
+	return out
 }
 
 // Duration is a time.Duration that unmarshals from a YAML string like "10m".
@@ -140,28 +233,38 @@ func (c *Config) expandEnv() {
 	for i := range c.Repos {
 		r := &c.Repos[i]
 		r.Path = os.ExpandEnv(r.Path)
-		r.Coverprofile = os.ExpandEnv(r.Coverprofile)
-		for j := range r.Command {
-			r.Command[j] = os.ExpandEnv(r.Command[j])
-		}
-		// Values only. A ${VAR} in a key would let the environment decide
-		// which variable gets set, and an unset one would produce the empty
-		// key that validate rejects.
-		for k, v := range r.Env {
-			r.Env[k] = os.ExpandEnv(v)
+		expandEnvMap(r.Env)
+		for j := range r.Signals {
+			s := &r.Signals[j]
+			s.Artifact = os.ExpandEnv(s.Artifact)
+			for k := range s.Command {
+				s.Command[k] = os.ExpandEnv(s.Command[k])
+			}
+			expandEnvMap(s.Env)
 		}
 	}
 }
 
-// normalize fills in per-repo defaults left unset by the file.
+// expandEnvMap expands values only. A ${VAR} in a key would let the environment
+// decide which variable gets set, and an unset one would produce the empty key
+// that validate rejects.
+func expandEnvMap(env map[string]string) {
+	for k, v := range env {
+		env[k] = os.ExpandEnv(v)
+	}
+}
+
+// normalize fills in per-step defaults left unset by the file.
 func (c *Config) normalize() {
 	for i := range c.Repos {
-		r := &c.Repos[i]
-		if r.Timeout == 0 {
-			r.Timeout = Duration(DefaultTimeout)
-		}
-		if r.MaxAge == 0 {
-			r.MaxAge = Duration(DefaultMaxAge)
+		for j := range c.Repos[i].Signals {
+			s := &c.Repos[i].Signals[j]
+			if s.Timeout == 0 {
+				s.Timeout = Duration(DefaultTimeout)
+			}
+			if s.MaxAge == 0 {
+				s.MaxAge = Duration(DefaultMaxAge)
+			}
 		}
 	}
 }
@@ -208,43 +311,195 @@ func (c *Config) validate() error {
 			problems = append(problems, fmt.Errorf("%s: path %s is not a directory", label, r.Path))
 		}
 
-		// Without a coverprofile there is nothing to parse, so running a
-		// command would burn a whole test suite and record nothing.
-		if r.Coverprofile == "" {
-			problems = append(problems, fmt.Errorf("%s: coverprofile is required", label))
-		}
-
-		if r.StdoutFormat != "" && r.StdoutFormat != StdoutGoTestJSON {
-			problems = append(problems, fmt.Errorf(
-				"%s: unknown stdout_format %q, want %q or empty", label, r.StdoutFormat, StdoutGoTestJSON))
-		}
-		if r.StdoutFormat != "" && len(r.Command) == 0 {
-			problems = append(problems, fmt.Errorf(
-				"%s: stdout_format needs a command to capture stdout from", label))
-		}
-
-		// Sorted so a config with several bad env keys reports them in the
-		// same order every run. Map order would make the message shuffle
-		// between runs and the failure harder to talk about.
-		for _, k := range slices.Sorted(maps.Keys(r.Env)) {
-			switch {
-			case k == "":
-				problems = append(problems, fmt.Errorf("%s: env has an empty key", label))
-			case strings.Contains(k, "="):
-				// The runner joins these as KEY=VALUE, so a key carrying its
-				// own "=" would silently set a different variable than the
-				// one written in the file.
-				problems = append(problems, fmt.Errorf("%s: env key %q cannot contain \"=\"", label, k))
-			}
-		}
-
-		if r.Timeout <= 0 {
-			problems = append(problems, fmt.Errorf("%s: timeout must be positive", label))
-		}
-		if r.MaxAge < 0 {
-			problems = append(problems, fmt.Errorf("%s: max_age cannot be negative", label))
-		}
+		problems = append(problems, checkEnv(label, r.Env)...)
+		problems = append(problems, r.validateSignals(label)...)
 	}
 
 	return errors.Join(problems...)
+}
+
+// validateSignals checks a repo's step list, including the migration error for
+// a config still written in the old single-command shape.
+func (r Repo) validateSignals(label string) []error {
+	if err := r.migrationError(label); err != nil {
+		// One error rather than that plus "no signals configured", which would
+		// bury the instructions under a complaint about their consequence.
+		return []error{err}
+	}
+
+	var problems []error
+	if len(r.Signals) == 0 {
+		problems = append(problems, fmt.Errorf("%s: no signals configured, so there is nothing to measure", label))
+	}
+
+	names := make(map[string]bool, len(r.Signals))
+	// used counts how many steps declared each format, so a collision on the
+	// metrics table's primary key is caught here rather than at insert time,
+	// where it would cost the whole snapshot.
+	used := make(map[Format]int, len(r.Signals))
+
+	for i, s := range r.Signals {
+		sub := fmt.Sprintf("%s: signals[%d]", label, i)
+		if s.Name != "" {
+			sub = fmt.Sprintf("%s: %s", label, s.Name)
+		}
+
+		switch {
+		case s.Name == "":
+			problems = append(problems, fmt.Errorf("%s: name is required", sub))
+		case names[s.Name]:
+			problems = append(problems, fmt.Errorf("%s: duplicate signal name", sub))
+		default:
+			names[s.Name] = true
+		}
+
+		problems = append(problems, s.validate(sub)...)
+		for _, f := range s.Formats() {
+			used[f]++
+		}
+	}
+
+	for _, f := range formatOrder {
+		if used[f] > 1 && !f.Repeatable() {
+			problems = append(problems, fmt.Errorf(
+				"%s: %d signals both read %s, and they would write the same metric keys over each other. "+
+					"One repo has one of these, so combine them into a single signal", label, used[f], f))
+		}
+	}
+	return problems
+}
+
+// validate checks one step in isolation.
+func (s Signal) validate(label string) []error {
+	var problems []error
+
+	if s.ArtifactFormat != "" {
+		if err := checkFormat(label, "artifact_format", s.ArtifactFormat); err != nil {
+			problems = append(problems, err)
+		}
+		if s.Artifact == "" {
+			problems = append(problems, fmt.Errorf("%s: artifact_format needs an artifact to read", label))
+		}
+	}
+	if s.StdoutFormat != "" {
+		if err := checkFormat(label, "stdout_format", s.StdoutFormat); err != nil {
+			problems = append(problems, err)
+		}
+		if !s.HasCommand() {
+			problems = append(problems, fmt.Errorf("%s: stdout_format needs a command to capture stdout from", label))
+		}
+	}
+	if s.Artifact != "" && s.ArtifactFormat == "" {
+		// Otherwise the step would run its command, check the artifact is fresh,
+		// and then read nothing out of it.
+		problems = append(problems, fmt.Errorf("%s: artifact needs an artifact_format saying how to read it", label))
+	}
+	if len(s.Formats()) == 0 {
+		problems = append(problems, fmt.Errorf(
+			"%s: no artifact_format and no stdout_format, so this signal would run and record nothing", label))
+	}
+	if !s.HasCommand() && s.Artifact == "" {
+		problems = append(problems, fmt.Errorf(
+			"%s: no command to run and no artifact to read", label))
+	}
+
+	problems = append(problems, checkEnv(label, s.Env)...)
+
+	if s.Timeout <= 0 {
+		problems = append(problems, fmt.Errorf("%s: timeout must be positive", label))
+	}
+	if s.MaxAge < 0 {
+		problems = append(problems, fmt.Errorf("%s: max_age cannot be negative", label))
+	}
+	return problems
+}
+
+// checkEnv validates an env block's keys.
+//
+// Sorted so a config with several bad env keys reports them in the same order
+// every run. Map order would make the message shuffle between runs and the
+// failure harder to talk about.
+func checkEnv(label string, env map[string]string) []error {
+	var problems []error
+	for _, k := range slices.Sorted(maps.Keys(env)) {
+		switch {
+		case k == "":
+			problems = append(problems, fmt.Errorf("%s: env has an empty key", label))
+		case strings.Contains(k, "="):
+			// The runner joins these as KEY=VALUE, so a key carrying its own "="
+			// would silently set a different variable than the one written in the
+			// file.
+			problems = append(problems, fmt.Errorf("%s: env key %q cannot contain \"=\"", label, k))
+		}
+	}
+	return problems
+}
+
+// migrationError explains a config written against the old single-command shape.
+//
+// goccy ignores unknown keys, so without this a config from the previous version
+// loads with an empty signals list and fails with "no signals configured", which
+// is true and tells the operator nothing about why their working file stopped
+// working. The old fields are read purely so this message can be produced.
+func (r Repo) migrationError(label string) error {
+	var old []string
+	if r.OldCoverprofile != "" {
+		old = append(old, "coverprofile")
+	}
+	if len(r.OldCommand) > 0 {
+		old = append(old, "command")
+	}
+	if r.OldStdoutFormat != "" {
+		old = append(old, "stdout_format")
+	}
+	if r.OldTimeout != 0 {
+		old = append(old, "timeout")
+	}
+	if r.OldMaxAge != 0 {
+		old = append(old, "max_age")
+	}
+	if len(old) == 0 {
+		return nil
+	}
+
+	// The example is filled in from what they actually wrote, so it can be
+	// pasted rather than translated.
+	example := "      - name: coverage\n"
+	if len(r.OldCommand) > 0 {
+		example += fmt.Sprintf("        command: [%s]\n", strings.Join(quoteAll(r.OldCommand), ", "))
+	}
+	if r.OldCoverprofile != "" {
+		example += fmt.Sprintf("        artifact: %s\n", r.OldCoverprofile)
+		example += fmt.Sprintf("        artifact_format: %s\n", FormatGoCoverprofile)
+	}
+	if r.OldStdoutFormat != "" {
+		example += fmt.Sprintf("        stdout_format: %s\n", r.OldStdoutFormat)
+	}
+	if r.OldTimeout != 0 {
+		example += fmt.Sprintf("        timeout: %s\n", r.OldTimeout)
+	}
+	if r.OldMaxAge != 0 {
+		example += fmt.Sprintf("        max_age: %s\n", r.OldMaxAge)
+	}
+
+	return fmt.Errorf(
+		"%s: %s %s at the repo level, which is the old single-command shape. "+
+			"A repo now carries a list of signals so it can measure more than coverage. Rewrite it as:\n\n"+
+			"  - name: %s\n    path: %s\n    signals:\n%s",
+		label, strings.Join(old, ", "), pluralIs(len(old)), r.Name, r.Path, example)
+}
+
+func pluralIs(n int) string {
+	if n == 1 {
+		return "is set"
+	}
+	return "are set"
+}
+
+func quoteAll(args []string) []string {
+	out := make([]string, len(args))
+	for i, a := range args {
+		out[i] = fmt.Sprintf("%q", a)
+	}
+	return out
 }

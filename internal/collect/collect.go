@@ -1,21 +1,18 @@
-// Package collect runs a repo's collection command, checks that it actually
-// produced something, parses the artifacts, and assembles a snapshot.
+// Package collect runs a repo's configured collection steps, checks that they
+// actually produced something, parses the artifacts, and assembles a snapshot.
 //
 // The governing rule is that failure degrades rather than aborting. One
-// unreachable repo must not cost you the other nine, so every failure path
-// produces a snapshot with a status and a diagnostic instead of an error that
-// unwinds the whole run.
+// unreachable repo must not cost you the other nine, and inside a repo one
+// broken step must not cost you the others, so every failure path produces a
+// snapshot with a status and a diagnostic instead of an error that unwinds the
+// run.
 package collect
 
 import (
 	"bytes"
 	"context"
 	"fmt"
-	"maps"
-	"os"
-	"path/filepath"
 	"runtime"
-	"slices"
 	"strings"
 	"time"
 
@@ -33,11 +30,16 @@ type Result struct {
 	Snapshot    store.Snapshot
 	Metrics     []store.Metric
 	Diagnostics []Diagnostic
+	// Collected and Failed name the steps that did and did not produce
+	// measurements, so the progress line can say which measurement is missing
+	// rather than only that something is.
+	Collected []string
+	Failed    []string
 }
 
 // Collect runs one repo end to end. It does not return an error: everything
 // that can go wrong is recorded on the snapshot.
-func Collect(ctx context.Context, repo config.Repo, collector Collector, now time.Time) Result {
+func Collect(ctx context.Context, repo config.Repo, now time.Time) Result {
 	started := time.Now()
 
 	res := Result{Snapshot: store.Snapshot{
@@ -48,151 +50,108 @@ func Collect(ctx context.Context, repo config.Repo, collector Collector, now tim
 	sha, branch, dirty, gitDiags := gitMetadata(ctx, repo.Path)
 	res.Snapshot.GitSHA, res.Snapshot.GitBranch, res.Snapshot.GitDirty = sha, branch, dirty
 	res.Diagnostics = append(res.Diagnostics, gitDiags...)
+
 	// The repo's configured environment has to reach this too, not just the
-	// command. Fingerprinting the ambient environment while measuring under a
-	// different one records the wrong side of the very boundary the
-	// fingerprint exists to mark.
+	// commands. Fingerprinting the ambient environment while measuring under a
+	// different one records the wrong side of the very boundary the fingerprint
+	// exists to mark. It is taken once per repo, from the repo's own env rather
+	// than any one step's, because it is what tells the report whether two
+	// snapshots are comparable at all.
 	res.Snapshot.Env = envFingerprint(ctx, repo.Path, envPairs(repo.Env))
 
-	profilePath := repo.Coverprofile
-	if !filepath.IsAbs(profilePath) {
-		profilePath = filepath.Join(repo.Path, profilePath)
+	var degraded bool
+	seen := make(map[metricKey]string)
+
+	for i, step := range repo.Signals {
+		// Cancellation is checked between steps, so a signal that arrives during
+		// a long test run stops this repo without discarding what already ran.
+		if ctx.Err() != nil {
+			res.Diagnostics = append(res.Diagnostics, errorf(
+				"%s: canceled before this signal ran", step.Name))
+			res.Failed = append(res.Failed, step.Name)
+			continue
+		}
+
+		out := runStep(ctx, repo, step, i, now)
+		res.Diagnostics = append(res.Diagnostics, out.Diagnostics...)
+
+		if out.OK {
+			if dup := firstDuplicate(seen, out.Metrics); dup != nil {
+				// Left to the database this collides on the metrics primary key
+				// and rolls back the INSERT, taking every other step's numbers
+				// with it. Config validation rejects the shapes that can cause it,
+				// so reaching here means something got past that, and the cheapest
+				// correct answer is to lose this step rather than the snapshot.
+				res.Diagnostics = append(res.Diagnostics, errorf(
+					"%s: would record %s a second time, already written by %s, so its measurements were dropped rather than losing the whole snapshot",
+					step.Name, dup, seen[*dup]))
+				res.Failed = append(res.Failed, step.Name)
+				continue
+			}
+			for _, m := range out.Metrics {
+				seen[metricKey{m.Key, m.Scope}] = step.Name
+			}
+			res.Metrics = append(res.Metrics, out.Metrics...)
+			res.Collected = append(res.Collected, step.Name)
+			degraded = degraded || out.Degraded
+			continue
+		}
+		res.Failed = append(res.Failed, step.Name)
 	}
 
-	artifacts := Artifacts{CoverprofilePath: profilePath}
-	before := statFile(profilePath)
-
-	if len(repo.Command) > 0 {
-		stdoutPath, cleanup, err := stdoutSink(repo)
-		if err != nil {
-			return res.fail(started, errorf("%v", err))
-		}
-		defer cleanup()
-		artifacts.StdoutPath = stdoutPath
-
-		runRes, diags, ok := execute(ctx, repo, stdoutPath)
-		res.Diagnostics = append(res.Diagnostics, diags...)
-		if !ok {
-			return res.finish(started, store.StatusFailed)
-		}
-
-		after := statFile(profilePath)
-		if !isFresh(before, after, runRes.StartedAt) {
-			return res.fail(started, errorf(
-				"command exited %d but wrote no fresh coverage profile at %s. "+
-					"A target that is declared .PHONY with no rule exits 0 without doing anything, "+
-					"and any stale profile already at that path would otherwise be reported as current",
-				runRes.ExitCode, profilePath))
-		}
-		if runRes.ExitCode != 0 {
-			// The suite is red but the profile is real, so the numbers stand.
-			res.Snapshot.Status = store.StatusPartial
-			res.Diagnostics = append(res.Diagnostics, warnf(
-				"command exited %d; coverage was still collected. stderr: %s",
-				runRes.ExitCode, truncate(runRes.Stderr, 2000)))
-		}
-	} else {
-		// Ingest mode: something else produces the artifact on its own
-		// schedule, so age is the only freshness signal available.
-		if !before.exists {
-			return res.fail(started, errorf("no coverage profile at %s and no command configured to produce one", profilePath))
-		}
-		if isStale(before, time.Duration(repo.MaxAge), now) {
-			res.Snapshot.Status = store.StatusPartial
-			res.Diagnostics = append(res.Diagnostics, warnf(
-				"coverage profile at %s is %s old, past the %s limit, so these numbers are stale",
-				profilePath, now.Sub(before.mtime).Round(time.Minute), time.Duration(repo.MaxAge)))
-		}
-	}
-
-	metrics, diags, err := collector.Collect(artifacts)
-	res.Diagnostics = append(res.Diagnostics, diags...)
-	if err != nil {
-		return res.fail(started, errorf("%v", err))
-	}
-	res.Metrics = metrics
-
-	return res.finish(started, res.Snapshot.Status)
+	return res.finish(started, degraded)
 }
 
-// execute runs the configured command, reporting whether collection can carry
-// on. A non-zero exit is survivable; failing to start or timing out is not.
-func execute(ctx context.Context, repo config.Repo, stdoutPath string) (*run.Result, []Diagnostic, bool) {
-	var (
-		diags  []Diagnostic
-		stdout *os.File
-		err    error
-	)
-
-	if stdoutPath != "" {
-		if stdout, err = os.Create(stdoutPath); err != nil { //nolint:gosec // path is our own temp file
-			return nil, []Diagnostic{errorf("creating stdout capture file: %v", err)}, false
-		}
-		defer func() { _ = stdout.Close() }()
-	}
-
-	opts := run.Options{
-		Dir:     repo.Path,
-		Args:    repo.Command,
-		Env:     envPairs(repo.Env),
-		Timeout: time.Duration(repo.Timeout),
-	}
-	if stdout != nil {
-		opts.Stdout = stdout
-	}
-
-	runRes, err := run.Command(ctx, opts)
-	if err != nil {
-		return nil, append(diags, errorf("running %s: %v", strings.Join(repo.Command, " "), err)), false
-	}
-	if runRes.TimedOut {
-		return runRes, append(diags, errorf(
-			"command exceeded its %s timeout and was killed", time.Duration(repo.Timeout))), false
-	}
-	return runRes, diags, true
+// metricKey is the metrics table's primary key, minus the snapshot.
+type metricKey struct {
+	key   string
+	scope string
 }
 
-// envPairs renders the configured environment as the KEY=VALUE slice
-// run.Options wants, appended to the process environment rather than replacing
-// it.
+func (k metricKey) String() string {
+	if k.scope == "" {
+		return k.key
+	}
+	return k.key + " for " + k.scope
+}
+
+// firstDuplicate reports the first metric a step would write over, or nil.
 //
-// The keys are sorted because Go randomizes map iteration order. Left unsorted,
-// two identical configs would hand the subprocess its variables in a different
-// order on every run, so anything sensitive to that order (a duplicate key
-// resolving to whichever came last, a command that echoes its environment)
-// would fail intermittently and not reproduce.
-func envPairs(env map[string]string) []string {
-	if len(env) == 0 {
-		return nil
+// It checks the whole batch before anything is committed, so a step that
+// collides on its last row does not leave the rows before it behind. Half a
+// step's numbers are not a measurement of anything.
+func firstDuplicate(seen map[metricKey]string, metrics []store.Metric) *metricKey {
+	batch := make(map[metricKey]bool, len(metrics))
+	for _, m := range metrics {
+		k := metricKey{m.Key, m.Scope}
+		if _, taken := seen[k]; taken || batch[k] {
+			return &k
+		}
+		batch[k] = true
 	}
-	pairs := make([]string, 0, len(env))
-	for _, k := range slices.Sorted(maps.Keys(env)) {
-		pairs = append(pairs, k+"="+env[k])
-	}
-	return pairs
+	return nil
 }
 
-// stdoutSink returns a temp file path for capturing stdout, or an empty path if
-// this repo has no stdout format configured and therefore no reason to keep it.
-func stdoutSink(repo config.Repo) (path string, cleanup func(), err error) {
-	if repo.StdoutFormat == "" {
-		return "", func() {}, nil
+// finish settles the snapshot's status from what the steps did.
+//
+// The three statuses mean what store's own documentation says they mean, which
+// this is finally in a position to make true: failed is a snapshot carrying
+// nothing trustworthy, partial is some signals collected and some not, ok is
+// everything asked for.
+func (r Result) finish(started time.Time, degraded bool) Result {
+	switch {
+	case len(r.Collected) == 0:
+		r.Snapshot.Status = store.StatusFailed
+		// Nothing was trustworthy, so nothing is kept. A partial write here is
+		// how a repo ends up reporting a coverage cliff that is really a crashed
+		// command.
+		r.Metrics = nil
+	case len(r.Failed) > 0 || degraded:
+		r.Snapshot.Status = store.StatusPartial
+	default:
+		r.Snapshot.Status = store.StatusOK
 	}
-	dir, err := os.MkdirTemp("", "repo-metrics-")
-	if err != nil {
-		return "", func() {}, fmt.Errorf("creating temp dir for stdout: %w", err)
-	}
-	return filepath.Join(dir, "stdout.json"), func() { _ = os.RemoveAll(dir) }, nil
-}
 
-func (r Result) fail(started time.Time, d Diagnostic) Result {
-	r.Diagnostics = append(r.Diagnostics, d)
-	r.Metrics = nil
-	return r.finish(started, store.StatusFailed)
-}
-
-func (r Result) finish(started time.Time, status store.Status) Result {
-	r.Snapshot.Status = status
 	r.Snapshot.Duration = time.Since(started)
 	r.Snapshot.Error = firstError(r.Diagnostics)
 	return r
@@ -288,11 +247,4 @@ func fingerprintFrom(out string) string {
 		}
 	}
 	return fmt.Sprintf("go=%s;gowork=%s", version, workspace)
-}
-
-func truncate(s string, limit int) string {
-	if len(s) <= limit {
-		return s
-	}
-	return s[:limit] + "..."
 }

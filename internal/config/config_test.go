@@ -28,12 +28,25 @@ func write(t *testing.T, body string) string {
 	return path
 }
 
+// onlySignal returns the first repo's only step, failing loudly rather than
+// panicking if the shape is not what the test set up.
+func onlySignal(t *testing.T, cfg *config.Config) config.Signal {
+	t.Helper()
+	if len(cfg.Repos) != 1 || len(cfg.Repos[0].Signals) != 1 {
+		t.Fatalf("want one repo with one signal, got %+v", cfg.Repos)
+	}
+	return cfg.Repos[0].Signals[0]
+}
+
 func TestLoadAppliesDefaults(t *testing.T) {
 	path := write(t, `
 repos:
   - name: svc
     path: $REPO
-    coverprofile: coverage.out
+    signals:
+      - name: coverage
+        artifact: coverage.out
+        artifact_format: go-coverprofile
 `)
 
 	cfg, err := config.Load(path)
@@ -54,16 +67,18 @@ repos:
 		t.Errorf("Window: got %s, want %s", got, want)
 	}
 
-	r := cfg.Repos[0]
-	if got, want := time.Duration(r.Timeout), config.DefaultTimeout; got != want {
-		t.Errorf("repo Timeout: got %s, want %s", got, want)
+	// The per-step defaults matter more than they did: they used to be filled in
+	// once per repo, and now every entry in the list needs its own.
+	s := onlySignal(t, cfg)
+	if got, want := time.Duration(s.Timeout), config.DefaultTimeout; got != want {
+		t.Errorf("signal Timeout: got %s, want %s", got, want)
 	}
-	if got, want := time.Duration(r.MaxAge), config.DefaultMaxAge; got != want {
-		t.Errorf("repo MaxAge: got %s, want %s", got, want)
+	if got, want := time.Duration(s.MaxAge), config.DefaultMaxAge; got != want {
+		t.Errorf("signal MaxAge: got %s, want %s", got, want)
 	}
 }
 
-// File values must win over defaults, including per-repo ones, and durations
+// File values must win over defaults, including per-step ones, and durations
 // have to come back as real durations rather than strings.
 func TestLoadOverridesDefaults(t *testing.T) {
 	path := write(t, `
@@ -74,11 +89,14 @@ window: 336h
 repos:
   - name: svc
     path: $REPO
-    coverprofile: out/cover.out
-    command: ["go", "test", "./...", "-coverprofile=out/cover.out"]
-    stdout_format: go-test-json
-    timeout: 90s
-    max_age: 1h30m
+    signals:
+      - name: coverage
+        command: ["go", "test", "./...", "-coverprofile=out/cover.out"]
+        artifact: out/cover.out
+        artifact_format: go-coverprofile
+        stdout_format: go-test-json
+        timeout: 90s
+        max_age: 1h30m
 `)
 
 	cfg, err := config.Load(path)
@@ -99,23 +117,28 @@ repos:
 		t.Errorf("Window: got %s, want 336h", got)
 	}
 
-	r := cfg.Repos[0]
-	if got := time.Duration(r.Timeout); got != 90*time.Second {
+	s := onlySignal(t, cfg)
+	if got := time.Duration(s.Timeout); got != 90*time.Second {
 		t.Errorf("Timeout: got %s, want 90s", got)
 	}
-	if got := time.Duration(r.MaxAge); got != 90*time.Minute {
+	if got := time.Duration(s.MaxAge); got != 90*time.Minute {
 		t.Errorf("MaxAge: got %s, want 1h30m", got)
 	}
-	if len(r.Command) != 4 || r.Command[0] != "go" {
-		t.Errorf("Command round-trip failed: %q", r.Command)
+	if len(s.Command) != 4 || s.Command[0] != "go" {
+		t.Errorf("Command round-trip failed: %q", s.Command)
 	}
-	if r.StdoutFormat != config.StdoutGoTestJSON {
-		t.Errorf("StdoutFormat: got %q", r.StdoutFormat)
+	if s.ArtifactFormat != config.FormatGoCoverprofile {
+		t.Errorf("ArtifactFormat: got %q", s.ArtifactFormat)
+	}
+	if s.StdoutFormat != config.FormatGoTestJSON {
+		t.Errorf("StdoutFormat: got %q", s.StdoutFormat)
 	}
 }
 
 // Secrets and machine-specific paths belong in the environment, not the config
-// file, so ${VAR} has to expand in the fields that would carry them.
+// file, so ${VAR} has to expand in the fields that would carry them. The
+// expansion walk now has to descend into the signals list, which is exactly the
+// kind of thing a restructure drops.
 func TestLoadExpandsEnvVars(t *testing.T) {
 	t.Setenv("RM_TEST_PROFILE", "from-env.out")
 
@@ -123,18 +146,22 @@ func TestLoadExpandsEnvVars(t *testing.T) {
 repos:
   - name: svc
     path: $REPO
-    coverprofile: ${RM_TEST_PROFILE}
-    command: ["go", "test", "-coverprofile=${RM_TEST_PROFILE}"]
+    signals:
+      - name: coverage
+        artifact: ${RM_TEST_PROFILE}
+        artifact_format: go-coverprofile
+        command: ["go", "test", "-coverprofile=${RM_TEST_PROFILE}"]
 `)
 
 	cfg, err := config.Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Repos[0].Coverprofile != "from-env.out" {
-		t.Errorf("Coverprofile not expanded: got %q", cfg.Repos[0].Coverprofile)
+	s := onlySignal(t, cfg)
+	if s.Artifact != "from-env.out" {
+		t.Errorf("Artifact not expanded: got %q", s.Artifact)
 	}
-	if got := cfg.Repos[0].Command[2]; got != "-coverprofile=from-env.out" {
+	if got := s.Command[2]; got != "-coverprofile=from-env.out" {
 		t.Errorf("Command not expanded: got %q", got)
 	}
 }
@@ -150,11 +177,14 @@ func TestLoadParsesEnvMap(t *testing.T) {
 repos:
   - name: svc
     path: $REPO
-    coverprofile: coverage.out
-    command: ["go", "test", "./..."]
     env:
       GOWORK: "off"
       GOFLAGS: ${RM_TEST_FLAGS}
+    signals:
+      - name: coverage
+        command: ["go", "test", "./..."]
+        artifact: coverage.out
+        artifact_format: go-coverprofile
 `)
 
 	cfg, err := config.Load(path)
@@ -174,20 +204,84 @@ repos:
 	}
 }
 
-// A repo without an env block must not come back with an empty map that then
-// has to be distinguished from a nil one everywhere downstream.
-func TestLoadLeavesEnvNilWhenAbsent(t *testing.T) {
+// A step's env is merged over the repo's, not instead of it. The repo block is
+// where GOWORK=off belongs, since it also fixes the toolchain fingerprint, and a
+// step adding one variable of its own must not drop it.
+func TestSignalEnvMergesOverTheRepos(t *testing.T) {
+	path := write(t, `
+repos:
+  - name: svc
+    path: $REPO
+    env:
+      GOWORK: "off"
+      GOFLAGS: "-mod=mod"
+    signals:
+      - name: coverage
+        command: ["go", "test", "./..."]
+        artifact: coverage.out
+        artifact_format: go-coverprofile
+        env:
+          GOFLAGS: "-count=1"
+          GOMAXPROCS: "4"
+`)
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	merged := onlySignal(t, cfg).MergedEnv(cfg.Repos[0].Env)
+
+	want := map[string]string{"GOWORK": "off", "GOFLAGS": "-count=1", "GOMAXPROCS": "4"}
+	for k, v := range want {
+		if merged[k] != v {
+			t.Errorf("merged env %s: got %q, want %q", k, merged[k], v)
+		}
+	}
+	if len(merged) != len(want) {
+		t.Errorf("merged env has %d entries, want %d: %v", len(merged), len(want), merged)
+	}
+	// The repo's own map must not be mutated by the merge, or the second step in
+	// the list would inherit the first step's overrides.
+	if got := cfg.Repos[0].Env["GOFLAGS"]; got != "-mod=mod" {
+		t.Errorf("merging wrote back into the repo env: GOFLAGS is now %q", got)
+	}
+}
+
+// Nothing configured anywhere has to stay nil rather than becoming an empty map
+// that then has to be distinguished from a nil one everywhere downstream.
+func TestMergedEnvIsNilWhenNothingIsConfigured(t *testing.T) {
 	cfg, err := config.Load(write(t, `
 repos:
   - name: svc
     path: $REPO
-    coverprofile: coverage.out
+    signals:
+      - name: coverage
+        artifact: coverage.out
+        artifact_format: go-coverprofile
 `))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	if cfg.Repos[0].Env != nil {
 		t.Errorf("Env: got %v, want nil when the file says nothing", cfg.Repos[0].Env)
+	}
+	if got := onlySignal(t, cfg).MergedEnv(cfg.Repos[0].Env); got != nil {
+		t.Errorf("MergedEnv: got %v, want nil when neither level configured anything", got)
+	}
+}
+
+// A non-zero exit means findings for some tools and failure for others, and the
+// answer is a property of the format rather than a knob an operator sets. A step
+// that mixes the two cannot claim the exemption: the exit could be either cause.
+func TestNonZeroExitIsNormalNeedsEveryFormatToAgree(t *testing.T) {
+	cover := config.Signal{ArtifactFormat: config.FormatGoCoverprofile}
+	if cover.NonZeroExitIsNormal() {
+		t.Error("a go test step treats a non-zero exit as normal, so a red suite would go unreported")
+	}
+	// A step declaring nothing is not exempt either, or an unparsed step would
+	// swallow its command's failure.
+	if (config.Signal{}).NonZeroExitIsNormal() {
+		t.Error("a step with no formats claimed the exemption")
 	}
 }
 
@@ -206,57 +300,151 @@ func TestLoadRejectsBadConfigs(t *testing.T) {
 			name: "duplicate repo names",
 			body: `
 repos:
-  - {name: svc, path: $REPO, coverprofile: c.out}
-  - {name: svc, path: $REPO, coverprofile: c.out}
+  - {name: svc, path: $REPO, signals: [{name: c, artifact: c.out, artifact_format: go-coverprofile}]}
+  - {name: svc, path: $REPO, signals: [{name: c, artifact: c.out, artifact_format: go-coverprofile}]}
 `,
-			want: "duplicate",
+			want: "duplicate repo name",
 		},
 		{
 			name: "repo path does not exist",
 			body: `
 repos:
-  - {name: svc, path: /nope/not/here, coverprofile: c.out}
+  - {name: svc, path: /nope/not/here, signals: [{name: c, artifact: c.out, artifact_format: go-coverprofile}]}
 `,
 			want: "does not exist",
 		},
 		{
-			// Without a coverprofile there is nothing to parse, so running a
-			// command would burn a full test suite and record nothing.
-			name: "no coverprofile",
+			// A repo with an empty signals list measures nothing, which would
+			// otherwise store a clean snapshot with no metrics in it.
+			name: "no signals",
 			body: `
 repos:
-  - {name: svc, path: $REPO, command: ["go", "test", "./..."]}
+  - {name: svc, path: $REPO}
 `,
-			want: "coverprofile",
+			want: "nothing to measure",
+		},
+		{
+			name: "signal without a name",
+			body: `
+repos:
+  - {name: svc, path: $REPO, signals: [{artifact: c.out, artifact_format: go-coverprofile}]}
+`,
+			want: "name is required",
+		},
+		{
+			name: "duplicate signal names within a repo",
+			body: `
+repos:
+  - name: svc
+    path: $REPO
+    signals:
+      - {name: c, artifact: c.out, artifact_format: go-coverprofile}
+      - {name: c, command: ["go", "test"], stdout_format: go-test-json}
+`,
+			want: "duplicate signal name",
+		},
+		{
+			// Without a format there is nothing to parse, so running a command
+			// would burn a full test suite and record nothing.
+			name: "no format at all",
+			body: `
+repos:
+  - {name: svc, path: $REPO, signals: [{name: c, command: ["go", "test", "./..."]}]}
+`,
+			want: "record nothing",
+		},
+		{
+			name: "artifact without a format",
+			body: `
+repos:
+  - {name: svc, path: $REPO, signals: [{name: c, artifact: c.out, stdout_format: go-test-json, command: ["go", "test"]}]}
+`,
+			want: "artifact_format saying how to read it",
+		},
+		{
+			name: "artifact format without an artifact",
+			body: `
+repos:
+  - {name: svc, path: $REPO, signals: [{name: c, artifact_format: go-coverprofile, command: ["go", "test"]}]}
+`,
+			want: "needs an artifact to read",
+		},
+		{
+			name: "stdout format without a command",
+			body: `
+repos:
+  - {name: svc, path: $REPO, signals: [{name: c, stdout_format: go-test-json}]}
+`,
+			want: "needs a command to capture stdout from",
 		},
 		{
 			name: "unknown stdout format",
 			body: `
 repos:
-  - {name: svc, path: $REPO, coverprofile: c.out, stdout_format: junit-xml}
+  - {name: svc, path: $REPO, signals: [{name: c, command: ["go", "test"], stdout_format: junit-xml}]}
 `,
-			want: "stdout_format",
+			want: "unknown stdout_format",
+		},
+		{
+			name: "unknown artifact format",
+			body: `
+repos:
+  - {name: svc, path: $REPO, signals: [{name: c, artifact: c.xml, artifact_format: lcov}]}
+`,
+			want: "unknown artifact_format",
+		},
+		{
+			// Two steps writing the same metric keys collide on the metrics
+			// table's primary key, and the INSERT that fails takes every other
+			// step's numbers down with it.
+			name: "two signals reading the same non-repeatable format",
+			body: `
+repos:
+  - name: svc
+    path: $REPO
+    signals:
+      - {name: unit, command: ["go", "test", "./..."], stdout_format: go-test-json}
+      - {name: integration, command: ["go", "test", "-tags=integration", "./..."], stdout_format: go-test-json}
+`,
+			want: "would write the same metric keys over each other",
 		},
 		{
 			name: "negative timeout",
 			body: `
 repos:
-  - {name: svc, path: $REPO, coverprofile: c.out, timeout: -5s}
+  - {name: svc, path: $REPO, signals: [{name: c, artifact: c.out, artifact_format: go-coverprofile, timeout: -5s}]}
 `,
 			want: "timeout",
 		},
 		{
-			// An empty key becomes "=VALUE" in the child's environment, which
-			// is not a variable and not an error anyone would ever see.
-			name: "empty env key",
+			// An empty key becomes "=VALUE" in the child's environment, which is
+			// not a variable and not an error anyone would ever see.
+			name: "empty env key on a repo",
 			body: `
 repos:
   - name: svc
     path: $REPO
-    coverprofile: c.out
-    command: ["go", "test"]
     env:
       "": off
+    signals:
+      - {name: c, artifact: c.out, artifact_format: go-coverprofile}
+`,
+			want: "empty key",
+		},
+		{
+			// The same rule has to hold one level down, or the per-step block
+			// becomes the way around it.
+			name: "empty env key on a signal",
+			body: `
+repos:
+  - name: svc
+    path: $REPO
+    signals:
+      - name: c
+        command: ["go", "test"]
+        stdout_format: go-test-json
+        env:
+          "": off
 `,
 			want: "empty key",
 		},
@@ -268,10 +456,10 @@ repos:
 repos:
   - name: svc
     path: $REPO
-    coverprofile: c.out
-    command: ["go", "test"]
     env:
       "GOWORK=off": "1"
+    signals:
+      - {name: c, artifact: c.out, artifact_format: go-coverprofile}
 `,
 			want: "cannot contain",
 		},
@@ -279,7 +467,7 @@ repos:
 			name: "unparseable duration",
 			body: `
 repos:
-  - {name: svc, path: $REPO, coverprofile: c.out, timeout: "ten minutes"}
+  - {name: svc, path: $REPO, signals: [{name: c, artifact: c.out, artifact_format: go-coverprofile, timeout: "ten minutes"}]}
 `,
 			want: "duration",
 		},
@@ -298,13 +486,58 @@ repos:
 	}
 }
 
+// A config written against the previous shape has to say so.
+//
+// goccy ignores keys it does not recognize, so without the deprecated fields
+// this file would load into an empty signals list and fail with "nothing to
+// measure", which is true and explains nothing. The old fields exist purely so
+// this message can be produced.
+func TestOldSingleCommandShapeExplainsItself(t *testing.T) {
+	_, err := config.Load(write(t, `
+repos:
+  - name: svc
+    path: $REPO
+    coverprofile: coverage.out
+    command: ["go", "test", "./...", "-coverprofile=coverage.out"]
+    stdout_format: go-test-json
+    timeout: 10m
+`))
+	if err == nil {
+		t.Fatal("Load accepted a config in the old shape")
+	}
+	msg := err.Error()
+
+	for _, want := range []string{
+		"old single-command shape",
+		// The instructions have to name the new keys, or the operator is told
+		// what is wrong and not what to write.
+		"signals:",
+		"artifact_format: go-coverprofile",
+		"stdout_format: go-test-json",
+		// Filled in from what they actually wrote, so the block can be pasted
+		// rather than translated.
+		"-coverprofile=coverage.out",
+		"timeout: 10m",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("the migration error does not mention %q:\n%s", want, msg)
+		}
+	}
+
+	// It must not also complain about the consequence, which would bury the
+	// instructions under a second error about their own effect.
+	if strings.Contains(msg, "nothing to measure") {
+		t.Errorf("the migration error is buried under a complaint about its own consequence:\n%s", msg)
+	}
+}
+
 // Every problem in one pass. Fixing a config one error per run is miserable
 // when the file lists a dozen repos.
 func TestLoadReportsAllProblemsAtOnce(t *testing.T) {
 	_, err := config.Load(write(t, `
 repos:
-  - {name: "", path: $REPO, coverprofile: c.out}
-  - {name: svc, path: /nope/not/here, coverprofile: c.out}
+  - {name: "", path: $REPO, signals: [{name: c, artifact: c.out, artifact_format: go-coverprofile}]}
+  - {name: svc, path: /nope/not/here, signals: [{name: c, artifact: c.out, artifact_format: go-coverprofile}]}
 `))
 	if err == nil {
 		t.Fatal("Load accepted an invalid config")
@@ -315,8 +548,46 @@ repos:
 	}
 }
 
+// Problems inside the signals list have to be reported alongside the repo's own,
+// rather than the first failure stopping the walk.
+func TestLoadReportsSignalProblemsFromEveryRepo(t *testing.T) {
+	_, err := config.Load(write(t, `
+repos:
+  - {name: alpha, path: $REPO, signals: [{name: c, command: ["go", "test"], stdout_format: junit-xml}]}
+  - {name: beta, path: $REPO, signals: [{name: c, artifact_format: go-coverprofile}]}
+`))
+	if err == nil {
+		t.Fatal("Load accepted an invalid config")
+	}
+	msg := err.Error()
+	if !strings.Contains(msg, "alpha") || !strings.Contains(msg, "beta") {
+		t.Errorf("want a problem from each repo, got: %v", err)
+	}
+}
+
 func TestLoadMissingFile(t *testing.T) {
 	if _, err := config.Load(filepath.Join(t.TempDir(), "absent.yaml")); err == nil {
 		t.Fatal("Load accepted a missing file")
+	}
+}
+
+// The list an operator may name and the list the tool can read have to be the
+// same list. This is the config half; the collect package pins the other.
+func TestFormatsIsStableAndComplete(t *testing.T) {
+	got := config.Formats()
+	if len(got) == 0 {
+		t.Fatal("Formats is empty, so the help text and every error message list nothing")
+	}
+	for _, name := range got {
+		if !config.Format(name).Known() {
+			t.Errorf("Formats lists %q, which Known rejects", name)
+		}
+	}
+	// Stable, because it is printed in help text and in error messages, and a
+	// list that shuffles between runs makes both impossible to diff.
+	for range 5 {
+		if second := config.Formats(); strings.Join(second, ",") != strings.Join(got, ",") {
+			t.Fatalf("Formats is not stable: %v then %v", got, second)
+		}
 	}
 }

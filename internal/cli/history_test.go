@@ -185,14 +185,24 @@ func TestHistoryKeepsFailedRunsAsVisibleGaps(t *testing.T) {
 	if err != nil {
 		t.Fatalf("history markdown: %v", err)
 	}
+	// A TABLE row, which means a line starting with a pipe. Selecting on the
+	// word alone picked the last line mentioning it, and that is the prose under
+	// the table explaining what "not collected" means, not a row at all. With no
+	// pipes in it, the cell check below split it into a single cell, skipped the
+	// two indexes it always skips, and could never return true: the assertion
+	// passed on every input it was ever given.
+	//
+	// Keeping the last match is still right. There is one failed row in this
+	// fixture, and taking the last means a future fixture with several is
+	// checked on its last rather than silently on its first.
 	var failedRow string
 	for _, line := range strings.Split(md, "\n") {
-		if strings.Contains(line, "failed") {
+		if strings.HasPrefix(strings.TrimSpace(line), "|") && strings.Contains(line, "failed") {
 			failedRow = line
 		}
 	}
 	if failedRow == "" {
-		t.Fatalf("no failed row in the markdown:\n%s", md)
+		t.Fatalf("no failed row in the markdown table:\n%s", md)
 	}
 	if hasDigitOutsideTimestamp(failedRow) {
 		t.Errorf("the failed row carries a measurement: %q", failedRow)

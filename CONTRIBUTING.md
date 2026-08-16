@@ -14,12 +14,17 @@ make check     # build, vet, test, lint, in that order
 request rather than saying it passed.
 
 CI runs those same four steps in the same order and then some, so a green
-`make check` is necessary and not sufficient. Two differences are worth knowing
+`make check` is necessary and not sufficient. Three differences are worth knowing
 before a red CI surprises you:
 
 - `make test` is `go test ./...`. CI runs `go test ./... -race`, so a data race
   fails there and passes here. If you touched anything concurrent, run
   `GOWORK=off go test ./... -race` yourself first.
+- CI runs `go mod tidy -diff`, which `make check` does not. If it fails, run
+  `make tidy` and commit the result. It is a real gate rather than tidiness for
+  its own sake: this tool reads the direct-versus-indirect classification in
+  `go.mod` to count outdated dependencies, so an untidy file makes the tool
+  report a wrong number about its own repo.
 - CI also produces a real coverage profile and a real `go test -json` stream and
   runs the two opt-in cross-check tests against them. Those tests skip in
   `make test`, which has nothing to hand them. To run them locally, point them

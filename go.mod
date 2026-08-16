@@ -1,12 +1,14 @@
 module github.com/Romero-jace/repo-metrics
 
-go 1.26.5
+go 1.26
 
-require modernc.org/sqlite v1.56.0
+require (
+	github.com/goccy/go-yaml v1.19.2
+	modernc.org/sqlite v1.56.0
+)
 
 require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/goccy/go-yaml v1.19.2 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect

@@ -39,6 +39,20 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      # go.mod drifting out of tidy is not cosmetic here, because this tool
+      # measures dependency staleness by reading exactly the direct-versus-
+      # indirect classification that tidy maintains. go-yaml sat in the indirect
+      # block while internal/config imported it directly, and running the tool
+      # against its own checkout reported zero outdated direct dependencies where
+      # the true answer was one. A tool that cannot measure itself correctly is a
+      # poor advertisement for measuring anything else.
+      #
+      # -diff exits non-zero and prints the change rather than making it, so a
+      # red build here tells a contributor to run `make tidy` instead of leaving
+      # them to guess.
+      - name: Tidy
+        run: go mod tidy -diff
+
       # -race needs cgo, which is why CGO_ENABLED is deliberately left alone.
       # The released binary is built CGO-free elsewhere; the test run is not.
       - name: Test

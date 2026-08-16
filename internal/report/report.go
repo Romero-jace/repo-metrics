@@ -71,18 +71,7 @@ var funcs = template.FuncMap{
 	//
 	// The count is rounded before the noun is chosen, so a 1.4 day window says
 	// "1 day" rather than "1 days".
-	"days": func(d float64) string {
-		switch {
-		case d >= 1:
-			return count(d, "day")
-		case d*24 >= 1:
-			return count(d*24, "hour")
-		case d*24*60 >= 1:
-			return count(d*24*60, "minute")
-		default:
-			return "less than a minute"
-		}
-	},
+	"days": humanDays,
 
 	// anyEnvWarned gates the footnote that explains the table's toolchain
 	// marker. It goes through the same predicate the rows do so the footnote can
@@ -100,6 +89,23 @@ var funcs = template.FuncMap{
 // count renders a rounded quantity with a singular or plural noun. Rounding
 // first is what keeps "1 days" out of the report: %.0f on 1.4 rounds for
 // display but the grammar would still be decided by the unrounded value.
+// humanDays renders a number of days at whatever unit keeps it readable. It is
+// a plain function as well as a template helper because buildRepo renders the
+// baseline span with it, and two ladders that disagree about when a day becomes
+// hours would be two ways of saying the same thing.
+func humanDays(d float64) string {
+	switch {
+	case d >= 1:
+		return count(d, "day")
+	case d*24 >= 1:
+		return count(d*24, "hour")
+	case d*24*60 >= 1:
+		return count(d*24*60, "minute")
+	default:
+		return "less than a minute"
+	}
+}
+
 func count(n float64, unit string) string {
 	rounded := math.Round(n)
 	if rounded == 1 {

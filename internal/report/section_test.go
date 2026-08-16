@@ -107,7 +107,7 @@ func TestMarkdownSectionsRenderOnlyWhatWasAskedFor(t *testing.T) {
 		}
 		// The header is not a section and has to survive every narrowing, or a
 		// narrowed report has no date and no window on it.
-		if !strings.Contains(md, "# Repo metrics,") || !strings.Contains(md, "back.") {
+		if !strings.Contains(md, "# Repo metrics,") || !strings.Contains(md, "back or earlier") {
 			t.Errorf("--section %s dropped the report header:\n%s", tc.sec, md)
 		}
 	}

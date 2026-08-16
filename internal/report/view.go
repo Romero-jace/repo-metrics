@@ -124,6 +124,26 @@ type RepoView struct {
 	Name        string `json:"name"`
 	Status      string `json:"status"`
 	CollectedAt string `json:"collected_at"`
+	// BaselineCollectedAt is when the snapshot every delta on this row is
+	// measured against was taken, and null when there is no baseline.
+	//
+	// It is on the wire because window_days is what was ASKED for and nothing
+	// carried what was FOUND. Baseline selection takes the newest snapshot at or
+	// before the cutoff with no floor on how far before, so a repo nobody
+	// collected for two months compares against a two-month-old snapshot, and a
+	// consumer reading window_days alone would file a quarter's drift as a
+	// week's. This is the same request-and-reality pair the history payload
+	// already carries as since_days beside since.
+	BaselineCollectedAt *string `json:"baseline_collected_at"`
+	// BaselineSpan is that gap written out for a reader, like "over the past 8
+	// days". Deliberately not on the wire, and the only field here that is not.
+	//
+	// A consumer computes the span from the two timestamps beside it, so putting
+	// it in the JSON would publish a derived number twice. It also could not go
+	// there as a number even if that were wanted: the field census refuses a
+	// bare number on a repo row, correctly, since anything numeric out there has
+	// to sit inside a nullable group and this is not a measurement of anything.
+	BaselineSpan string `json:"-"`
 	// Coverage is nil when this run stored no coverage metrics at all: a failed
 	// run, a repo nobody has ever collected, or a coverage profile carrying only
 	// its "mode: set" header. That last one is the case a boolean gate was
@@ -745,6 +765,11 @@ func buildRepo(r delta.RepoDelta) RepoView {
 		HasBaseline: r.HasBaseline,
 		EnvChanged:  r.EnvChanged,
 		Status:      StatusNotCollected,
+	}
+	if r.Base != nil {
+		at := r.Base.CollectedAt.UTC().Format("2006-01-02 15:04 UTC")
+		out.BaselineCollectedAt = &at
+		out.BaselineSpan = "over the past " + humanDays(r.BaselineAge.Hours()/24)
 	}
 	if r.Head != nil {
 		out.HasSnapshot = true

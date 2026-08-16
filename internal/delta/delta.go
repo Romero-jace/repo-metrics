@@ -93,6 +93,19 @@ type RepoDelta struct {
 	// HasBaseline is false when there is no earlier snapshot to compare
 	// against. There is no synthetic delta in that case: the report says so.
 	HasBaseline bool
+	// BaselineAge is how far apart the two snapshots actually are.
+	//
+	// It is not the window that was asked for and is never shorter than it. The
+	// baseline is the newest snapshot at or before the cutoff, with no floor on
+	// how far before, so a repo nobody collected for two months compares against
+	// a two-month-old snapshot and every number is a two-month change. The
+	// report used to call all of them "on the week" regardless.
+	BaselineAge time.Duration
+	// BaselineStale means that gap is far enough past the window asked for that
+	// this repo should not lead the report on the strength of it. The delta is
+	// still published and still labeled with its real span: what it loses is the
+	// right to be the headline.
+	BaselineStale bool
 	// EnvChanged means the two snapshots were measured under different
 	// toolchains, so the difference between them is not purely code.
 	EnvChanged bool
@@ -272,6 +285,33 @@ func computeRepo(in Input, opts Options) RepoDelta {
 	}
 	d.HasBaseline = true
 
+	if in.Head != nil {
+		d.BaselineAge = in.Head.CollectedAt.Sub(in.Base.CollectedAt)
+		// Three times the window asked for. There is no natural boundary to read
+		// off the code here, because baseline selection guarantees the gap is at
+		// least the window and says nothing about the upper end, so this is a
+		// judgment call written down rather than derived. Retune it here.
+		//
+		// Twice was tried first and is too tight. A weekly report whose cron
+		// missed one run has a fortnight-old baseline, which is both common and
+		// harmless, and it landed exactly on the boundary and tipped over it by
+		// milliseconds. Three times means at least two collections in a row went
+		// missing, which is a genuinely lapsed repo rather than a hiccup.
+		//
+		// It can afford to be generous because the label is honest now: the
+		// delta says the span it actually covers either way. All this decides is
+		// whether a repo gets to be the headline, and the case it exists for is
+		// a quarter of accumulated drift outranking the repos that really moved
+		// this week.
+		//
+		// What it must not become is a rule that refuses the comparison. A
+		// two-month-old baseline is still the best answer available, and saying
+		// so plainly beats saying nothing.
+		if opts.Window > 0 && d.BaselineAge > 3*opts.Window {
+			d.BaselineStale = true
+		}
+	}
+
 	base := newSide(in.Base, in.BaseMetrics)
 	d.BaseSignals = measureAll(base)
 
@@ -310,6 +350,19 @@ func computeRepo(in Input, opts Options) RepoDelta {
 // biggest mover, and render its delta as null because the gate one layer down
 // was working correctly.
 func nominate(d RepoDelta, base Side, opts Options) (movedBy []SignalID, severity float64) {
+	// A repo whose baseline is far older than the window asked for does not lead
+	// the report. Its numbers are real and its deltas are published with the span
+	// they actually cover; what it must not do is present a quarter's drift as
+	// this week's news and push aside the repos that really did move this week.
+	//
+	// This is the same outcome the failed-head guard already refuses further
+	// down, arriving through a different door: there the biggest drop of the week
+	// is really a crashed command, here it is really two months of ordinary
+	// change nobody was watching.
+	if d.BaselineStale {
+		return nil, 0
+	}
+
 	for _, sig := range signals {
 		// Nomination is opt-in per signal rather than a property of having a
 		// delta. Without that, a signal that moves on every run, like a test

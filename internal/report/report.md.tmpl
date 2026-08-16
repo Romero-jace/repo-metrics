@@ -1,6 +1,6 @@
 # Repo metrics, {{ .GeneratedAt }}
 
-Comparing each repo against its closest snapshot from about {{ days .WindowDays }} back.
+Each repo is compared against the newest snapshot it has from {{ days .WindowDays }} back or earlier, so a repo nobody collected on time is compared against something older than that. What moved says the span each one actually covers.
 {{ if .Scope.Narrowed }}
 Only covering the repo `{{ .Scope.RepoName }}`, out of {{ repos .Scope.Configured }} in this config. Anything below is about that repo and nothing else.
 {{ end -}}
@@ -8,9 +8,9 @@ Only covering the repo `{{ .Scope.RepoName }}`, out of {{ repos .Scope.Configure
 {{ if .Movers -}}
 ## What moved
 {{ range .Movers }}
-### {{ .Name }}
+### {{ .Name }}{{ $span := .BaselineSpan }}
 {{ range .MovedSignals }}
-{{ .Label }} {{ .Value }}, {{ .Delta }} on the week{{ with .Verdict }}, {{ . }}{{ end }}.
+{{ .Label }} {{ .Value }}, {{ .Delta }} {{ $span }}{{ with .Verdict }}, {{ . }}{{ end }}.
 {{- end }}
 {{- if .EnvWarned }}
 

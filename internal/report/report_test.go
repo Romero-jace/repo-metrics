@@ -1040,11 +1040,15 @@ func TestWindowReadsCorrectlyBelowADay(t *testing.T) {
 		opts.Window = tc.window
 		md := mustMarkdown(t, delta.Compute(nil, opts, fixedNow()))
 
-		want := "about " + tc.want + " back"
+		// The header states the window that was ASKED for. It used to say the
+		// baseline was "about" that far back, which was a claim about what was
+		// found and was often untrue: selection takes the newest snapshot at or
+		// before the cutoff with no floor on how far before.
+		want := "from " + tc.want + " back or earlier"
 		if !strings.Contains(md, want) {
 			t.Errorf("window %s: report does not say %q. First line of the body:\n%s", tc.window, want, strings.SplitN(md, "\n", 4)[2])
 		}
-		if strings.Contains(md, "about 0 days back") {
+		if strings.Contains(md, "from 0 days back") {
 			t.Errorf("window %s rendered as zero days, which reads as comparing against right now", tc.window)
 		}
 	}

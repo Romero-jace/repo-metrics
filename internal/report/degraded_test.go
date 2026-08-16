@@ -512,7 +512,12 @@ var repoWireFields = map[string]fieldKind{
 	"name":         kindContext,
 	"status":       kindContext,
 	"collected_at": kindContext,
-	"error":        kindContext,
+	// A timestamp, so context rather than a measurement, and null for a repo
+	// with no baseline. It cannot be kindInput even though it is the reality
+	// half of a request-and-reality pair with window_days: inputs are envelope
+	// only, which TestNoRepoFieldEscapesThroughKindInput enforces.
+	"baseline_collected_at": kindContext,
+	"error":                 kindContext,
 	// These three are booleans, and none of them gates a number any more. They
 	// say which kind of nothing a null group is, alongside status.
 	"has_snapshot": kindContext,

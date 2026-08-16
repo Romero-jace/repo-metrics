@@ -79,10 +79,17 @@ type RepoDelta struct {
 	BaseSignals map[SignalID]Measurement
 
 	// HeadCoverage and BaseCoverage are coverage's raw statement counts. They
-	// carry no measured flag of their own, so read them through CoverageDetail
-	// rather than directly: Pct() on a head that stored nothing answers 0 for
-	// want of a denominator, and that zero is exactly the figure this package
-	// exists to withhold.
+	// carry no measured flag of their own: Pct() on a head that stored nothing
+	// answers 0 for want of a denominator, and that zero is exactly the figure
+	// this package exists to withhold.
+	//
+	// The gate that protects them is the coverage signal's own,
+	// Signal(SigCoverage).Head.IsMeasured(), and nothing may read these counts
+	// until it has answered yes. report.buildRepo is the only real reader and
+	// does exactly that: it publishes Covered and Total only after buildSignal
+	// returned a non-nil group for coverage, which is that same question.
+	// TestUnmeasuredCoverageCountsReadAsAFabricatedZero pins the trap itself, so
+	// the warning survives a rewording of this comment.
 	//
 	// They stay as counts because repo coverage is the sum of covered over the
 	// sum of total, which is not the mean of the per-package rates, and because
@@ -167,37 +174,6 @@ type SignalDelta struct {
 	Signal Signal
 	Head   Measurement
 	Change Change
-}
-
-// CoverageDetail is everything coverage carries beyond a bare value: the counts
-// that are its authority, and the package findings derived from them.
-type CoverageDetail struct {
-	Counts   Coverage
-	Change   Change
-	Culprits []PackageDelta
-	Added    []string
-	Removed  []string
-}
-
-// CoverageDetail returns coverage's detail and whether the head measured it.
-//
-// This is the sanctioned read of HeadCoverage. The counts are raw and carry no
-// measured flag of their own, so Pct() on a head that stored nothing answers 0
-// for want of a denominator, and that zero is precisely the figure this package
-// exists to withhold. Going through here puts the gate on the same expression as
-// the number.
-func (r RepoDelta) CoverageDetail() (CoverageDetail, bool) {
-	sd := r.Signal(SigCoverage)
-	if !sd.Head.IsMeasured() {
-		return CoverageDetail{}, false
-	}
-	return CoverageDetail{
-		Counts:   r.HeadCoverage,
-		Change:   sd.Change,
-		Culprits: r.Culprits,
-		Added:    r.Added,
-		Removed:  r.Removed,
-	}, true
 }
 
 // Input is one repo's two snapshots and their metrics.

@@ -34,13 +34,27 @@ type Snapshot struct {
 	RepoID      int64
 	CollectedAt time.Time
 	GitSHA      string
-	GitBranch   string
-	GitDirty    bool
+	// GitBranch is written on every snapshot and read by no output surface, and
+	// that is a decision rather than an oversight. Dropping the column would
+	// need a migration, and a branch name says nothing about what a number
+	// means: unlike GitDirty below, two snapshots taken on different branches
+	// are still each a faithful measurement of a commit.
+	GitBranch string
+	// GitDirty says the tree had uncommitted changes when this ran, so these
+	// numbers belong to no commit and cannot be reproduced from one. It reaches
+	// the report as RepoView.GitDirty.
+	GitDirty bool
 	// Env fingerprints the toolchain the measurement was taken with, so
 	// numbers from incomparable environments are not diffed silently.
-	Env      string
-	Status   Status
-	Error    string
+	Env    string
+	Status Status
+	Error  string
+	// Duration is the whole collection's wall time, and it too is written and
+	// never read by an output surface, deliberately. The report publishes the
+	// collect_time signal instead, which is summed from the per-step timing
+	// metrics: that one can say WHICH step got slower, and this one cannot.
+	// Keeping both means the per-step sum can be checked against the total that
+	// contained it.
 	Duration time.Duration
 }
 

@@ -65,6 +65,12 @@ var funcs = template.FuncMap{
 	// helper as days for the same reason.
 	"repos": func(n int) string { return count(float64(n), "repo") },
 
+	// collections renders a count of collection runs with its noun, so a repo
+	// with one snapshot in the window cannot produce "1 collections". Same
+	// helper as repos and days: three nouns, one rule about when to pluralize
+	// them.
+	"collections": func(n int) string { return count(float64(n), "collection") },
+
 	// days renders the reporting window. It steps down to hours and minutes
 	// because a sub-day window is a real setting: --window 12h through %.0f
 	// prints "0 days", which reads as comparing a repo against right now.
@@ -79,6 +85,19 @@ var funcs = template.FuncMap{
 	"anyEnvWarned": func(repos []RepoView) bool {
 		for _, r := range repos {
 			if r.EnvWarned() {
+				return true
+			}
+		}
+		return false
+	},
+
+	// anyDirtyWarned does the same for the uncommitted changes marker. Two
+	// near-identical closures rather than one taking a predicate, because a
+	// template FuncMap cannot be handed a method value and the indirection would
+	// cost more than the duplication saves.
+	"anyDirtyWarned": func(repos []RepoView) bool {
+		for _, r := range repos {
+			if r.DirtyWarned() {
 				return true
 			}
 		}

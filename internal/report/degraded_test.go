@@ -518,11 +518,16 @@ var repoWireFields = map[string]fieldKind{
 	// only, which TestNoRepoFieldEscapesThroughKindInput enforces.
 	"baseline_collected_at": kindContext,
 	"error":                 kindContext,
-	// These three are booleans, and none of them gates a number any more. They
-	// say which kind of nothing a null group is, alongside status.
+	// These four are booleans, and none of them gates a number any more. They
+	// say which kind of nothing a null group is, alongside status, or what the
+	// numbers in the groups have to be read against.
 	"has_snapshot": kindContext,
 	"has_baseline": kindContext,
 	"env_changed":  kindContext,
+	// git_dirty is not a number, so it cannot be a measurement, and kindInput is
+	// banned on a repo row. It is the same kind of thing env_changed is: a fact
+	// about how the measurement was taken that changes what it means.
+	"git_dirty": kindContext,
 
 	// MovedBy names which signals made this repo lead the report. It carries no
 	// numbers, only signal names, which is why it is context rather than a

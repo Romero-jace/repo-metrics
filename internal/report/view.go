@@ -189,6 +189,16 @@ type RepoView struct {
 	HasSnapshot bool `json:"has_snapshot"`
 	HasBaseline bool `json:"has_baseline"`
 	EnvChanged  bool `json:"env_changed"`
+	// GitDirty says the head snapshot was taken over a tree with uncommitted
+	// changes, so its numbers do not correspond to any commit and cannot be
+	// reproduced from one. It changes what every measurement on the row means,
+	// the same way env_changed does, which is why it sits with the booleans
+	// above rather than inside a group: it is context, not a number.
+	//
+	// It is stored on every snapshot and, until this field, was read by no
+	// output surface at all, so a measurement taken over a dirty tree reached
+	// every consumer indistinguishable from one taken over a clean one.
+	GitDirty bool `json:"git_dirty"`
 	// MovedBy names the signals that made this repo lead the report. With one
 	// signal it was obvious; with several, "this repo moved" is not an answer
 	// unless it also says which measurement moved. It carries no numbers, so it
@@ -568,6 +578,23 @@ func (r RepoView) EnvWarned() bool {
 	return r.EnvChanged && r.HasBaseline && r.HasSnapshot && r.Status != string(store.StatusFailed)
 }
 
+// DirtyWarned reports whether this repo's row has to carry the uncommitted
+// changes marker.
+//
+// It deliberately does not require a baseline, which is the one thing that
+// tells it apart from EnvWarned above. That warning is about a DELTA: two
+// snapshots taken under different toolchains, so part of the move is not code.
+// This one is about the head snapshot on its own, whose numbers belong to no
+// commit and cannot be reproduced from one, so a repo on its first ever run
+// needs telling exactly as much as a repo with a year of history.
+//
+// A failed run is excluded for the reason EnvWarned excludes it: it published no
+// numbers, and a note about how numbers that are not there were measured is
+// noise.
+func (r RepoView) DirtyWarned() bool {
+	return r.GitDirty && r.HasSnapshot && r.Status != string(store.StatusFailed)
+}
+
 // CulpritView is one package named as accounting for a repo's move.
 //
 // It carries no gate of its own. A culprit only exists inside a non-nil
@@ -776,6 +803,11 @@ func buildRepo(r delta.RepoDelta) RepoView {
 		out.Status = string(r.Head.Status)
 		out.CollectedAt = r.Head.CollectedAt.UTC().Format("2006-01-02 15:04 UTC")
 		out.Error = r.Head.Error
+		// Set here rather than below the failed and never-collected returns,
+		// because it is a fact about the snapshot rather than a measurement
+		// derived from one. A run that failed over a dirty tree still failed
+		// over a dirty tree.
+		out.GitDirty = r.Head.GitDirty
 	}
 
 	// A repo nobody has ever collected is not a measurement at zero, so it gets

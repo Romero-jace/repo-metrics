@@ -18,5 +18,20 @@ failures draws a straight line through the week nobody was looking. */}}
 | {{ .CollectedAt }} | {{ .Value }} | {{ .Status }} |
 {{- end }}
 
-{{ len .Points }} collections. A row reading "not collected" is a run that failed, and one reading "not measured" is a run that succeeded without producing this signal.
+{{ collections (len .Points) }}. A row reading "not collected" is a run that failed, and one reading "not measured" is a run that succeeded without producing this signal.
+{{- with .Problems }}{{/* Beneath the table rather than as a fourth column of it.
+Every cell already carries this text and the table dropped it, so a reader was
+told a run failed and given no way to learn why, while the same series through
+--format json carried the whole explanation. A fourth column was the other
+option and is refused for the reason PointView.GitSHA is: a sentence of build
+output is noise in a row a person scans across. Gated on there being any, so a
+repo that has only ever collected cleanly does not grow an empty heading. */}}
+
+## Collection problems
+
+Matched to the rows above by timestamp. A run can report a problem and still measure something, which is what a partial row is.
+{{ range . }}
+- {{ .CollectedAt }}: {{ .Error }}
+{{- end }}
+{{- end }}
 {{ end -}}

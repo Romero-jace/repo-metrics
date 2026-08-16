@@ -98,3 +98,45 @@ func TestHasTestDataIgnoresTheValueAndReadsPresence(t *testing.T) {
 		t.Error("a pkg.without_tests metric of zero was read as no test data at all")
 	}
 }
+
+// RepoDelta.HeadCoverage is raw counts with no measured flag of its own, so
+// Pct() on a head that stored no coverage answers a confident 0 that nothing
+// measured. Only the coverage signal's own gate can tell that zero from a repo
+// that really is at zero percent.
+//
+// This pins the pair, because that warning used to live only in a doc comment
+// on a CoverageDetail method that no caller anywhere had ever used. A comment
+// naming a discipline nobody follows is deleted sooner or later; the trap it
+// described outlives it. The two assertions have to disagree: the gate says no
+// while the counts answer 0.0%.
+func TestUnmeasuredCoverageCountsReadAsAFabricatedZero(t *testing.T) {
+	// A header-only coverage profile: the run parsed a test stream and stored
+	// no per-package coverage rows at all, so nothing downgrades its status.
+	unmeasured := one(t, delta.Input{
+		Repo: store.Repo{Name: "header-only"},
+		Head: snap("go1.26"), HeadMetrics: withTests(nil, 5, 0),
+		Base: snap("go1.26"), BaseMetrics: withTests(cov("m/a", 720, 1000), 5, 0),
+	}, opts())
+
+	if measuredSignal(unmeasured, delta.SigCoverage) {
+		t.Fatal("the coverage signal reports measured for a head that stored no coverage rows, so the gate this warning depends on is gone")
+	}
+	if got := unmeasured.HeadCoverage.Pct(); got != 0 {
+		t.Errorf("HeadCoverage.Pct() on an unmeasured head: got %v, want the fabricated 0 this test exists to warn about", got)
+	}
+
+	// The control. Without it the assertions above would pass on a Pct() that
+	// answered 0 for everything, and the trap would look like a property of the
+	// type rather than of the unmeasured case.
+	measuredZero := one(t, delta.Input{
+		Repo: store.Repo{Name: "really-at-zero"},
+		Head: snap("go1.26"), HeadMetrics: withTests(cov("m/a", 0, 1000), 5, 0),
+	}, opts())
+
+	if !measuredSignal(measuredZero, delta.SigCoverage) {
+		t.Error("a repo whose profile instrumented 1000 statements and covered none was read as having measured no coverage")
+	}
+	if got := measuredZero.HeadCoverage.Pct(); got != 0 {
+		t.Errorf("HeadCoverage.Pct() for a repo genuinely at zero: got %v, want 0", got)
+	}
+}

@@ -149,6 +149,29 @@ func (h HistoryView) Cells() []PointCell {
 	return out
 }
 
+// Problems returns the points whose run left an explanation behind, so the
+// markdown can print it beneath the table.
+//
+// The text is already loaded into every cell and the table drops it, which told
+// a reader that a run failed and gave them no way to learn why, while the same
+// run through --format json carried the whole explanation. It goes below the
+// table rather than into a fourth column for the reason PointView.GitSHA is kept
+// out of the table entirely: a sentence of build output is noise in a row a
+// person scans across.
+//
+// Every point carrying error text is included, not only the failed ones. A
+// partial run stores its error too, and a row that shows a real number while
+// something went wrong beside it is exactly the one worth explaining.
+func (h HistoryView) Problems() []PointCell {
+	var out []PointCell
+	for _, cell := range h.Cells() {
+		if cell.Error != "" {
+			out = append(out, cell)
+		}
+	}
+	return out
+}
+
 // PointCell is one rendered row of the history table.
 type PointCell struct {
 	CollectedAt string

@@ -50,12 +50,15 @@ The rule those words enforce is unchanged: a failed run came back with no
 metrics, so every count on it is a Go zero rather than a measurement, and
 printing them would claim the repo sits at 0.0% with every package tested. */}}
 {{- range .Repos }}
-| {{ .Name }} |{{ range .TableSignals }} {{ .Value }} | {{ .Delta }} |{{ end }} {{ if .CollectedAt }}{{ .CollectedAt }}{{ else }}never{{ end }}{{ if .EnvWarned }}, toolchain changed{{ end }} |
+| {{ .Name }} |{{ range .TableSignals }} {{ .Value }} | {{ .Delta }} |{{ end }} {{ if .CollectedAt }}{{ .CollectedAt }}{{ else }}never{{ end }}{{ if .EnvWarned }}, toolchain changed{{ end }}{{ if .DirtyWarned }}, uncommitted changes{{ end }} |
 {{- end }}
 
 Coverage is covered statements over total statements across the whole repo, so a big package counts for more than a small one.
 {{ if anyEnvWarned .Repos }}
 A row marked toolchain changed had its two snapshots taken under different toolchains, so some of that move is not code. It is flagged whether or not the repo moved enough to lead the report.
+{{ end -}}
+{{ if anyDirtyWarned .Repos }}
+A row marked uncommitted changes was measured over a working tree with uncommitted work in it, so its numbers belong to no commit and nobody can reproduce them from one. It says nothing about the comparison, only about the newer snapshot, so a repo on its first ever run carries it too.
 {{ end -}}
 {{ if anyPackageChurn .Repos }}
 ## Packages that came and went

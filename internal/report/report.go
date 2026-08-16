@@ -21,6 +21,9 @@ import (
 //go:embed report.md.tmpl
 var markdownTemplate string
 
+//go:embed history.md.tmpl
+var historyTemplate string
+
 // funcs is what the template can call.
 //
 // It is deliberately small. Everything that used to format a typed pointer for
@@ -107,6 +110,29 @@ func count(n float64, unit string) string {
 
 var tmpl = template.Must(template.New("report").Funcs(funcs).Parse(markdownTemplate))
 
+var historyTmpl = template.Must(template.New("history").Funcs(funcs).Parse(historyTemplate))
+
+// renderJSON is the one place this package decides how JSON reaches the wire.
+//
+// Not indented, on purpose. JSON here is the machine format and markdown is the
+// human one, so paying for indentation in the machine format buys readability
+// for a reader who has the better format available anyway. It was measured at
+// roughly a fifth of the payload, and a tokenizer handles runs of spaces worse
+// than the byte count suggests. Anyone who does want to read it can pipe it
+// through jq.
+//
+// A second payload encoding its own would be free to drift on both the
+// indentation and the HTML escaping, and the difference would surface only in a
+// consumer's parser.
+func renderJSON(w io.Writer, v any, what string) error {
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
+		return fmt.Errorf("report: rendering %s json: %w", what, err)
+	}
+	return nil
+}
+
 // Markdown renders the report for humans, narrowed to sec and to scope.
 func Markdown(w io.Writer, rep delta.Report, sec Section, scope Scope) error {
 	if err := tmpl.Execute(w, BuildSection(rep, sec, scope)); err != nil {
@@ -119,18 +145,19 @@ func Markdown(w io.Writer, rep delta.Report, sec Section, scope Scope) error {
 // formats go through BuildSection, so neither can include a section the other
 // left out or disagree about what the report covers.
 func JSON(w io.Writer, rep delta.Report, sec Section, scope Scope) error {
-	enc := json.NewEncoder(w)
-	// Not indented, on purpose. JSON here is the machine format and markdown is
-	// the human one, so paying for indentation in the machine format buys
-	// readability for a reader who has the better format available anyway. It
-	// was measured at roughly a fifth of the payload, and a tokenizer handles
-	// runs of spaces worse than the byte count suggests. Anyone who does want to
-	// read it can pipe it through jq.
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(BuildSection(rep, sec, scope)); err != nil {
-		return fmt.Errorf("report: rendering json: %w", err)
+	return renderJSON(w, BuildSection(rep, sec, scope), "report")
+}
+
+// RenderReport writes the report in the requested format.
+//
+// It takes the report's inputs rather than a built view, because sec and scope
+// are narrowing inputs and applying them twice, or in one renderer and not the
+// other, is exactly the drift BuildSection exists to prevent.
+func RenderReport(w io.Writer, f Format, rep delta.Report, sec Section, scope Scope) error {
+	if f == FormatJSON {
+		return JSON(w, rep, sec, scope)
 	}
-	return nil
+	return Markdown(w, rep, sec, scope)
 }
 
 // MarkdownString is a convenience for callers that want the text in hand.

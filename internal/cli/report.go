@@ -19,7 +19,8 @@ func runReport(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	configPath := set.String("config", defaultConfigPath, "config file to read")
 	windowFlag := set.String("window", "", "how far back the baseline sits, like 7d (default: the config's window)")
 	outPath := set.String("out", "", "write the report here instead of to stdout")
-	format := set.String("format", formatMarkdown, "markdown or json")
+	format := set.String("format", string(report.FormatMarkdown),
+		"which format to render: "+strings.Join(report.Formats(), ", "))
 	only := set.String("repo", "", "report on just this one repo, by name")
 	sectionFlag := set.String("section", string(report.SectionAll),
 		"which part of the report to render: "+strings.Join(report.Sections(), ", "))
@@ -30,8 +31,13 @@ func runReport(ctx context.Context, args []string, stdout, stderr io.Writer) err
 
 	// Rejected rather than defaulted: silently rendering markdown for
 	// --format=jsom would hand a broken pipeline a file it cannot parse.
-	if *format != formatMarkdown && *format != formatJSON {
-		err := fmt.Errorf("unknown format %q, want %s or %s", *format, formatMarkdown, formatJSON)
+	//
+	// Validated by the report package's own parser rather than by a list kept
+	// here, for the same reason sections are: two validators over one set of
+	// names is one of them going stale, and --format now spans three
+	// subcommands rather than one.
+	renderFormat, err := report.ParseFormat(*format)
+	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "%v\n", err)
 		return err
 	}
@@ -92,7 +98,7 @@ func runReport(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	// caller to infer it from a list that may not even be rendered.
 	scope := report.Scope{Repo: *only, Configured: len(cfg.Repos)}
 
-	return writeReport(rep, *format, sec, scope, *outPath, stdout, stderr)
+	return writeReport(rep, renderFormat, sec, scope, *outPath, stdout, stderr)
 }
 
 // reportInputs pairs each repo it is given with its newest snapshot and the
@@ -200,14 +206,9 @@ func reportInputs(
 // whichever renderer is chosen rather than being applied afterwards, so markdown
 // and JSON cannot disagree about what a section contains or about which repos the
 // answer covers.
-func writeReport(rep delta.Report, format string, sec report.Section, scope report.Scope, outPath string, stdout, stderr io.Writer) error {
-	render := report.Markdown
-	if format == formatJSON {
-		render = report.JSON
-	}
-
+func writeReport(rep delta.Report, format report.Format, sec report.Section, scope report.Scope, outPath string, stdout, stderr io.Writer) error {
 	if outPath == "" {
-		if err := render(stdout, rep, sec, scope); err != nil {
+		if err := report.RenderReport(stdout, format, rep, sec, scope); err != nil {
 			_, _ = fmt.Fprintf(stderr, "%v\n", err)
 			return err
 		}
@@ -219,7 +220,7 @@ func writeReport(rep delta.Report, format string, sec report.Section, scope repo
 		_, _ = fmt.Fprintf(stderr, "could not create %s: %v\n", outPath, err)
 		return err
 	}
-	if err := render(f, rep, sec, scope); err != nil {
+	if err := report.RenderReport(f, format, rep, sec, scope); err != nil {
 		_ = f.Close()
 		_, _ = fmt.Fprintf(stderr, "%v\n", err)
 		return err

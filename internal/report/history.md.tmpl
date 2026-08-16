@@ -1,0 +1,22 @@
+# {{ .Signal.Label }} for {{ .Scope.RepoName }}, {{ .GeneratedAt }}
+
+Every collection since {{ .Since }}, oldest first.
+{{ if .Empty }}
+{{ if .EverCollected -}}
+No collections in that window. The most recent one was {{ .LastCollectedAt }}, so either collection stopped or the window is shorter than the gap since it last ran.
+{{- else -}}
+This repo has never been collected. Run `repo-metrics collect` and it will start showing up here.
+{{- end }}
+{{ else }}
+| when | {{ .Signal.Label | printf "%s" }} | status |
+| --- | --- | --- |
+{{- /* A point that measured nothing says so rather than rendering a zero. That
+is the whole reason failed runs stay in the series instead of being filtered
+out: a gap in collection is the finding, and a series that silently omits its
+failures draws a straight line through the week nobody was looking. */}}
+{{- range .Cells }}
+| {{ .CollectedAt }} | {{ .Value }} | {{ .Status }} |
+{{- end }}
+
+{{ len .Points }} collections. A row reading "not collected" is a run that failed, and one reading "not measured" is a run that succeeded without producing this signal.
+{{ end -}}

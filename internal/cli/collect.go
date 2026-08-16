@@ -118,6 +118,16 @@ func printProgress(w io.Writer, name, status, summary string) {
 // answer, so the agent concludes nothing regressed. The message lists what is
 // configured, because "no repo named x" on its own does not tell you whether
 // you misspelled the repo or pointed at the wrong config.
+// repoNames lists what a config knows about, for an error that tells the caller
+// what they could have asked for instead of only that they got it wrong.
+func repoNames(repos []config.Repo) []string {
+	out := make([]string, 0, len(repos))
+	for _, r := range repos {
+		out = append(out, r.Name)
+	}
+	return out
+}
+
 func selectRepos(repos []config.Repo, only string) ([]config.Repo, error) {
 	if only == "" {
 		return repos, nil

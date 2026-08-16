@@ -1,6 +1,11 @@
 package delta
 
-import "github.com/Romero-jace/repo-metrics/internal/collect"
+import (
+	"fmt"
+	"strings"
+
+	"github.com/Romero-jace/repo-metrics/internal/collect"
+)
 
 // Measurement is a value and whether anything measured it.
 //
@@ -273,6 +278,30 @@ var signals = []Signal{
 func Signals() []Signal {
 	out := make([]Signal, len(signals))
 	copy(out, signals)
+	return out
+}
+
+// ParseSignal turns a command-line value into a registered signal.
+//
+// An unknown name is an error naming the valid ones, never a silent fallback to
+// coverage: a caller that asked to chart lint findings and got coverage instead
+// has an answer to a question nobody asked, with nothing saying so.
+func ParseSignal(s string) (Signal, error) {
+	for _, sig := range signals {
+		if SignalID(s) == sig.ID {
+			return sig, nil
+		}
+	}
+	return Signal{}, fmt.Errorf("delta: unknown signal %q, valid signals are %s", s, strings.Join(SignalNames(), ", "))
+}
+
+// SignalNames lists every registered signal, in registry order, so help text
+// cannot drift from what ParseSignal accepts.
+func SignalNames() []string {
+	out := make([]string, 0, len(signals))
+	for _, sig := range signals {
+		out = append(out, string(sig.ID))
+	}
 	return out
 }
 

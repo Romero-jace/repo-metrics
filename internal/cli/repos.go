@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"text/tabwriter"
+	"strings"
+	"time"
 
+	"github.com/Romero-jace/repo-metrics/internal/report"
 	"github.com/Romero-jace/repo-metrics/internal/store"
 )
 
@@ -14,8 +16,16 @@ import (
 func runRepos(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	set := newFlagSet("repos", stderr)
 	configPath := set.String("config", defaultConfigPath, "config file to read")
+	format := set.String("format", string(report.FormatMarkdown),
+		"which format to render: "+strings.Join(report.Formats(), ", "))
 	proceed, err := parseFlags(set, args, stderr)
 	if !proceed || err != nil {
+		return err
+	}
+
+	renderFormat, err := report.ParseFormat(*format)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "%v\n", err)
 		return err
 	}
 
@@ -40,57 +50,62 @@ func runRepos(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		byName[r.Name] = r
 	}
 
-	// Buffered until Flush, which is fine here: this is a table, not progress.
-	w := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
-	_, _ = fmt.Fprintln(w, "REPO\tLAST COLLECTED\tSTATUS\tCOVERAGE")
-
+	// The whole view is built before a single byte is written, so a store error
+	// half way through cannot leave a truncated table or a truncated JSON
+	// document behind. It used to write rows into a tabwriter as it went.
+	inputs := make([]report.ReposInput, 0, len(cfg.Repos))
 	for _, configured := range cfg.Repos {
-		// The default is the repo the database has never heard of. A repo whose
-		// runs all failed gets overwritten below with its real last attempt.
-		collected, status, coverage := "never", "never collected", "-"
-
-		if repo, ok := byName[configured.Name]; ok {
-			snap, err := st.LatestSnapshot(ctx, repo.ID)
-			if err != nil {
-				_, _ = fmt.Fprintf(stderr, "%s: %v\n", configured.Name, err)
-				return err
-			}
-			if snap != nil {
-				collected = snap.CollectedAt.UTC().Format(timeFormat)
-				status = string(snap.Status)
-
-				metrics, err := st.MetricsFor(ctx, snap.ID)
-				if err != nil {
-					_, _ = fmt.Fprintf(stderr, "%s: %v\n", configured.Name, err)
-					return err
-				}
-				coverage = formatCoverage(coverageTotals(metrics))
-			} else {
-				// LatestSnapshot skips failed rows because they carry no
-				// numbers, so a repo whose every run failed arrives here
-				// looking exactly like one that has never run. Those two call
-				// for opposite actions, go fix your build versus go run
-				// collect, so the failed row is looked up and shown with the
-				// time of the last attempt.
-				last, err := st.LatestSnapshotAny(ctx, repo.ID)
-				if err != nil {
-					_, _ = fmt.Fprintf(stderr, "%s: %v\n", configured.Name, err)
-					return err
-				}
-				if last != nil {
-					collected = last.CollectedAt.UTC().Format(timeFormat)
-					status = string(last.Status)
-					coverage = "not collected"
-				}
-			}
+		in, err := repoState(ctx, st, byName, configured.Name, stderr)
+		if err != nil {
+			return err
 		}
-
-		_, _ = fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", configured.Name, collected, status, coverage)
+		inputs = append(inputs, in)
 	}
 
-	if err := w.Flush(); err != nil {
+	if err := report.RenderRepos(stdout, renderFormat, report.BuildRepos(time.Now(), inputs)); err != nil {
 		_, _ = fmt.Fprintf(stderr, "%v\n", err)
 		return err
 	}
 	return nil
+}
+
+// repoState looks up one repo's newest usable snapshot, falling back to its
+// newest failed one.
+//
+// The two-step lookup is the same one reportInputs does and exists for the same
+// reason: LatestSnapshot skips failed rows, so a repo whose every run failed
+// comes back nil and would arrive looking exactly like a repo nobody has ever
+// collected. Those call for opposite actions, go fix your build versus go run
+// collect, so the failed row is fetched and shown with its last attempt.
+func repoState(
+	ctx context.Context, st *store.Store, byName map[string]store.Repo, name string, stderr io.Writer,
+) (report.ReposInput, error) {
+	in := report.ReposInput{Name: name}
+
+	repo, ok := byName[name]
+	if !ok {
+		return in, nil
+	}
+
+	snap, err := st.LatestSnapshot(ctx, repo.ID)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "%s: %v\n", name, err)
+		return in, err
+	}
+	if snap == nil {
+		last, err := st.LatestSnapshotAny(ctx, repo.ID)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "%s: %v\n", name, err)
+			return in, err
+		}
+		in.Snapshot = last
+		return in, nil
+	}
+
+	in.Snapshot = snap
+	if in.Metrics, err = st.MetricsFor(ctx, snap.ID); err != nil {
+		_, _ = fmt.Fprintf(stderr, "%s: %v\n", name, err)
+		return in, err
+	}
+	return in, nil
 }

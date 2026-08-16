@@ -26,22 +26,13 @@ import (
 
 	"github.com/Romero-jace/repo-metrics/internal/collect"
 	"github.com/Romero-jace/repo-metrics/internal/config"
+	"github.com/Romero-jace/repo-metrics/internal/delta"
 	"github.com/Romero-jace/repo-metrics/internal/report"
 	"github.com/Romero-jace/repo-metrics/internal/store"
 )
 
 // defaultConfigPath is where every subcommand looks unless told otherwise.
 const defaultConfigPath = "repo-metrics.yaml"
-
-// Output formats for the report subcommand.
-const (
-	formatMarkdown = "markdown"
-	formatJSON     = "json"
-)
-
-// timeFormat is how timestamps are shown to people. It matches what the report
-// renders, so a line from repos and a line from the report read the same.
-const timeFormat = "2006-01-02 15:04 UTC"
 
 // Run dispatches a subcommand. args excludes the program name. A non-nil return
 // becomes exit status 1, so every path that returns one has already explained
@@ -67,6 +58,8 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		return runReport(ctx, args[1:], stdout, stderr)
 	case "repos":
 		return runRepos(ctx, args[1:], stdout, stderr)
+	case "history":
+		return runHistory(ctx, args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		printUsage(stderr)
 		return nil
@@ -175,6 +168,8 @@ func printUsage(w io.Writer) {
 	// that people will edit, and a stray percent sign in it would otherwise turn
 	// into a formatting verb.
 	sections := strings.Join(report.Sections(), ", ")
+	formats := strings.Join(report.Formats(), ", ")
+	signals := strings.Join(delta.SignalNames(), ", ")
 
 	// A failed write to the caller's own writer is not actionable, so the
 	// error is deliberately discarded here and everywhere else we print.
@@ -186,7 +181,9 @@ usage:
   repo-metrics collect [--config FILE] [--repo NAME]
   repo-metrics report  [--config FILE] [--window 7d] [--out FILE] [--format markdown|json]
                        [--repo NAME] [--section NAME]
-  repo-metrics repos   [--config FILE]
+  repo-metrics repos   [--config FILE] [--format `+formats+`]
+  repo-metrics history --repo NAME [--config FILE] [--signal NAME] [--since 90d]
+                       [--format `+formats+`]
 
 Flags go AFTER the subcommand, the way git and docker take them:
 
@@ -225,6 +222,23 @@ report flags:
 
 repos flags:
   --config FILE   config to read (default repo-metrics.yaml)
+  --format FMT    `+formats+` (default `+string(report.FormatMarkdown)+`)
+
+history flags:
+  --config FILE   config to read (default repo-metrics.yaml)
+  --repo NAME     which repo to chart. Required: there is no sensible history
+                  of nine repos at once, so this is an error rather than a
+                  silent pick.
+  --signal NAME   which measurement to chart. One of: `+signals+`.
+                  Default is coverage.
+  --since DUR     how far back to look, like 90d or 26w. Default is 90d, which
+                  is deliberately not the report's window: that one is the
+                  offset to a baseline, and a week of history is not a trend.
+  --format FMT    `+formats+` (default `+string(report.FormatMarkdown)+`)
+
+  history keeps failed runs in the series instead of filtering them out. A gap
+  in collection is the finding, and a chart that silently omits its failures
+  draws a straight line through the week nobody was looking.
 
 collect keeps going when a repo fails and exits 1 at the end if any did, so one
 unreachable repo never costs you the other nine.

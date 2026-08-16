@@ -79,6 +79,32 @@ func (s Side) measure(sig Signal) Measurement {
 	return Measured(sig.Extract(s))
 }
 
+// Measure reads every registered signal off one snapshot's stored metrics.
+//
+// It is the entry point for anything that wants one snapshot's measurements
+// without a comparison, which is what a history series is: a run of levels
+// rather than a delta between two of them. Going through here rather than
+// summing metric keys directly is what makes history obey the same presence
+// rules as the report, and what makes a new signal appear in both at once.
+func Measure(metrics []store.Metric) map[SignalID]Measurement {
+	return measureAll(newSide(nil, metrics))
+}
+
+// CoverageCounts returns one snapshot's statement counts, and whether anything
+// measured them.
+//
+// It exists so that nothing outside this package has to know which metric keys
+// coverage is stored under, or to re-implement summing them. The counts are the
+// authority, and the second return is what stops a caller dividing by a zero
+// denominator and publishing the result as a percentage.
+func CoverageCounts(metrics []store.Metric) (Coverage, bool) {
+	side := newSide(nil, metrics)
+	if !side.has(SignalByID(SigCoverage).Marker, ScopePackage) {
+		return Coverage{}, false
+	}
+	return side.Coverage, true
+}
+
 // measureAll reads every registered signal off one side. It ranges the registry
 // so a signal that exists but was never wired here is impossible.
 func measureAll(s Side) map[SignalID]Measurement {

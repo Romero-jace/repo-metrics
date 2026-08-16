@@ -171,15 +171,18 @@ func wantInRow(t *testing.T, out, name string, wants ...string) {
 // into 0.0. That is this project's recurring bug, and a test suite that reads
 // the wire the unsafe way cannot catch it.
 type reportCoverage struct {
-	Pct         float64  `json:"pct"`
-	Covered     int      `json:"covered"`
-	Total       int      `json:"total"`
-	DeltaPoints *float64 `json:"delta_points"`
+	Value   float64  `json:"value"`
+	Covered int      `json:"covered"`
+	Total   int      `json:"total"`
+	Delta   *float64 `json:"delta"`
 }
 
+// reportTests is the shape every signal but coverage renders, since they all
+// share one SignalView on the wire. What the value means is answered once by the
+// envelope's signal catalog rather than by a per-signal key name.
 type reportTests struct {
-	Count int  `json:"count"`
-	Delta *int `json:"delta"`
+	Value float64  `json:"value"`
+	Delta *float64 `json:"delta"`
 }
 
 // reportRepo is the subset of a rendered JSON repo row these tests assert on.
@@ -272,12 +275,12 @@ func rowsOf(t *testing.T, rows *[]reportRepo, section string) []reportRepo {
 // It fails rather than returning zero when the group is absent. A helper that
 // answered 0 for a repo that measured nothing would put this project's
 // recurring bug inside the test suite that exists to catch it.
-func coveragePct(t *testing.T, r reportRepo) float64 {
+func coverageValue(t *testing.T, r reportRepo) float64 {
 	t.Helper()
 	if r.Coverage == nil {
 		t.Fatalf("no coverage group on %q, so nothing was measured about it", r.Name)
 	}
-	return r.Coverage.Pct
+	return r.Coverage.Value
 }
 
 // jsonRepo is the JSON counterpart of rowFor: it binds every assertion to one
@@ -779,13 +782,13 @@ func TestReportJSONAndOutFile(t *testing.T) {
 		t.Fatalf("want one repo in the json, got %d", len(rows))
 	}
 	got := jsonRepo(t, rows, "healthy")
-	if coveragePct(t, got) != 60 {
+	if coverageValue(t, got) != 60 {
 		t.Errorf("json = %+v, want healthy at 60", *got.Coverage)
 	}
 	// The inner null: measured, but with nothing to compare against. It is a
 	// different statement from the outer one, which is why the group has to be
 	// there and only the delta absent.
-	if got.HasBaseline || got.Coverage.DeltaPoints != nil {
+	if got.HasBaseline || got.Coverage.Delta != nil {
 		t.Errorf("want a null delta with only one snapshot, got %+v", *got.Coverage)
 	}
 
@@ -879,7 +882,7 @@ func TestReportMarksARepoWhoseEveryRunFailed(t *testing.T) {
 	}
 
 	// The healthy repo is untouched by any of this.
-	if healthy := jsonRepo(t, repos, "healthy"); coveragePct(t, healthy) != 60 {
+	if healthy := jsonRepo(t, repos, "healthy"); coverageValue(t, healthy) != 60 {
 		t.Errorf("healthy repo = %+v, want 60 percent", *healthy.Coverage)
 	}
 }
@@ -965,7 +968,7 @@ func TestReportIncludesARepoTheDatabaseHasNeverHeardOf(t *testing.T) {
 
 	// Anti-vacuity control: the collected repo still carries its own real
 	// numbers, so a change that flattened every row would not pass this.
-	if healthy := jsonRepo(t, repos, "collected"); !healthy.HasSnapshot || coveragePct(t, healthy) != 60 {
+	if healthy := jsonRepo(t, repos, "collected"); !healthy.HasSnapshot || coverageValue(t, healthy) != 60 {
 		t.Errorf("collected repo = %+v, want a snapshot at 60 percent", healthy)
 	}
 
@@ -1148,7 +1151,7 @@ func TestReportNarrowsToOneRepo(t *testing.T) {
 	}
 	// Anti-vacuity control: the surviving repo still carries its real numbers, so
 	// a change that narrowed by emptying every row would not pass this.
-	if got := jsonRepo(t, repos, "steady"); coveragePct(t, got) != 60 {
+	if got := jsonRepo(t, repos, "steady"); coverageValue(t, got) != 60 {
 		t.Errorf("the one repo asked for = %+v, want 60 percent", got)
 	}
 	// Narrowing has to reach every section, not just the table. A --repo run
@@ -1521,14 +1524,14 @@ func TestReportRepoAndSectionCompose(t *testing.T) {
 	// And it is still a real answer: the repo that was asked for, with the move
 	// it actually made, rather than an empty envelope that satisfies both filters.
 	got := jsonRepo(t, movers, "moved")
-	if coveragePct(t, got) != 60 {
+	if coverageValue(t, got) != 60 {
 		t.Errorf("moved = %+v, want 60 percent", got)
 	}
-	if got.Coverage.DeltaPoints == nil {
+	if got.Coverage.Delta == nil {
 		t.Fatalf("a mover with no delta is not a mover: %+v", *got.Coverage)
 	}
-	if *got.Coverage.DeltaPoints != 20 {
-		t.Errorf("delta = %v points, want the +20 the fixture seeded", *got.Coverage.DeltaPoints)
+	if *got.Coverage.Delta != 20 {
+		t.Errorf("delta = %v points, want the +20 the fixture seeded", *got.Coverage.Delta)
 	}
 }
 
@@ -1590,7 +1593,7 @@ func TestReportWriteDestinationsAndFormats(t *testing.T) {
 			t.Fatalf("report --format json: %v (stderr: %s)", err, stderr)
 		}
 		rows := rowsOf(t, decodeReport(t, stdout).Repos, "repos")
-		if got := jsonRepo(t, rows, "healthy"); coveragePct(t, got) != 60 {
+		if got := jsonRepo(t, rows, "healthy"); coverageValue(t, got) != 60 {
 			t.Errorf("json = %+v, want healthy at 60", got)
 		}
 	})
@@ -1632,7 +1635,7 @@ func TestReportWriteDestinationsAndFormats(t *testing.T) {
 		// The format flag has to reach the file, not just stdout. Writing
 		// markdown into a .json a pipeline is about to parse is the failure.
 		rows := rowsOf(t, decodeReport(t, string(written)).Repos, "repos")
-		if got := jsonRepo(t, rows, "healthy"); coveragePct(t, got) != 60 {
+		if got := jsonRepo(t, rows, "healthy"); coverageValue(t, got) != 60 {
 			t.Errorf("the written json = %+v, want healthy at 60", got)
 		}
 	})

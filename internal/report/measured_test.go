@@ -70,8 +70,22 @@ func TestUnmeasuredTestsAreNotRenderedAsZero(t *testing.T) {
 	if !ok {
 		t.Fatalf("tests: got %v for the measured repo, want an object", rows[repoFresh]["tests"])
 	}
-	if got := measuredTests["packages_without_tests"]; got != float64(3) {
-		t.Errorf("tests.packages_without_tests: got %v, want 3; this zero-free count was really measured", got)
+	if got := measuredTests["value"]; got == nil {
+		t.Error("tests.value is null for a repo whose stream was parsed")
+	}
+
+	// The untested-package tally moved out of the tests group and became a
+	// signal of its own, so it now carries a delta: a repo gaining an untested
+	// package is news, and inside the tests group it could never say so.
+	untested, ok := rows[repoFresh]["untested_packages"].(map[string]any)
+	if !ok {
+		t.Fatalf("untested_packages: got %v for the measured repo, want an object", rows[repoFresh]["untested_packages"])
+	}
+	if got := untested["value"]; got != float64(3) {
+		t.Errorf("untested_packages.value: got %v, want 3; this zero-free count was really measured", got)
+	}
+	if rows[repoQuiet]["untested_packages"] != nil {
+		t.Errorf("untested_packages: got %v for the ingest-mode repo, want null", rows[repoQuiet]["untested_packages"])
 	}
 }
 

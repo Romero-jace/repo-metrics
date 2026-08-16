@@ -215,7 +215,7 @@ func coverageOf(t *testing.T, v report.RepoView) report.CoverageView {
 	return *v.Coverage
 }
 
-func testsOf(t *testing.T, v report.RepoView) report.TestsView {
+func testsOf(t *testing.T, v report.RepoView) report.SignalView {
 	t.Helper()
 	if v.Tests == nil {
 		t.Fatalf("%s: tests group is absent, so there is no number to check", v.Name)
@@ -385,9 +385,9 @@ func TestNoBaselineIsNeverRenderedAsADelta(t *testing.T) {
 	}
 	// The inner null, not the outer one: this repo measured both groups on its
 	// first run, so both are present and only the deltas inside them are absent.
-	if coverageOf(t, view).DeltaPoints != nil || testsOf(t, view).Delta != nil {
+	if coverageOf(t, view).Delta != nil || testsOf(t, view).Delta != nil {
 		t.Fatalf("%s has no baseline but the view carries deltas: coverage=%v tests=%v",
-			repoFresh, view.Coverage.DeltaPoints, view.Tests.Delta)
+			repoFresh, view.Coverage.Delta, view.Tests.Delta)
 	}
 
 	lines := linesMentioning(md, repoFresh)
@@ -413,7 +413,7 @@ func TestNoBaselineIsNeverRenderedAsADelta(t *testing.T) {
 	if !quiet.HasBaseline {
 		t.Fatalf("fixture is wrong: %s is supposed to have a baseline", repoQuiet)
 	}
-	if d := coverageOf(t, quiet).DeltaPoints; d == nil || *d != 0 {
+	if d := coverageOf(t, quiet).Delta; d == nil || *d != 0 {
 		t.Fatalf("fixture is wrong: %s should have a zero coverage delta, got %v", repoQuiet, d)
 	}
 	quietRow := repoRow(t, md, repoQuiet)
@@ -461,16 +461,16 @@ func TestMarkdownAndJSONAgree(t *testing.T) {
 			t.Fatalf("%s tests group: json present=%v, Build present=%v", want.Name, got.Tests != nil, want.Tests != nil)
 		}
 		if want.Coverage != nil {
-			if got.Coverage.Pct != want.Coverage.Pct {
-				t.Errorf("%s coverage.pct: json %v, Build %v", want.Name, got.Coverage.Pct, want.Coverage.Pct)
+			if got.Coverage.Value != want.Coverage.Value {
+				t.Errorf("%s coverage.value: json %v, Build %v", want.Name, got.Coverage.Value, want.Coverage.Value)
 			}
-			checkFloatPtr(t, want.Name+" coverage.delta_points", got.Coverage.DeltaPoints, want.Coverage.DeltaPoints)
+			checkFloatPtr(t, want.Name+" coverage.delta", got.Coverage.Delta, want.Coverage.Delta)
 		}
 		if want.Tests != nil {
-			if got.Tests.Count != want.Tests.Count {
-				t.Errorf("%s tests.count: json %d, Build %d", want.Name, got.Tests.Count, want.Tests.Count)
+			if got.Tests.Value != want.Tests.Value {
+				t.Errorf("%s tests.value: json %v, Build %v", want.Name, got.Tests.Value, want.Tests.Value)
 			}
-			checkIntPtr(t, want.Name+" tests.delta", got.Tests.Delta, want.Tests.Delta)
+			checkFloatPtr(t, want.Name+" tests.delta", got.Tests.Delta, want.Tests.Delta)
 		}
 
 		// A failed collection has no figures to agree about, and since the
@@ -486,29 +486,18 @@ func TestMarkdownAndJSONAgree(t *testing.T) {
 		// The markdown prints these same figures through the template's own
 		// formatters, so the two renderings have to show the same numbers.
 		row := repoRow(t, md, want.Name)
-		wantPct := fmt.Sprintf("%.1f%%", coverageOf(t, want).Pct)
+		wantPct := fmt.Sprintf("%.1f%%", coverageOf(t, want).Value)
 		if !strings.Contains(row, "| "+wantPct+" |") {
 			t.Errorf("%s: markdown row does not show coverage %s:\n%s", want.Name, wantPct, row)
 		}
-		wantTests := "| " + strconv.Itoa(testsOf(t, want).Count) + " |"
+		wantTests := "| " + strconv.FormatFloat(testsOf(t, want).Value, 'f', -1, 64) + " |"
 		if !strings.Contains(row, wantTests) {
-			t.Errorf("%s: markdown row does not show test count %d:\n%s", want.Name, want.Tests.Count, row)
+			t.Errorf("%s: markdown row does not show test count %v:\n%s", want.Name, want.Tests.Value, row)
 		}
 	}
 }
 
 func checkFloatPtr(t *testing.T, label string, got, want *float64) {
-	t.Helper()
-	switch {
-	case got == nil && want == nil:
-	case got == nil || want == nil:
-		t.Errorf("%s: json %v, Build %v (one is absent and the other is not)", label, got, want)
-	case *got != *want:
-		t.Errorf("%s: json %v, Build %v", label, *got, *want)
-	}
-}
-
-func checkIntPtr(t *testing.T, label string, got, want *int) {
 	t.Helper()
 	switch {
 	case got == nil && want == nil:
@@ -551,7 +540,7 @@ func TestJSONWireShape(t *testing.T) {
 		t.Fatalf("%s missing from the json", repoMover)
 	}
 
-	for group, field := range map[string]string{"coverage": "delta_points", "tests": "delta"} {
+	for group, field := range map[string]string{"coverage": "delta", "tests": "delta"} {
 		freshGroup := wireGroup(t, fresh, repoFresh, group)
 		v, present := freshGroup[field]
 		if !present {

@@ -78,38 +78,17 @@ type RepoDelta struct {
 	HeadSignals map[SignalID]Measurement
 	BaseSignals map[SignalID]Measurement
 
+	// HeadCoverage and BaseCoverage are coverage's raw statement counts. They
+	// carry no measured flag of their own, so read them through CoverageDetail
+	// rather than directly: Pct() on a head that stored nothing answers 0 for
+	// want of a denominator, and that zero is exactly the figure this package
+	// exists to withhold.
+	//
+	// They stay as counts because repo coverage is the sum of covered over the
+	// sum of total, which is not the mean of the per-package rates, and because
+	// the culprit ranking needs the per-package map anyway.
 	HeadCoverage Coverage
 	BaseCoverage Coverage
-	HeadTests    int
-	BaseTests    int
-	// PkgWithoutTests is from the newer snapshot.
-	PkgWithoutTests int
-	// HasTestData is false when the collection never parsed a test stream at
-	// all, which happens in ingest mode and whenever stdout_format is unset.
-	//
-	// Unmeasured is not the same as zero, and conflating them is the same
-	// silent wrong answer as reporting a never-collected repo at 0% coverage.
-	// A repo with seventy test files rendering as "tests 0" tells the reader
-	// something false with no hint that anything is missing.
-	HasTestData     bool
-	BaseHasTestData bool
-	// HasCoverageData is false when the snapshot stored no coverage metrics at
-	// all. That is what a coverage profile carrying only its "mode: set" header
-	// produces: it parses clean, no package is instrumented, and nothing
-	// downgrades the status, so the snapshot is stored ok. HeadCoverage is then
-	// {0, 0} and Pct() returns 0, which reads as a repo measured at zero.
-	//
-	// Presence is the signal, not value. A repo whose packages genuinely cover
-	// nothing still stored a metric per package, and calling that unmeasured
-	// would be the same mistake in the other direction.
-	//
-	// This is deliberately separate from whether a snapshot exists at all. The
-	// two answer different questions, and reusing that gate here would hide this
-	// gap behind a name that does not describe it.
-	HasCoverageData bool
-	// BaseHasCoverageData is the same question asked of the baseline, and both
-	// halves are needed before any coverage comparison means anything.
-	BaseHasCoverageData bool
 
 	// HasBaseline is false when there is no earlier snapshot to compare
 	// against. There is no synthetic delta in that case: the report says so.
@@ -117,8 +96,19 @@ type RepoDelta struct {
 	// EnvChanged means the two snapshots were measured under different
 	// toolchains, so the difference between them is not purely code.
 	EnvChanged bool
-	// IsMover means this repo cleared the reporting threshold.
+	// IsMover means this repo cleared the reporting threshold on at least one
+	// signal that is allowed to nominate.
 	IsMover bool
+	// MovedBy names the signals that qualified it, in registry order. With one
+	// signal "this repo moved" was a complete answer; with several it is not,
+	// and a report that says a repo moved without saying which measurement moved
+	// makes the reader open the table to find out.
+	MovedBy []SignalID
+	// Severity ranks movers against each other: the largest qualifying move
+	// measured in multiples of its own floor. That is what makes a four point
+	// coverage drop and three new test failures comparable at all, since they
+	// are not in the same unit and never will be.
+	Severity float64
 
 	// Culprits are the packages that account for the repo's move, ranked by
 	// absolute contribution and capped.
@@ -195,44 +185,6 @@ func (r RepoDelta) CoverageDetail() (CoverageDetail, bool) {
 		Added:    r.Added,
 		Removed:  r.Removed,
 	}, true
-}
-
-// CoverageChange is the repo's movement in percentage points.
-//
-// It reads through the generic layer rather than subtracting the counts, so the
-// headline percentage has one implementation and the comparison rule has one
-// implementation, and neither is coverage-specific any more.
-func (r RepoDelta) CoverageChange() float64 {
-	d, _ := r.Signal(SigCoverage).Change.Delta()
-	return d
-}
-
-// TestChange is the repo's movement in test count.
-//
-// Only meaningful when TestChangeMeaningful reports true: subtracting an
-// unmeasured side from a measured one manufactures the whole count as a delta.
-func (r RepoDelta) TestChange() int {
-	d, _ := r.Signal(SigTests).Change.Delta()
-	return int(d)
-}
-
-// CoverageChangeMeaningful reports whether both snapshots actually measured
-// coverage.
-//
-// A baseline existing is not enough. A head that stored no coverage subtracts
-// its zero from a real baseline and posts the whole baseline as this week's
-// drop, then blames whichever package was largest. That is the fabricated cliff
-// a failed run was already fixed for, reached instead through a profile that
-// parsed cleanly and simply had nothing in it.
-func (r RepoDelta) CoverageChangeMeaningful() bool {
-	return r.Signal(SigCoverage).Change.Meaningful()
-}
-
-// TestChangeMeaningful reports whether both snapshots actually measured tests.
-// Without it, a repo that gained a stdout_format between runs would post its
-// entire test suite as this week's growth.
-func (r RepoDelta) TestChangeMeaningful() bool {
-	return r.Signal(SigTests).Change.Meaningful()
 }
 
 // Input is one repo's two snapshots and their metrics.
@@ -314,10 +266,6 @@ func computeRepo(in Input, opts Options) RepoDelta {
 
 	headPkgs := head.Packages
 	d.HeadCoverage = head.Coverage
-	d.HeadTests = sumMetric(in.HeadMetrics, collect.KeyTestCount)
-	d.PkgWithoutTests = repoLevel(in.HeadMetrics, collect.KeyPkgWithoutTest)
-	d.HasTestData = hasTestData(in.HeadMetrics)
-	d.HasCoverageData = hasCoverageData(in.HeadMetrics)
 
 	if in.Base == nil {
 		return d
@@ -329,9 +277,6 @@ func computeRepo(in Input, opts Options) RepoDelta {
 
 	basePkgs := base.Packages
 	d.BaseCoverage = base.Coverage
-	d.BaseTests = sumMetric(in.BaseMetrics, collect.KeyTestCount)
-	d.BaseHasTestData = hasTestData(in.BaseMetrics)
-	d.BaseHasCoverageData = hasCoverageData(in.BaseMetrics)
 
 	if in.Head != nil && in.Head.Env != in.Base.Env {
 		d.EnvChanged = true
@@ -349,10 +294,68 @@ func computeRepo(in Input, opts Options) RepoDelta {
 	// while its delta renders as null, because the gate one layer down is
 	// working correctly. Selecting a mover and publishing its delta have to ask
 	// the same question.
-	d.IsMover = (d.CoverageChangeMeaningful() && math.Abs(d.CoverageChange()) >= opts.MinRepoDelta) ||
-		(d.TestChangeMeaningful() && d.TestChange() != 0)
+	d.MovedBy, d.Severity = nominate(d, base, opts)
+	d.IsMover = len(d.MovedBy) > 0
 
 	return d
+}
+
+// nominate answers which signals, if any, make this repo worth leading with.
+//
+// Selection and publication ask the same question, because both go through
+// Compare. That property is the one this function exists to preserve across
+// seven signals: for a long time only the test half of the old IsMover had a
+// guard, so a head that measured coverage over a baseline that did not would
+// clear any threshold on headPct minus zero, lead the report as the week's
+// biggest mover, and render its delta as null because the gate one layer down
+// was working correctly.
+func nominate(d RepoDelta, base Side, opts Options) (movedBy []SignalID, severity float64) {
+	for _, sig := range signals {
+		// Nomination is opt-in per signal rather than a property of having a
+		// delta. Without that, a signal that moves on every run, like a test
+		// suite's wall time on a shared machine, makes every repo a mover every
+		// week and buries the ones that matter.
+		if !sig.Nominates {
+			continue
+		}
+
+		change, meaningful := d.Signal(sig.ID).Change.Delta()
+		if !meaningful || change == 0 {
+			continue
+		}
+
+		floor := sig.MinMove
+		if sig.ID == SigCoverage {
+			// Coverage's floor comes from the config, which has always spelled
+			// it min_repo_delta. Reading it here rather than duplicating it into
+			// the registry is what keeps existing config files working.
+			floor = opts.MinRepoDelta
+		}
+		if floor <= 0 {
+			floor = 1
+		}
+		if math.Abs(change) < floor {
+			continue
+		}
+
+		// A relative floor on top, for quantities that are noisy in proportion
+		// to their size. A suite has to get meaningfully slower, not slower by
+		// some fixed number of milliseconds that means one thing for a
+		// three-second suite and another for a ten-minute one.
+		if sig.MinMoveFraction > 0 {
+			if baseValue, ok := base.measure(sig).Value(); ok {
+				if math.Abs(change) < sig.MinMoveFraction*math.Abs(baseValue) {
+					continue
+				}
+			}
+		}
+
+		movedBy = append(movedBy, sig.ID)
+		if s := math.Abs(change) / floor; s > severity {
+			severity = s
+		}
+	}
+	return movedBy, severity
 }
 
 // culprits ranks packages by how much of the repo's move each one accounts for.
@@ -450,59 +453,6 @@ func sumCoverage(pkgs map[string]Coverage) Coverage {
 		total.Total += c.Total
 	}
 	return total
-}
-
-func sumMetric(metrics []store.Metric, key string) int {
-	var sum float64
-	for _, m := range metrics {
-		if m.Key == key && m.Scope != "" {
-			sum += m.Value
-		}
-	}
-	return int(sum)
-}
-
-// hasTestData reports whether a test stream was parsed for this snapshot.
-//
-// The marker is the repo-level pkg.without_tests metric, which the collector
-// emits unconditionally whenever it parses stdout, including when the value is
-// zero. Presence is the signal, so this deliberately ignores the value; summing
-// test.count instead would read a genuinely empty repo as unmeasured.
-func hasTestData(metrics []store.Metric) bool {
-	for _, m := range metrics {
-		if m.Key == collect.KeyPkgWithoutTest && m.Scope == "" {
-			return true
-		}
-	}
-	return false
-}
-
-// hasCoverageData reports whether any coverage was stored for this snapshot.
-//
-// It mirrors hasTestData: the marker is presence of a package-scoped coverage
-// metric, and the value is deliberately ignored so that a package covering none
-// of its statements still counts as measured. A header-only coverage profile
-// stores no such metric, and that is the case this exists to tell apart from a
-// repo genuinely sitting at zero.
-func hasCoverageData(metrics []store.Metric) bool {
-	for _, m := range metrics {
-		if m.Scope == "" {
-			continue
-		}
-		if m.Key == collect.KeyCoveredStmts || m.Key == collect.KeyTotalStmts {
-			return true
-		}
-	}
-	return false
-}
-
-func repoLevel(metrics []store.Metric, key string) int {
-	for _, m := range metrics {
-		if m.Key == key && m.Scope == "" {
-			return int(m.Value)
-		}
-	}
-	return 0
 }
 
 func maxInt(a, b int) int {

@@ -9,8 +9,9 @@ Only covering the repo `{{ .Scope.RepoName }}`, out of {{ repos .Scope.Configure
 ## What moved
 {{ range .Movers }}
 ### {{ .Name }}
-
-{{ with .Coverage }}Coverage {{ pct .Pct }}{{ with .DeltaPoints }}, {{ points . }} on the week{{ end }}.{{ end }} {{ if .Tests }}Tests {{ .Tests.Count }}{{ with .Tests.Delta }}{{ if ne . 0 }}, {{ signed . }}{{ end }}{{ end }}.{{ else }}Tests were not measured for this repo.{{ end }}
+{{ range .MovedSignals }}
+{{ .Label }} {{ .Value }}, {{ .Delta }} on the week{{ with .Verdict }}, {{ . }}{{ end }}.
+{{- end }}
 {{- if .EnvWarned }}
 
 Heads up: these two snapshots were taken under different toolchains, so some of this move is not code.
@@ -37,33 +38,24 @@ Nothing cleared the reporting threshold this time.
 {{- if .ShowRepos }}
 ## Every repo
 
-| repo | coverage | change | tests | change | packages without tests | last collected |
-| --- | --- | --- | --- | --- | --- | --- |
-{{- /* A failed run came back with no metrics, so every count on it is a Go zero
-value rather than a measurement. Printing them would claim the repo sits at 0.0%
-with every package tested, and subtracting a healthy baseline from those zeros
-would post a cliff this week and a recovery next week, neither of which happened.
-A repo that has never been collected at all gets the same row for the same
-reason: its zeros were never measured either.
-A third case comes back status ok and still measured nothing: a coverage profile
-carrying only its header instruments no packages, so the repo's total is zero
-statements and its percentage is zero for want of a denominator. That row says
-not measured rather than 0.0% for the same reason as the other two.
-Every cell below branches on the measurement group being there rather than on a
-boolean beside it, so there is no number for the template to reach for when the
-group is absent.
-Partial snapshots are different: they carry real numbers and keep showing them. */}}
+| repo |{{ range .SignalColumns }} {{ .Label }} | change |{{ end }} last collected |
+| --- |{{ range .SignalColumns }} --- | --- |{{ end }} --- |
+{{- /* Every cell comes from RepoView.cell, which decides the words for each
+state in one place rather than once per column. A failed run and a repo nobody
+has ever collected both say "not collected"; a signal nobody configured says
+"not measured"; a measured signal with no baseline says "no baseline yet". None
+of those branches lives here any more, which is why adding a signal is a
+registry row rather than another arm of a template conditional.
+The rule those words enforce is unchanged: a failed run came back with no
+metrics, so every count on it is a Go zero rather than a measurement, and
+printing them would claim the repo sits at 0.0% with every package tested. */}}
 {{- range .Repos }}
-{{- if or (eq .Status "failed") (not .HasSnapshot) }}
-| {{ .Name }} | not collected | not collected | not collected | not collected | not collected | {{ if .CollectedAt }}{{ .CollectedAt }}{{ else }}never{{ end }} |
-{{- else }}
-| {{ .Name }} | {{ with .Coverage }}{{ pct .Pct }}{{ else }}not measured{{ end }} | {{ if not .Coverage }}not measured{{ else if .HasBaseline }}{{ points .Coverage.DeltaPoints }}{{ if .EnvWarned }}, toolchain changed{{ end }}{{ else }}no baseline yet{{ end }} | {{ with .Tests }}{{ .Count }}{{ else }}not measured{{ end }} | {{ if not .Tests }}not measured{{ else if .Tests.Delta }}{{ signed .Tests.Delta }}{{ else }}no baseline yet{{ end }} | {{ with .Tests }}{{ .PackagesWithoutTests }}{{ else }}not measured{{ end }} | {{ if .CollectedAt }}{{ .CollectedAt }}{{ else }}never{{ end }} |
-{{- end }}
+| {{ .Name }} |{{ range .TableSignals }} {{ .Value }} | {{ .Delta }} |{{ end }} {{ if .CollectedAt }}{{ .CollectedAt }}{{ else }}never{{ end }}{{ if .EnvWarned }}, toolchain changed{{ end }} |
 {{- end }}
 
 Coverage is covered statements over total statements across the whole repo, so a big package counts for more than a small one.
 {{ if anyEnvWarned .Repos }}
-A row marked toolchain changed had its two snapshots taken under different toolchains, so some of that move is not code. It is flagged here whether or not the repo moved enough to lead the report.
+A row marked toolchain changed had its two snapshots taken under different toolchains, so some of that move is not code. It is flagged whether or not the repo moved enough to lead the report.
 {{ end -}}
 {{ if anyPackageChurn .Repos }}
 ## Packages that came and went

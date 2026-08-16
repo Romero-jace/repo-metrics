@@ -31,7 +31,7 @@ func TestUnmeasuredTestsAreDistinctFromZeroTests(t *testing.T) {
 		Head: snap("go1.26"), HeadMetrics: cov("m/a", 500, 1000),
 	}, opts())
 
-	if unmeasured.HasTestData {
+	if measuredSignal(unmeasured, delta.SigTests) {
 		t.Error("HasTestData is true for a snapshot whose stdout was never parsed")
 	}
 
@@ -42,11 +42,11 @@ func TestUnmeasuredTestsAreDistinctFromZeroTests(t *testing.T) {
 		Head: snap("go1.26"), HeadMetrics: withTests(cov("m/a", 0, 1000), 0, 1),
 	}, opts())
 
-	if !measuredZero.HasTestData {
+	if !measuredSignal(measuredZero, delta.SigTests) {
 		t.Error("HasTestData is false for a repo that parsed a stream and found no tests")
 	}
-	if measuredZero.HeadTests != 0 {
-		t.Errorf("HeadTests: got %d, want 0", measuredZero.HeadTests)
+	if value, _ := signalValue(measuredZero, delta.SigTests); value != 0 {
+		t.Errorf("test count: got %v, want 0", value)
 	}
 }
 
@@ -59,12 +59,12 @@ func TestTestDeltaNeedsBothSidesMeasured(t *testing.T) {
 		Base: snap("go1.26"), BaseMetrics: cov("m/a", 500, 1000), // no test data
 	}, opts())
 
-	if gained.TestChangeMeaningful() {
+	if testMeaningful(gained) {
 		t.Error("test delta treated as meaningful when the baseline never measured tests")
 	}
 	if gained.IsMover {
-		t.Errorf("repo became a mover purely from test data appearing: coverage moved %.2f, tests %d",
-			gained.CoverageChange(), gained.TestChange())
+		t.Errorf("repo became a mover purely from test data appearing: coverage moved %.2f, tests %v",
+			covChange(gained), testChange(gained))
 	}
 
 	both := one(t, delta.Input{
@@ -73,11 +73,11 @@ func TestTestDeltaNeedsBothSidesMeasured(t *testing.T) {
 		Base: snap("go1.26"), BaseMetrics: withTests(cov("m/a", 500, 1000), 390, 0),
 	}, opts())
 
-	if !both.TestChangeMeaningful() {
+	if !testMeaningful(both) {
 		t.Error("test delta not meaningful when both sides measured tests")
 	}
-	if both.TestChange() != 10 {
-		t.Errorf("TestChange: got %d, want 10", both.TestChange())
+	if testChange(both) != 10 {
+		t.Errorf("test change: got %v, want 10", testChange(both))
 	}
 	if !both.IsMover {
 		t.Error("a real test-count change should make a repo a mover")
@@ -94,7 +94,7 @@ func TestHasTestDataIgnoresTheValueAndReadsPresence(t *testing.T) {
 			store.Metric{Key: collect.KeyPkgWithoutTest, Scope: "", Value: 0}),
 	}}, opts(), time.Now())
 
-	if !got.Repos[0].HasTestData {
+	if !measuredSignal(got.Repos[0], delta.SigTests) {
 		t.Error("a pkg.without_tests metric of zero was read as no test data at all")
 	}
 }

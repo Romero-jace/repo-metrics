@@ -95,8 +95,8 @@ func TestCulpritsRankByContributionNotPercentageSwing(t *testing.T) {
 	// Contributions decompose the repo's move, which is what makes them
 	// trustworthy to quote in a sentence.
 	sum := got.Culprits[0].Contribution + got.Culprits[1].Contribution
-	if !approx(sum, got.CoverageChange()) {
-		t.Errorf("contributions sum to %.2f but the repo moved %.2f", sum, got.CoverageChange())
+	if !approx(sum, covChange(got)) {
+		t.Errorf("contributions sum to %.2f but the repo moved %.2f", sum, covChange(got))
 	}
 }
 
@@ -134,10 +134,10 @@ func TestNoBaselineProducesNoDelta(t *testing.T) {
 	if len(got.Culprits) != 0 {
 		t.Errorf("culprits invented without a baseline: %+v", got.Culprits)
 	}
-	if got.CoverageChange() != got.HeadCoverage.Pct() {
+	if covChange(got) != got.HeadCoverage.Pct() {
 		// Base is a zero Coverage, so this is arithmetic, not a claim. The
 		// report is responsible for not printing it.
-		t.Logf("CoverageChange with no baseline is %.2f and must not be rendered", got.CoverageChange())
+		t.Logf("CoverageChange with no baseline is %.2f and must not be rendered", covChange(got))
 	}
 }
 
@@ -236,8 +236,8 @@ func TestMoverThreshold(t *testing.T) {
 			}, opts())
 
 			if got.IsMover != tc.wantIsMover {
-				t.Errorf("IsMover: got %v, want %v (coverage moved %.2f, tests moved %d)",
-					got.IsMover, tc.wantIsMover, got.CoverageChange(), got.TestChange())
+				t.Errorf("IsMover: got %v, want %v (coverage moved %.2f, tests moved %v)",
+					got.IsMover, tc.wantIsMover, covChange(got), testChange(got))
 			}
 		})
 	}
@@ -339,4 +339,32 @@ func TestZeroTotalCoverageIsZeroNotNaN(t *testing.T) {
 	if got := c.Pct(); got != 0 || math.IsNaN(got) {
 		t.Errorf("Pct on empty coverage: got %v, want 0", got)
 	}
+}
+
+// The signal layer replaced a field and a method per signal, so these read one
+// signal the way production reads it. They are helpers rather than restored
+// methods because the point of the refactor is that there is no per-signal
+// method left to restore.
+func covChange(d delta.RepoDelta) float64 {
+	c, _ := d.Signal(delta.SigCoverage).Change.Delta()
+	return c
+}
+
+func testChange(d delta.RepoDelta) float64 {
+	c, _ := d.Signal(delta.SigTests).Change.Delta()
+	return c
+}
+
+func testMeaningful(d delta.RepoDelta) bool {
+	return d.Signal(delta.SigTests).Change.Meaningful()
+}
+
+// signalValue returns a signal's measurement and whether there is one, so a
+// test asserting on absence says so rather than comparing against zero.
+func signalValue(d delta.RepoDelta, id delta.SignalID) (float64, bool) {
+	return d.Signal(id).Head.Value()
+}
+
+func measuredSignal(d delta.RepoDelta, id delta.SignalID) bool {
+	return d.Signal(id).Head.IsMeasured()
 }

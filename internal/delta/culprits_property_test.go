@@ -202,7 +202,7 @@ func checkCase(t *testing.T, label string, c genCase, rng *rand.Rand) {
 	}{
 		{"head coverage", got.HeadCoverage.Pct()},
 		{"base coverage", got.BaseCoverage.Pct()},
-		{"coverage change", got.CoverageChange()},
+		{"coverage change", covChange(got)},
 	} {
 		if math.IsNaN(v.f) || math.IsInf(v.f, 0) {
 			t.Fatalf("%s: %s is %v", label, v.name, v.f)
@@ -284,8 +284,8 @@ func checkCase(t *testing.T, label string, c genCase, rng *rand.Rand) {
 	for _, p := range got.Culprits {
 		sum += p.Contribution
 	}
-	if diff := math.Abs(sum - got.CoverageChange()); diff > 1e-9 {
+	if diff := math.Abs(sum - covChange(got)); diff > 1e-9 {
 		t.Fatalf("%s: culprits sum to %.12f but the repo moved %.12f (off by %g); with no package total changing these must agree exactly",
-			label, sum, got.CoverageChange(), diff)
+			label, sum, covChange(got), diff)
 	}
 }

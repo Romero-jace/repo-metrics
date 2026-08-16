@@ -33,20 +33,26 @@ func TestBuildDropsAMoverThatMeasuredNothing(t *testing.T) {
 				Repo: store.Repo{ID: 1, Name: "ungrounded"},
 				Head: head,
 				// The shape that matters: something upstream called it a mover
-				// while nothing was measured to move.
-				IsMover:         true,
-				HasBaseline:     true,
-				HasCoverageData: false,
-				BaseCoverage:    delta.Coverage{Covered: 72, Total: 100},
+				// while nothing was measured to move. The head signal map is
+				// deliberately empty, which is what an unmeasured signal looks
+				// like now, and is also what a hand-built literal produces by
+				// default. Failing closed on that default is the point.
+				IsMover:      true,
+				MovedBy:      []delta.SignalID{delta.SigCoverage},
+				HasBaseline:  true,
+				BaseSignals:  map[delta.SignalID]delta.Measurement{delta.SigCoverage: delta.Measured(72)},
+				BaseCoverage: delta.Coverage{Covered: 72, Total: 100},
 			},
 			{
-				Repo:            store.Repo{ID: 2, Name: "grounded"},
-				Head:            &store.Snapshot{ID: 2, RepoID: 2, CollectedAt: fixedNow(), Status: store.StatusOK},
-				IsMover:         true,
-				HasBaseline:     true,
-				HasCoverageData: true,
-				HeadCoverage:    delta.Coverage{Covered: 40, Total: 100},
-				BaseCoverage:    delta.Coverage{Covered: 72, Total: 100},
+				Repo:         store.Repo{ID: 2, Name: "grounded"},
+				Head:         &store.Snapshot{ID: 2, RepoID: 2, CollectedAt: fixedNow(), Status: store.StatusOK},
+				IsMover:      true,
+				MovedBy:      []delta.SignalID{delta.SigCoverage},
+				HasBaseline:  true,
+				HeadSignals:  map[delta.SignalID]delta.Measurement{delta.SigCoverage: delta.Measured(40)},
+				BaseSignals:  map[delta.SignalID]delta.Measurement{delta.SigCoverage: delta.Measured(72)},
+				HeadCoverage: delta.Coverage{Covered: 40, Total: 100},
+				BaseCoverage: delta.Coverage{Covered: 72, Total: 100},
 			},
 		},
 	}

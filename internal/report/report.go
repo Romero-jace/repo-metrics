@@ -21,18 +21,23 @@ import (
 //go:embed report.md.tmpl
 var markdownTemplate string
 
+// funcs is what the template can call.
+//
+// It is deliberately small. Everything that used to format a typed pointer for
+// the template (pct, points, signed, and an ne that shadowed the builtin because
+// the builtin cannot compare a *int to an int) is gone: SignalCell formats in
+// Go now, so the template never holds a pointer and never needs to know a unit.
+// What is left is the culprit list, which is coverage-specific, and the prose
+// helpers.
 var funcs = template.FuncMap{
-	// pct renders a coverage percentage.
-	"pct": func(f float64) string { return fmt.Sprintf("%.1f%%", f) },
+	// pts renders a change in percentage points, always signed, so a reader
+	// never has to work out which direction it went.
+	"pts": func(f float64) string { return fmt.Sprintf("%+.1f pts", f) },
 
-	// pctOf is pct over a figure that might not exist. An added package has no
-	// earlier percentage and a removed one has no later percentage, and printing
-	// either as 0.0% says the package climbed from nothing or collapsed to it.
-	//
-	// It is separate from pct for the same reason points is separate from pts:
-	// text/template will silently take the address of an addressable float64 to
-	// satisfy a *float64 parameter, so one pointer-typed func would accept a
-	// plain value by accident and the nil branch would look dead.
+	// pctOf is a percentage over a figure that might not exist. An added package
+	// has no earlier percentage and a removed one has no later percentage, and
+	// printing either as 0.0% says the package climbed from nothing or collapsed
+	// to it.
 	"pctOf": func(f *float64) string {
 		if f == nil {
 			return "not measured"
@@ -40,30 +45,16 @@ var funcs = template.FuncMap{
 		return fmt.Sprintf("%.1f%%", *f)
 	},
 
-	// pts renders a change in percentage points, always signed, so a reader
-	// never has to work out which direction it went.
-	"pts": func(f float64) string { return fmt.Sprintf("%+.1f pts", f) },
-
-	// points is pts over a delta that might not exist. Absent is not zero, and
-	// the template must never be able to print a synthetic "+0.0 pts" for a repo
-	// that has nothing to compare against.
-	//
-	// It is deliberately separate from pts rather than one func over any: text/
-	// template will silently take the address of an addressable float64 to
-	// satisfy a *float64 parameter, so a single pointer-typed func would accept
-	// a plain value by accident and the nil branch would look dead.
-	"points": func(f *float64) string {
-		if f == nil {
-			return "no baseline yet"
+	// anyPackageChurn goes through the same nil-reading accessors the churn
+	// section itself uses, so a repo that measured no coverage can never make the
+	// heading appear over rows that then print nothing.
+	"anyPackageChurn": func(repos []RepoView) bool {
+		for _, r := range repos {
+			if len(r.AddedPackages()) > 0 || len(r.RemovedPackages()) > 0 {
+				return true
+			}
 		}
-		return fmt.Sprintf("%+.1f pts", *f)
-	},
-
-	"signed": func(n *int) string {
-		if n == nil {
-			return "no baseline yet"
-		}
-		return fmt.Sprintf("%+d", *n)
+		return false
 	},
 
 	// repos renders a count of repos with its noun, so a single-repo config
@@ -88,24 +79,6 @@ var funcs = template.FuncMap{
 		default:
 			return "less than a minute"
 		}
-	},
-
-	// ne is not a convenience shadow of the builtin: the builtin cannot compare
-	// a *int against an int and fails with "incompatible types for comparison",
-	// which is what the template needs for an optional test delta. Removing this
-	// breaks rendering at run time, not at compile time.
-	"ne": func(n *int, v int) bool { return n != nil && *n != v },
-
-	// anyPackageChurn goes through the same nil-reading accessors the churn
-	// section itself uses, so a repo that measured no coverage can never make the
-	// heading appear over rows that then print nothing.
-	"anyPackageChurn": func(repos []RepoView) bool {
-		for _, r := range repos {
-			if len(r.AddedPackages()) > 0 || len(r.RemovedPackages()) > 0 {
-				return true
-			}
-		}
-		return false
 	},
 
 	// anyEnvWarned gates the footnote that explains the table's toolchain

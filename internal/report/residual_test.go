@@ -87,8 +87,8 @@ func TestMeasuredBothSidesStillPublishesTheComparison(t *testing.T) {
 	if !ok {
 		t.Fatalf("coverage: got %v, want an object for a repo that measured both sides", row["coverage"])
 	}
-	if coverage["delta_points"] == nil {
-		t.Error("coverage.delta_points is null for a repo that measured both sides")
+	if coverage["delta"] == nil {
+		t.Error("coverage.delta is null for a repo that measured both sides")
 	}
 	if got, _ := coverage["culprits"].([]any); len(got) == 0 {
 		t.Error("no culprits for a real 32 point drop")

@@ -3,6 +3,7 @@ package report_test
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -30,6 +31,7 @@ var degradedColumns = [...]string{
 	"tests",
 	"tests change",
 	"packages without tests",
+	"packages without tests change",
 }
 
 // cellSpec says what one table cell is allowed to be.
@@ -48,7 +50,6 @@ type cellSpec struct {
 	want string
 }
 
-func unmeasured() cellSpec        { return cellSpec{} }
 func measured(s string) cellSpec  { return cellSpec{measured: true, want: s} }
 func (c cellSpec) hasDigit() bool { return strings.ContainsFunc(c.want, unicode.IsDigit) }
 func hasDigit(cell string) bool   { return strings.ContainsFunc(cell, unicode.IsDigit) }
@@ -65,8 +66,11 @@ type degradedRow struct {
 	// broke rather than which index of a table did.
 	why string
 	in  delta.Input
-	// cells lines up with degradedColumns.
-	cells [len(degradedColumns)]cellSpec
+	// cells is keyed by column name. A column not named here is REQUIRED to
+	// render as unmeasured, which is the safe default: adding a signal cannot
+	// quietly grant a degraded row permission to print a number, and a row that
+	// should print one has to say so.
+	cells map[string]cellSpec
 	// mover is whether this repo may lead the report. Every degraded state
 	// answers no, and two of them are marked movers by delta.Compute, so the
 	// report layer is the only thing standing between them and the headline.
@@ -91,12 +95,10 @@ const (
 func degradedRows() []degradedRow {
 	return []degradedRow{
 		{
-			name: repoNever,
-			why:  "configured but never collected: every count on it is a Go zero value, not a measurement",
-			in:   delta.Input{Repo: repoAt(1, repoNever)},
-			cells: [len(degradedColumns)]cellSpec{
-				unmeasured(), unmeasured(), unmeasured(), unmeasured(), unmeasured(),
-			},
+			name:  repoNever,
+			why:   "configured but never collected: every count on it is a Go zero value, not a measurement",
+			in:    delta.Input{Repo: repoAt(1, repoNever)},
+			cells: nil,
 		},
 		{
 			name: repoFailedOnly,
@@ -105,9 +107,7 @@ func degradedRows() []degradedRow {
 				Repo: repoAt(2, repoFailedOnly),
 				Head: snap(21, 2, "go1.26.5", store.StatusFailed, "test command exited 2"),
 			},
-			cells: [len(degradedColumns)]cellSpec{
-				unmeasured(), unmeasured(), unmeasured(), unmeasured(), unmeasured(),
-			},
+			cells: nil,
 		},
 		{
 			name: repoFailedAfter,
@@ -118,9 +118,7 @@ func degradedRows() []degradedRow {
 				Base:        snap(30, 3, "go1.26.5", store.StatusOK, ""),
 				BaseMetrics: metrics(cov(pkgAlpha, 72, 100), testStream(0, testCount(pkgAlpha, 40))),
 			},
-			cells: [len(degradedColumns)]cellSpec{
-				unmeasured(), unmeasured(), unmeasured(), unmeasured(), unmeasured(),
-			},
+			cells: nil,
 			// delta.Compute now excludes this itself: a failed head stored no
 			// coverage, so CoverageChangeMeaningful is false and IsMover never
 			// fires. It used to reach the report and be dropped there. The
@@ -139,8 +137,9 @@ func degradedRows() []degradedRow {
 				Base:        snap(40, 4, "go1.26.5", store.StatusOK, ""),
 				BaseMetrics: cov(pkgAlpha, 50, 100),
 			},
-			cells: [len(degradedColumns)]cellSpec{
-				measured("60.0%"), measured("+10.0 pts"), unmeasured(), unmeasured(), unmeasured(),
+			cells: map[string]cellSpec{
+				"coverage":        measured("60.0%"),
+				"coverage change": measured("+10.0 pts"),
 			},
 			mover:                true,
 			moverBeforeFiltering: true,
@@ -153,8 +152,10 @@ func degradedRows() []degradedRow {
 				Head:        snap(51, 5, "go1.26.5", store.StatusOK, ""),
 				HeadMetrics: metrics(cov(pkgAlpha, 10, 100), testStream(0, testCount(pkgAlpha, 1))),
 			},
-			cells: [len(degradedColumns)]cellSpec{
-				measured("10.0%"), unmeasured(), measured("1"), unmeasured(), measured("0"),
+			cells: map[string]cellSpec{
+				"coverage":               measured("10.0%"),
+				"tests":                  measured("1"),
+				"packages without tests": measured("0"),
 			},
 		},
 		{
@@ -175,8 +176,11 @@ func degradedRows() []degradedRow {
 				Base:        snap(60, 6, "go1.26.5", store.StatusOK, ""),
 				BaseMetrics: metrics(cov(pkgAlpha, 72, 100), testStream(0, testCount(pkgAlpha, 5))),
 			},
-			cells: [len(degradedColumns)]cellSpec{
-				unmeasured(), unmeasured(), measured("5"), measured("+0"), measured("0"),
+			cells: map[string]cellSpec{
+				"tests":                         measured("5"),
+				"tests change":                  measured("+0"),
+				"packages without tests":        measured("0"),
+				"packages without tests change": measured("+0"),
 			},
 			// Same as the failed row above: delta stopped marking this a mover
 			// once the coverage half of IsMover got the guard the test half
@@ -194,8 +198,10 @@ func degradedRows() []degradedRow {
 				Head:        snap(71, 7, "go1.26.5", store.StatusPartial, "test command exited 1"),
 				HeadMetrics: metrics(cov(pkgAlpha, 33, 100), testStream(2, testCount(pkgAlpha, 7))),
 			},
-			cells: [len(degradedColumns)]cellSpec{
-				measured("33.0%"), unmeasured(), measured("7"), unmeasured(), measured("2"),
+			cells: map[string]cellSpec{
+				"coverage":               measured("33.0%"),
+				"tests":                  measured("7"),
+				"packages without tests": measured("2"),
 			},
 		},
 		{
@@ -208,8 +214,13 @@ func degradedRows() []degradedRow {
 				Base:        snap(80, 8, "go1.26.5", store.StatusOK, ""),
 				BaseMetrics: metrics(cov(pkgAlpha, 75, 100), testStream(1, testCount(pkgAlpha, 8))),
 			},
-			cells: [len(degradedColumns)]cellSpec{
-				measured("80.0%"), measured("+5.0 pts"), measured("9"), measured("+1"), measured("1"),
+			cells: map[string]cellSpec{
+				"coverage":                      measured("80.0%"),
+				"coverage change":               measured("+5.0 pts"),
+				"tests":                         measured("9"),
+				"tests change":                  measured("+1"),
+				"packages without tests":        measured("1"),
+				"packages without tests change": measured("+0"),
 			},
 			mover:                true,
 			moverBeforeFiltering: true,
@@ -233,15 +244,23 @@ func TestDegradedStatesNeverRenderAnUnmeasuredNumber(t *testing.T) {
 	// The table must not be able to lie about itself. A row that declares a
 	// cell measured but gives an expected value with no digit in it would
 	// satisfy both halves of the rule at once and prove nothing.
+	known := make(map[string]bool, len(degradedColumns))
+	for _, col := range degradedColumns {
+		known[col] = true
+	}
 	for _, row := range rows {
-		for i, c := range row.cells {
+		for col, c := range row.cells {
+			if !known[col] {
+				t.Fatalf("fixture is wrong: %s names a column %q that the table does not have, so the expectation is silently never checked",
+					row.name, col)
+			}
 			if c.measured && !c.hasDigit() {
 				t.Fatalf("fixture is wrong: %s declares the %s column measured but expects %q, which carries no number",
-					row.name, degradedColumns[i], c.want)
+					row.name, col, c.want)
 			}
 			if !c.measured && c.want != "" {
 				t.Fatalf("fixture is wrong: %s declares the %s column unmeasured but also expects the text %q",
-					row.name, degradedColumns[i], c.want)
+					row.name, col, c.want)
 			}
 		}
 	}
@@ -257,15 +276,20 @@ func TestDegradedStatesNeverRenderAnUnmeasuredNumber(t *testing.T) {
 	for _, row := range rows {
 		t.Run(row.name, func(t *testing.T) {
 			cells := tableCells(t, md, row.name)
-			for i, want := range row.cells {
+			// Every column is checked, not only the ones the row named. A column
+			// the fixture leaves out is REQUIRED to be unmeasured, so a new
+			// signal cannot quietly grant a degraded row permission to print a
+			// number: the safe expectation is the one you get for free.
+			for i, col := range degradedColumns {
+				want := row.cells[col]
 				got := cells[i]
 				switch {
 				case want.measured && got != want.want:
 					t.Errorf("%s (%s): %s column reads %q, want exactly %q\nfull row: %s",
-						row.name, row.why, degradedColumns[i], got, want.want, repoRow(t, md, row.name))
+						row.name, row.why, col, got, want.want, repoRow(t, md, row.name))
 				case !want.measured && hasDigit(got):
 					t.Errorf("%s (%s): %s column reads %q, which is a number nobody measured\nfull row: %s",
-						row.name, row.why, degradedColumns[i], got, repoRow(t, md, row.name))
+						row.name, row.why, col, got, repoRow(t, md, row.name))
 				}
 			}
 
@@ -281,19 +305,24 @@ func TestDegradedStatesNeverRenderAnUnmeasuredNumber(t *testing.T) {
 			if wireRow == nil {
 				t.Fatalf("%s is missing from the json entirely", row.name)
 			}
-			for _, group := range []struct {
-				key    string
-				column int
-			}{{"coverage", 0}, {"tests", 2}} {
+			// Each wire group is paired with the markdown column that shows the
+			// same signal, by name rather than by index, so reordering the table
+			// cannot silently compare coverage against the tests column.
+			for _, group := range []struct{ key, column string }{
+				{"coverage", "coverage"},
+				{"tests", "tests"},
+				{"untested_packages", "packages without tests"},
+			} {
 				v, present := wireRow[group.key]
 				if !present {
 					t.Errorf("%s: the %s key is missing from the json rather than null. A consumer that never sees the key defaults it, and the zeros come straight back.",
 						row.name, group.key)
 					continue
 				}
+				column := slices.Index(degradedColumns[:], group.column)
 				if got := v != nil; got != row.cells[group.column].measured {
 					t.Errorf("%s %s: json group present=%v, but the markdown %s column reads %q. The two renderers disagree about whether anything was measured.",
-						row.name, group.key, got, degradedColumns[group.column], cells[group.column])
+						row.name, group.key, got, group.column, cells[column])
 				}
 			}
 		})
@@ -413,11 +442,16 @@ var repoWireFields = map[string]fieldKind{
 	"has_baseline": kindContext,
 	"env_changed":  kindContext,
 
-	"coverage":              kindGroup,
-	"coverage.pct":          kindMeasurement,
-	"coverage.covered":      kindMeasurement,
-	"coverage.total":        kindMeasurement,
-	"coverage.delta_points": kindMeasurement,
+	// MovedBy names which signals made this repo lead the report. It carries no
+	// numbers, only signal names, which is why it is context rather than a
+	// group: there is nothing here for a consumer to default to zero.
+	"moved_by": kindContext,
+
+	"coverage":         kindGroup,
+	"coverage.value":   kindMeasurement,
+	"coverage.delta":   kindMeasurement,
+	"coverage.covered": kindMeasurement,
+	"coverage.total":   kindMeasurement,
 	// The culprits and the churn lists live inside the coverage group because
 	// they are coverage findings. Keeping them outside would put four numbers
 	// (a culprit's two percentages, its contribution and its statement count)
@@ -434,10 +468,30 @@ var repoWireFields = map[string]fieldKind{
 	"coverage.added_packages":                 kindContext,
 	"coverage.removed_packages":               kindContext,
 
-	"tests":                        kindGroup,
-	"tests.count":                  kindMeasurement,
-	"tests.delta":                  kindMeasurement,
-	"tests.packages_without_tests": kindMeasurement,
+	// Every signal but coverage renders the same two keys, because they share
+	// one SignalView. Listing them per signal rather than deriving them is the
+	// point of this table: a new signal reaching the wire has to be classified
+	// by a person before it can ship, and generating these entries from the
+	// registry would be exactly the automatic agreement this guard refuses.
+	"tests":       kindGroup,
+	"tests.value": kindMeasurement,
+	"tests.delta": kindMeasurement,
+
+	"test_failures":       kindGroup,
+	"test_failures.value": kindMeasurement,
+	"test_failures.delta": kindMeasurement,
+
+	"test_skipped":       kindGroup,
+	"test_skipped.value": kindMeasurement,
+	"test_skipped.delta": kindMeasurement,
+
+	"untested_packages":       kindGroup,
+	"untested_packages.value": kindMeasurement,
+	"untested_packages.delta": kindMeasurement,
+
+	"test_time":       kindGroup,
+	"test_time.value": kindMeasurement,
+	"test_time.delta": kindMeasurement,
 }
 
 // envelopeWireFields is the same census one level up, over the object the repo
@@ -473,6 +527,16 @@ var envelopeWireFields = map[string]fieldKind{
 	// nothing can fail to measure them.
 	"scope.selected":   kindInput,
 	"scope.configured": kindInput,
+
+	// The signal catalog: what each measurement below is called, what unit it is
+	// in, and which direction is good news. A list is safe here for the reason a
+	// list of repo rows would not be: it provably carries no numbers, so the
+	// walk collapsing its element paths costs nothing.
+	"signals":             kindContext,
+	"signals[].id":        kindContext,
+	"signals[].label":     kindContext,
+	"signals[].unit":      kindContext,
+	"signals[].direction": kindContext,
 
 	"movers":   kindRepoRows,
 	"repos":    kindRepoRows,
@@ -665,12 +729,19 @@ func TestEveryNumberIsInsideANullableGroup(t *testing.T) {
 		"coverage.culprits[].from_pct",
 		"coverage.culprits[].statements",
 		"coverage.culprits[].to_pct",
-		"coverage.delta_points",
-		"coverage.pct",
+		"coverage.delta",
 		"coverage.total",
-		"tests.count",
+		"coverage.value",
+		"test_failures.delta",
+		"test_failures.value",
+		"test_skipped.delta",
+		"test_skipped.value",
+		"test_time.delta",
+		"test_time.value",
 		"tests.delta",
-		"tests.packages_without_tests",
+		"tests.value",
+		"untested_packages.delta",
+		"untested_packages.value",
 	}
 	if got := strings.Join(sortedNames(measurements), ","); got != strings.Join(want, ",") {
 		t.Errorf("measurement paths: got %v, want %v. A number moved buckets, which is a decision worth making on purpose rather than to quiet a test.", sortedNames(measurements), want)

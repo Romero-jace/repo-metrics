@@ -54,6 +54,10 @@ func runStep(ctx context.Context, repo config.Repo, step config.Signal, index in
 	var (
 		stdoutPath string
 		runRes     *run.Result
+		// artifactUnusable is set when the artifact cannot be trusted, so it is
+		// skipped while the step's other sources still get their turn. A nil
+		// Diagnostic means the artifact is fine.
+		artifactUnusable *Diagnostic
 	)
 	before := statFile(artifact)
 
@@ -80,11 +84,21 @@ func runStep(ctx context.Context, repo config.Repo, step config.Signal, index in
 		res.Duration = runRes.Duration
 
 		if artifact != "" && !isFresh(before, statFile(artifact), runRes.StartedAt) {
-			return res.fail(errorf(
+			// The artifact is unusable, and only the artifact. This used to
+			// abandon the whole step, which threw away a perfectly parsed
+			// go-test-json stream because a sibling parser's file was missing:
+			// the mirror of the case parseAll exists to prevent, in the one
+			// direction it did not cover. A typo in artifact: was enough.
+			//
+			// The check itself stays: a stale file at that path DOES exist and
+			// WOULD parse, and reporting months-old numbers as today's is the
+			// failure this whole tool is built to refuse.
+			d := errorf(
 				"command exited %d but wrote no fresh %s at %s. "+
 					"A target that is declared .PHONY with no rule exits 0 without doing anything, "+
 					"and any stale artifact already at that path would otherwise be reported as current",
-				runRes.ExitCode, step.ArtifactFormat, artifact))
+				runRes.ExitCode, step.ArtifactFormat, artifact)
+			artifactUnusable = &d
 		}
 		if runRes.ExitCode != 0 && !step.NonZeroExitIsNormal() {
 			// The command is unhappy but its output is real, so the numbers
@@ -108,7 +122,7 @@ func runStep(ctx context.Context, repo config.Repo, step config.Signal, index in
 		}
 	}
 
-	res.parseAll(ctx, repo, step, artifact, stdoutPath, runRes, now)
+	res.parseAll(ctx, repo, step, artifact, stdoutPath, runRes, now, artifactUnusable)
 
 	// The runner has measured this since the day it was written and nothing has
 	// ever read it. It goes in the step's own batch rather than being appended by
@@ -133,6 +147,7 @@ func runStep(ctx context.Context, repo config.Repo, step config.Signal, index in
 func (r *stepResult) parseAll(
 	ctx context.Context, repo config.Repo, step config.Signal,
 	artifact, stdoutPath string, runRes *run.Result, now time.Time,
+	artifactUnusable *Diagnostic,
 ) {
 	type pending struct {
 		format config.Format
@@ -140,16 +155,25 @@ func (r *stepResult) parseAll(
 		what   string
 	}
 
-	var sources []pending
-	if step.ArtifactFormat != "" {
+	env := envPairs(step.MergedEnv(repo.Env))
+	var (
+		sources  []pending
+		failures []Diagnostic
+	)
+
+	// An unusable artifact is a source that failed before it was read, so it
+	// joins the failures rather than the sources. It then gets exactly the same
+	// escalate-or-downgrade treatment as a parse error: fatal to the step only if
+	// nothing else in it worked.
+	switch {
+	case artifactUnusable != nil:
+		failures = append(failures, *artifactUnusable)
+	case step.ArtifactFormat != "":
 		sources = append(sources, pending{step.ArtifactFormat, artifact, "the " + string(step.ArtifactFormat) + " artifact"})
 	}
 	if step.StdoutFormat != "" {
 		sources = append(sources, pending{step.StdoutFormat, stdoutPath, "the " + string(step.StdoutFormat) + " output"})
 	}
-
-	env := envPairs(step.MergedEnv(repo.Env))
-	var failures []Diagnostic
 
 	for _, src := range sources {
 		parse, err := parserFor(src.format)

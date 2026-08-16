@@ -2,6 +2,7 @@ package collect
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -51,12 +52,45 @@ func TestEnvFingerprintCarriesTheGoVersion(t *testing.T) {
 
 // A directory where `go env` cannot run at all still has to produce a
 // fingerprint, or snapshots become silently incomparable rather than loudly so.
-func TestEnvFingerprintDegradesToUnknown(t *testing.T) {
-	got := envFingerprint(context.Background(), t.TempDir(), []string{"PATH=/nonexistent"})
+//
+// And it has to SAY it failed. Two snapshots that both fall back to the
+// placeholder record the same string and therefore compare as the same
+// toolchain, so the one boundary this fingerprint exists to flag goes unflagged
+// exactly when nothing measured it. Without a diagnostic nothing anywhere says
+// so, which is how the sibling git probe has always behaved and this one did not.
+func TestEnvFingerprintDegradesToUnknownAndSaysSo(t *testing.T) {
+	// A working directory that does not exist, so the process cannot start at
+	// all. Setting PATH in the env does NOT work here, and that is worth writing
+	// down: run.Options.Env is APPENDED to the parent environment rather than
+	// replacing it, so `go` still resolves and the probe succeeds. The version of
+	// this test that did that asserted only that the result started with "go=",
+	// which a successful run also satisfies, so it never once exercised the
+	// failure path it was named for.
+	missing := filepath.Join(t.TempDir(), "gone")
+
+	got, diags := envFingerprint(context.Background(), missing, nil)
 	if got == "" {
 		t.Fatal("no fingerprint recorded when go env could not run")
 	}
-	if !strings.HasPrefix(got, "go=") {
-		t.Errorf("unexpected fingerprint shape: %q", got)
+	if got != "go=unknown" {
+		t.Errorf("fingerprint %q: a probe that could not run must say unknown rather than guess", got)
+	}
+	if len(diags) == 0 {
+		t.Error("the fingerprint silently fell back to a placeholder, so nothing tells anyone the toolchain was never identified")
+	}
+	for _, d := range diags {
+		if d.Severity != SeverityWarn {
+			t.Errorf("severity %q: a missing fingerprint costs a comparison, not the snapshot", d.Severity)
+		}
+	}
+
+	// The control: a probe that works says nothing, or every snapshot carries a
+	// warning about a thing that went fine.
+	real, realDiags := envFingerprint(context.Background(), t.TempDir(), nil)
+	if len(realDiags) != 0 {
+		t.Errorf("a successful probe emitted %d diagnostics: %+v", len(realDiags), realDiags)
+	}
+	if real == "go=unknown" {
+		t.Skip("go env is not runnable in this environment, so the control cannot distinguish itself")
 	}
 }

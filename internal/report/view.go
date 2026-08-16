@@ -394,7 +394,15 @@ func (r RepoView) cell(sig delta.Signal) SignalCell {
 	out.Value = formatValue(group.Value, sig.Unit)
 	out.Moved = r.movedBy(sig.ID)
 	if group.Delta == nil {
-		out.Delta = "no baseline yet"
+		// Two different states share a null delta and they must not share the
+		// words. Saying "no baseline yet" for both produced a row that
+		// contradicted itself: the coverage column showing +10.0 pts against a
+		// baseline while the lint column beside it announced there was none,
+		// because lint was only switched on this week.
+		out.Delta = "not comparable"
+		if !r.HasBaseline {
+			out.Delta = "no baseline yet"
+		}
 		return out
 	}
 	out.Delta = formatDelta(*group.Delta, sig.Unit)

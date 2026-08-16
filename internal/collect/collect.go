@@ -57,7 +57,9 @@ func Collect(ctx context.Context, repo config.Repo, now time.Time) Result {
 	// exists to mark. It is taken once per repo, from the repo's own env rather
 	// than any one step's, because it is what tells the report whether two
 	// snapshots are comparable at all.
-	res.Snapshot.Env = envFingerprint(ctx, repo.Path, envPairs(repo.Env))
+	var envDiag []Diagnostic
+	res.Snapshot.Env, envDiag = envFingerprint(ctx, repo.Path, envPairs(repo.Env))
+	res.Diagnostics = append(res.Diagnostics, envDiag...)
 
 	var degraded bool
 	seen := make(map[metricKey]string)
@@ -82,9 +84,18 @@ func Collect(ctx context.Context, repo config.Repo, now time.Time) Result {
 				// with it. Config validation rejects the shapes that can cause it,
 				// so reaching here means something got past that, and the cheapest
 				// correct answer is to lose this step rather than the snapshot.
+				//
+				// The two cases get different words. A collision against an
+				// earlier step names that step; a collision inside one step's own
+				// output has no earlier step to name, and saying "already written
+				// by " with nothing after it is worse than saying nothing.
+				culprit := "within its own output"
+				if owner := seen[*dup]; owner != "" {
+					culprit = "already written by " + owner
+				}
 				res.Diagnostics = append(res.Diagnostics, errorf(
-					"%s: would record %s a second time, already written by %s, so its measurements were dropped rather than losing the whole snapshot",
-					step.Name, dup, seen[*dup]))
+					"%s: would record %s a second time, %s, so its measurements were dropped rather than losing the whole snapshot",
+					step.Name, dup, culprit))
 				res.Failed = append(res.Failed, step.Name)
 				continue
 			}
@@ -205,7 +216,13 @@ func gitOutput(ctx context.Context, dir string, args ...string) (string, error) 
 // against the versions pinned in go.mod. Same command, same commit, different
 // source, different coverage. Recording the fingerprint is what lets the report
 // refuse to diff across that boundary silently.
-func envFingerprint(ctx context.Context, dir string, env []string) string {
+// The failure is disclosed rather than swallowed, unlike before. gitMetadata,
+// the sibling best-effort probe, has always warned when it came up empty, and
+// this one silently returned a placeholder. It matters more than git metadata
+// does: two snapshots that both failed the probe record the same "go=unknown"
+// string and therefore compare as the SAME toolchain, so the one boundary this
+// fingerprint exists to flag goes unflagged exactly when nothing measured it.
+func envFingerprint(ctx context.Context, dir string, env []string) (string, []Diagnostic) {
 	var buf bytes.Buffer
 	res, err := run.Command(ctx, run.Options{
 		Dir:     dir,
@@ -214,10 +231,15 @@ func envFingerprint(ctx context.Context, dir string, env []string) string {
 		Timeout: gitTimeout,
 		Stdout:  &buf,
 	})
-	if err != nil || res.ExitCode != 0 {
-		return "go=unknown"
+	switch {
+	case err != nil:
+		return "go=unknown", []Diagnostic{warnf(
+			"toolchain fingerprint unavailable: %v. Two snapshots that both fail this compare as the same toolchain, so a workspace change between them will not be flagged", err)}
+	case res.ExitCode != 0:
+		return "go=unknown", []Diagnostic{warnf(
+			"toolchain fingerprint unavailable: go env exited %d. Two snapshots that both fail this compare as the same toolchain, so a workspace change between them will not be flagged", res.ExitCode)}
 	}
-	return fingerprintFrom(buf.String())
+	return fingerprintFrom(buf.String()), nil
 }
 
 // fingerprintFrom parses `go env GOVERSION GOWORK` output.

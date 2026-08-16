@@ -306,7 +306,11 @@ func (c *Config) validate() error {
 		if r.Path == "" {
 			problems = append(problems, fmt.Errorf("%s: path is required", label))
 		} else if info, err := os.Stat(r.Path); err != nil {
-			problems = append(problems, fmt.Errorf("%s: path %s does not exist", label, r.Path))
+			// The error is reported rather than assumed to be absence. A
+			// permission problem on an intermediate directory came back as "path
+			// does not exist", which sends someone looking for a missing checkout
+			// that is sitting right there.
+			problems = append(problems, fmt.Errorf("%s: path %s is unusable: %w", label, r.Path, err))
 		} else if !info.IsDir() {
 			problems = append(problems, fmt.Errorf("%s: path %s is not a directory", label, r.Path))
 		}
@@ -354,7 +358,21 @@ func (r Repo) validateSignals(label string) []error {
 		}
 
 		problems = append(problems, s.validate(sub)...)
+
+		// Counted once per signal, however many of its sources name the format.
+		// Repeatable means two SIGNALS may share a format, never that one signal
+		// may read the same format twice: both reads would be scoped by the same
+		// step name and collide with each other. Counting sources here let
+		// `artifact_format: sarif` beside `stdout_format: sarif` validate, and
+		// every collection then dropped the step.
+		seen := make(map[Format]bool, 2)
 		for _, f := range s.Formats() {
+			if seen[f] {
+				problems = append(problems, fmt.Errorf(
+					"%s: reads %s from both its artifact and its stdout, which would write the same metric keys twice under one signal name. Pick one source", sub, f))
+				continue
+			}
+			seen[f] = true
 			used[f]++
 		}
 	}
@@ -362,8 +380,8 @@ func (r Repo) validateSignals(label string) []error {
 	for _, f := range formatOrder {
 		if used[f] > 1 && !f.Repeatable() {
 			problems = append(problems, fmt.Errorf(
-				"%s: %d signals both read %s, and they would write the same metric keys over each other. "+
-					"One repo has one of these, so combine them into a single signal", label, used[f], f))
+				"%s: %d signals read %s, and repo-metrics cannot tell whether their metric keys would collide. "+
+					"One repo normally has one of these, so combine them into a single signal", label, used[f], f))
 		}
 	}
 	return problems

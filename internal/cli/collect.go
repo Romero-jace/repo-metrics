@@ -129,6 +129,16 @@ func printProgress(w io.Writer, name, status, summary string) {
 	_, _ = fmt.Fprintf(w, "%-28s %-8s %s\n", name, status, summary)
 }
 
+// repoNames lists what a config knows about, for an error that tells the caller
+// what they could have asked for instead of only that they got it wrong.
+func repoNames(repos []config.Repo) []string {
+	out := make([]string, 0, len(repos))
+	for _, r := range repos {
+		out = append(out, r.Name)
+	}
+	return out
+}
+
 // selectRepos narrows a config's repo list to one name, or hands back all of
 // them when no name was given. Both collect and report go through it, so the
 // two subcommands cannot drift on what --repo means or on what an unknown name
@@ -140,16 +150,6 @@ func printProgress(w io.Writer, name, status, summary string) {
 // answer, so the agent concludes nothing regressed. The message lists what is
 // configured, because "no repo named x" on its own does not tell you whether
 // you misspelled the repo or pointed at the wrong config.
-// repoNames lists what a config knows about, for an error that tells the caller
-// what they could have asked for instead of only that they got it wrong.
-func repoNames(repos []config.Repo) []string {
-	out := make([]string, 0, len(repos))
-	for _, r := range repos {
-		out = append(out, r.Name)
-	}
-	return out
-}
-
 func selectRepos(repos []config.Repo, only string) ([]config.Repo, error) {
 	if only == "" {
 		return repos, nil

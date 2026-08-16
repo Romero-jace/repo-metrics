@@ -9,6 +9,51 @@ import (
 	"github.com/Romero-jace/repo-metrics/internal/store"
 )
 
+// "no baseline yet" is a claim about the repo, not about one signal, so a row
+// must not make it while another column in the same row disproves it.
+//
+// This shipped and was found by review. A repo that gained a lint step this week
+// rendered its coverage column as +10.0 pts against a baseline, and its lint
+// column as "no baseline yet", in the same line. Both came from one null delta
+// meaning two different things.
+func TestNoBaselineYetIsOnlySaidWhenThereIsNoBaseline(t *testing.T) {
+	rep := delta.Compute([]delta.Input{
+		{
+			// A real baseline, with coverage. Nothing linted it back then.
+			Repo:        store.Repo{ID: 1, Name: repoQuiet},
+			Head:        snap(11, 1, "go1.26.5", store.StatusOK, ""),
+			HeadMetrics: metrics(cov(pkgAlpha, 60, 100), lintRun("lint", 7, 0, 0)),
+			Base:        snap(10, 1, "go1.26.5", store.StatusOK, ""),
+			BaseMetrics: cov(pkgAlpha, 50, 100),
+		},
+		{
+			// No baseline at all. This one may say so.
+			Repo:        store.Repo{ID: 2, Name: repoFresh},
+			Head:        snap(21, 2, "go1.26.5", store.StatusOK, ""),
+			HeadMetrics: metrics(cov(pkgAlpha, 60, 100), lintRun("lint", 7, 0, 0)),
+		},
+	}, options(), fixedNow())
+
+	md := mustMarkdown(t, rep)
+
+	withBaseline := repoRow(t, md, repoQuiet)
+	if !strings.Contains(withBaseline, "+10.0 pts") {
+		t.Fatalf("fixture wrong: this repo should show a coverage delta:\n%s", withBaseline)
+	}
+	if strings.Contains(withBaseline, "no baseline yet") {
+		t.Errorf("a row showing a delta against its baseline also claims there is no baseline:\n%s", withBaseline)
+	}
+	if !strings.Contains(withBaseline, "not comparable") {
+		t.Errorf("the signal that could not be compared does not say so:\n%s", withBaseline)
+	}
+
+	// The anti-vacuity control. Without it, deleting the phrase entirely would
+	// pass the assertion above.
+	if noBaseline := repoRow(t, md, repoFresh); !strings.Contains(noBaseline, "no baseline yet") {
+		t.Errorf("a repo with no baseline at all stopped saying so:\n%s", noBaseline)
+	}
+}
+
 // A repo collected in ingest mode never has its tests counted, because there is
 // no stdout stream to parse. Rendering that as "tests 0" tells a reader whose
 // repo has seventy test files something flatly false, and gives no hint that

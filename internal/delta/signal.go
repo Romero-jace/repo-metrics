@@ -22,11 +22,25 @@ import (
 type Measurement struct {
 	value    float64
 	measured bool
+	// scopeKey fingerprints WHICH rows this value was summed over, for the
+	// signals where that can change underneath the number.
+	//
+	// It is empty for every signal whose value does not depend on a set of
+	// contributing scopes, and empty on a hand-built Measurement, so the
+	// comparability rule below is permissive by default and only bites where a
+	// signal asked for it.
+	scopeKey string
 }
 
 // Measured is a real measurement, including a real zero. A repo whose tests all
 // passed measured zero failures, and that is a finding rather than an absence.
 func Measured(v float64) Measurement { return Measurement{value: v, measured: true} }
+
+// measuredOver is a real measurement summed across a known set of scopes. Two of
+// these are comparable only when the sets match.
+func measuredOver(v float64, scopeKey string) Measurement {
+	return Measurement{value: v, measured: true, scopeKey: scopeKey}
+}
 
 // Unmeasured is the absence of a measurement. It is the zero value, spelled out
 // for the places that mean it deliberately.
@@ -58,8 +72,18 @@ type Change struct {
 // which is what turning on a stdout format used to do to a repo's test count.
 // Both halves get the same guard here, once, for every signal there will ever
 // be.
+//
+// A third condition joins the two: both sides have to have summed over the same
+// set of scopes. For a signal built by summing per-step rows, a step that died
+// this week does not make the repo better, it makes the sum cover less. Left
+// unguarded, a crashed linter posts its own findings as this week's improvement
+// and leads the report, and turning a second linter ON posts its entire backlog
+// as a regression. Both were real: found by review, reproduced, and now pinned.
 func Compare(head, base Measurement, hasBaseline bool) Change {
 	if !hasBaseline || !head.measured || !base.measured {
+		return Change{}
+	}
+	if head.scopeKey != base.scopeKey {
 		return Change{}
 	}
 	return Change{delta: head.value - base.value, meaningful: true}
@@ -204,6 +228,27 @@ type Signal struct {
 	// layout decision and nothing else: a signal left out of the table is still
 	// in the JSON, still in the movers write-up, and still guarded.
 	Table bool
+
+	// ScopeSetMustMatch says this signal's value is a sum whose meaning depends
+	// on WHICH rows it summed, so two of them are comparable only when both sides
+	// summed the same set.
+	//
+	// The distinction it draws is what the scope column NAMES. For coverage it
+	// names a package, part of the thing being measured, so a package appearing
+	// or vanishing is a real change in the repo and the report has designed
+	// answers for it: culprit ranking, added and removed lists. Requiring
+	// identical package sets there would refuse a delta every week anybody added
+	// a file.
+	//
+	// For lint findings and collection time it names the STEP that produced the
+	// row, which is the measuring apparatus rather than the subject. A step that
+	// crashed did not make the repo better, and a step newly switched on did not
+	// make it worse. Both of those shipped and both are reproduced in
+	// TestADroppedStepIsNotAnImprovement.
+	//
+	// The rule of thumb: set this when the scope names how the measurement was
+	// taken, and leave it off when the scope names what was measured.
+	ScopeSetMustMatch bool
 }
 
 // signals is the one ordered list. Everything downstream ranges this rather
@@ -315,21 +360,23 @@ var signals = []Signal{
 		// Suppressed findings are deliberately NOT in this total. Counting them
 		// would make a repo look worse for having triaged its findings, which is
 		// the opposite of the incentive this tool should create.
-		Marker:      collect.KeyLintFindings,
-		MarkerScope: ScopeDetail,
-		Extract:     sumOver(collect.KeyLintFindings),
-		Nominates:   true,
-		MinMove:     1,
-		Table:       true,
+		Marker:            collect.KeyLintFindings,
+		MarkerScope:       ScopeDetail,
+		Extract:           sumOver(collect.KeyLintFindings),
+		ScopeSetMustMatch: true,
+		Nominates:         true,
+		MinMove:           1,
+		Table:             true,
 	},
 	{
-		ID:          SigLintErrors,
-		Label:       "Lint errors",
-		Unit:        UnitCount,
-		Direction:   LowerIsBetter,
-		Marker:      collect.KeyLintFindings,
-		MarkerScope: ScopeDetail,
-		Extract:     sumOver(collect.KeyLintErrors),
+		ID:                SigLintErrors,
+		Label:             "Lint errors",
+		Unit:              UnitCount,
+		Direction:         LowerIsBetter,
+		Marker:            collect.KeyLintFindings,
+		MarkerScope:       ScopeDetail,
+		Extract:           sumOver(collect.KeyLintErrors),
+		ScopeSetMustMatch: true,
 		// Nominates on its own rather than leaving it to the total, because a
 		// week that trades ten nits for one error-level finding moves the total
 		// down and is not good news.
@@ -338,13 +385,14 @@ var signals = []Signal{
 		Table:     false,
 	},
 	{
-		ID:          SigLintSuppressed,
-		Label:       "Suppressed findings",
-		Unit:        UnitCount,
-		Direction:   LowerIsBetter,
-		Marker:      collect.KeyLintFindings,
-		MarkerScope: ScopeDetail,
-		Extract:     sumOver(collect.KeyLintSuppressed),
+		ID:                SigLintSuppressed,
+		Label:             "Suppressed findings",
+		Unit:              UnitCount,
+		Direction:         LowerIsBetter,
+		Marker:            collect.KeyLintFindings,
+		MarkerScope:       ScopeDetail,
+		Extract:           sumOver(collect.KeyLintSuppressed),
+		ScopeSetMustMatch: true,
 		// Reported and never leading. A rising suppression count is worth
 		// knowing about, but it moves for legitimate reasons often enough that
 		// leading the report on it would cost the reader's attention.
@@ -409,9 +457,10 @@ var signals = []Signal{
 		// reports. That is machine work and counts parallel packages more than
 		// once; this is time somebody waited. Both are worth having and neither
 		// is derivable from the other.
-		Marker:      collect.KeySignalDurationMS,
-		MarkerScope: ScopeDetail,
-		Extract:     sumOver(collect.KeySignalDurationMS),
+		Marker:            collect.KeySignalDurationMS,
+		MarkerScope:       ScopeDetail,
+		Extract:           sumOver(collect.KeySignalDurationMS),
+		ScopeSetMustMatch: true,
 		// Never leads. This is the signal most sensitive to what else the machine
 		// was doing, and a report that led with it every time a laptop was busy
 		// would train its reader to skip the movers section.

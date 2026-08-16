@@ -1,6 +1,11 @@
 package delta
 
-import "github.com/Romero-jace/repo-metrics/internal/store"
+import (
+	"sort"
+	"strings"
+
+	"github.com/Romero-jace/repo-metrics/internal/store"
+)
 
 // Side is one snapshot's raw material, indexed once.
 //
@@ -17,13 +22,18 @@ type Side struct {
 	Packages map[string]Coverage
 	Coverage Coverage
 
-	// pkgSum totals every package-scoped row per key. repoVal holds the
-	// repo-scoped row per key. present records which (key, scope) pairs existed
-	// at all, which is the only thing that answers whether a signal was
-	// measured.
+	// pkgSum totals every scoped row per key. repoVal holds the repo-scoped row
+	// per key. present records which (key, scope) pairs existed at all, which is
+	// the only thing that answers whether a signal was measured.
 	pkgSum  map[string]float64
 	repoVal map[string]float64
 	present map[markerKey]bool
+
+	// scopeSets records which scopes contributed to each key, so a sum can say
+	// what it summed over. Only read for signals that asked, via
+	// Signal.ScopeSetMustMatch, because for most of them the set changing is a
+	// real finding rather than a change of apparatus.
+	scopeSets map[string]map[string]bool
 }
 
 // markerKey is a metric key paired with the scope it was found at, because the
@@ -41,11 +51,12 @@ type markerKey struct {
 // has never been collected.
 func newSide(snap *store.Snapshot, metrics []store.Metric) Side {
 	s := Side{
-		Snapshot: snap,
-		Packages: coverageByPackage(metrics),
-		pkgSum:   make(map[string]float64),
-		repoVal:  make(map[string]float64),
-		present:  make(map[markerKey]bool),
+		Snapshot:  snap,
+		Packages:  coverageByPackage(metrics),
+		pkgSum:    make(map[string]float64),
+		repoVal:   make(map[string]float64),
+		present:   make(map[markerKey]bool),
+		scopeSets: make(map[string]map[string]bool),
 	}
 	s.Coverage = sumCoverage(s.Packages)
 
@@ -57,8 +68,29 @@ func newSide(snap *store.Snapshot, metrics []store.Metric) Side {
 		}
 		s.pkgSum[m.Key] += m.Value
 		s.present[markerKey{m.Key, ScopeDetail}] = true
+		if s.scopeSets[m.Key] == nil {
+			s.scopeSets[m.Key] = make(map[string]bool)
+		}
+		s.scopeSets[m.Key][m.Scope] = true
 	}
 	return s
+}
+
+// scopeKey fingerprints which scopes contributed rows for a key, sorted so the
+// same set always renders the same string. A NUL joiner rather than a comma,
+// because a scope is operator-supplied text and a comma inside one would make
+// two different sets fingerprint alike.
+func (s Side) scopeKey(key string) string {
+	set := s.scopeSets[key]
+	if len(set) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(set))
+	for name := range set {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return strings.Join(names, "\x00")
 }
 
 // has reports whether a marker row existed, which is the whole presence
@@ -75,6 +107,12 @@ func (s Side) has(key string, scope MarkerScope) bool {
 func (s Side) measure(sig Signal) Measurement {
 	if !s.has(sig.Marker, sig.MarkerScope) {
 		return Unmeasured()
+	}
+	if sig.ScopeSetMustMatch {
+		// The value carries a fingerprint of what it summed over, so Compare can
+		// refuse two sums that covered different sets. See Signal.ScopeSetMustMatch
+		// for why this is per signal rather than automatic.
+		return measuredOver(sig.Extract(s), s.scopeKey(sig.Marker))
 	}
 	return Measured(sig.Extract(s))
 }

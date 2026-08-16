@@ -311,7 +311,7 @@ repos:
 repos:
   - {name: svc, path: /nope/not/here, signals: [{name: c, artifact: c.out, artifact_format: go-coverprofile}]}
 `,
-			want: "does not exist",
+			want: "is unusable",
 		},
 		{
 			// A repo with an empty signals list measures nothing, which would
@@ -406,7 +406,23 @@ repos:
       - {name: unit, command: ["go", "test", "./..."], stdout_format: go-test-json}
       - {name: integration, command: ["go", "test", "-tags=integration", "./..."], stdout_format: go-test-json}
 `,
-			want: "would write the same metric keys over each other",
+			want: "cannot tell whether their metric keys would collide",
+		},
+		{
+			// Repeatable means two SIGNALS may share a format, never that one
+			// signal may read it from both of its sources: both reads are scoped
+			// by the same step name and collide with each other. This validated
+			// before, and every collection then dropped the step at the
+			// duplicate-key guard.
+			name: "one signal reading a repeatable format from both sources",
+			body: `
+repos:
+  - name: svc
+    path: $REPO
+    signals:
+      - {name: lint, command: ["golangci-lint", "run"], artifact: out.sarif, artifact_format: sarif, stdout_format: sarif}
+`,
+			want: "from both its artifact and its stdout",
 		},
 		{
 			name: "negative timeout",
@@ -543,7 +559,7 @@ repos:
 		t.Fatal("Load accepted an invalid config")
 	}
 	msg := err.Error()
-	if !strings.Contains(msg, "name") || !strings.Contains(msg, "does not exist") {
+	if !strings.Contains(msg, "name") || !strings.Contains(msg, "is unusable") {
 		t.Errorf("want both problems reported, got: %v", err)
 	}
 }

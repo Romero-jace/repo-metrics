@@ -377,6 +377,65 @@ func TestOneFailingSignalDoesNotCostTheOthers(t *testing.T) {
 	}
 }
 
+// A stale or missing artifact costs the artifact's parser and nothing else.
+//
+// This shipped broken and was found by review. The freshness check returned
+// before any parsing happened, so a step reading both a coverage profile and a
+// test stream lost the whole stream because the profile was not where the config
+// said. That is the mirror of the case parseAll exists to prevent, in the one
+// direction nothing covered, and a typo in artifact: was enough to trigger it.
+func TestAStaleArtifactCostsOnlyItsOwnParser(t *testing.T) {
+	dir := repoDir(t)
+	stream := strings.Join([]string{
+		`{"Action":"pass","Package":"example.com/m/alpha","Test":"TestOne","Elapsed":0.01}`,
+		`{"Action":"fail","Package":"example.com/m/alpha","Test":"TestTwo","Elapsed":0.02}`,
+	}, "\n")
+	// The command really does write a profile, just not where the config looks.
+	writeProfile(t, dir, "coverage.out", 0)
+
+	step := coverageStep("cat", writeFile(t, dir, "stream.json", stream))
+	step.Artifact = "cover.out" // the typo
+	step.StdoutFormat = config.FormatGoTestJSON
+
+	res := collectOnce(t, config.Repo{Name: "svc", Path: dir, Signals: []config.Signal{step}})
+
+	if got := metric(t, res, collect.KeyTestCount, "example.com/m/alpha"); got != 2 {
+		t.Errorf("test count: got %v, want 2. The stream parsed fine and was discarded because a sibling parser's file was missing.", got)
+	}
+	if !hasMetric(res, collect.KeyPkgWithoutTest) {
+		t.Error("the marker for all five test signals was dropped, so every one of them reads as never measured")
+	}
+	// Coverage is the thing that genuinely could not be measured, so it must be
+	// absent rather than zero.
+	if hasMetric(res, collect.KeyTotalStmts) {
+		t.Error("coverage was recorded from an artifact the freshness check rejected")
+	}
+	if res.Snapshot.Status != store.StatusPartial {
+		t.Errorf("Status: got %q, want partial: something was measured and something was lost", res.Snapshot.Status)
+	}
+	if !strings.Contains(diagText(res), "wrote no fresh") {
+		t.Errorf("the missing artifact was not disclosed:\n%s", diagText(res))
+	}
+}
+
+// The control for the test above, and the one the whole tool is built around: a
+// step whose ONLY source is the missing artifact still fails outright. Loosening
+// the freshness check rather than narrowing it would have reported a months-old
+// profile as today's number.
+func TestAStaleArtifactStillFailsAStepThatHasNothingElse(t *testing.T) {
+	dir := repoDir(t)
+	writeProfile(t, dir, "coverage.out", 90*24*time.Hour)
+
+	res := collectOnce(t, repo(dir, "true"))
+
+	if res.Snapshot.Status != store.StatusFailed {
+		t.Errorf("Status: got %q, want failed", res.Snapshot.Status)
+	}
+	if len(res.Metrics) != 0 {
+		t.Errorf("a stale profile produced %d metrics", len(res.Metrics))
+	}
+}
+
 // Every step failing is a failed snapshot carrying nothing, not a partial one.
 func TestEverySignalFailingIsAFailedSnapshot(t *testing.T) {
 	dir := repoDir(t)

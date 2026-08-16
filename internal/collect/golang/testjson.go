@@ -20,6 +20,16 @@ import (
 // deliberately-skipped suite from being miscounted as untested code.
 const noTestFilesMarker = "[no test files]"
 
+// buildFailedMarkers are what the toolchain prints on the output stream when a
+// package's test binary could not be produced.
+//
+// The structured FailedBuild field on the fail event is the primary signal and
+// these are the belt to its braces: the field is comparatively recent, and a
+// stream captured from an older toolchain, or replayed from a file somebody
+// kept, still carries the text. Reading both costs one string comparison and
+// removes a silent dependency on which toolchain wrote the stream.
+var buildFailedMarkers = []string{"[build failed]", "[setup failed]"}
+
 // TestSummary is a parsed `go test -json` stream, aggregated per package.
 type TestSummary struct {
 	// Packages is sorted by import path.
@@ -61,6 +71,13 @@ type PackageTests struct {
 	// the marker alone would report zero untested packages on almost every
 	// real run.
 	HasResult bool
+	// BuildFailed reports a package whose test binary would not compile.
+	//
+	// The toolchain reports this as a package-level "fail" with no test events
+	// in it, which is byte-identical to how it reports a package that built
+	// fine and contains no tests. Telling them apart is the entire reason this
+	// field exists: without it, breaking a build reads as deleting the tests.
+	BuildFailed bool
 }
 
 // Untested reports whether this package carries no tests at all.
@@ -68,9 +85,46 @@ type PackageTests struct {
 // Two signals, because the toolchain's answer depends on flags nobody should
 // have to think about: the explicit marker, or a package that returned a
 // verdict without a single test result in it.
+//
+// A package whose build failed is neither. It may be full of tests, and nobody
+// can say, because none of them ran. Counting it here published a fabricated
+// measurement rather than a missing one: the report announced a package that
+// has no tests, which is a fact nothing established. That is worse than the
+// silence this project is usually guarding against, and it shipped.
 func (p PackageTests) Untested() bool {
+	if p.BuildFailed {
+		return false
+	}
 	return p.NoTestFiles ||
 		(p.HasResult && p.Passed+p.Failed+p.Skipped+p.Subtests == 0)
+}
+
+// PackagesThatWouldNotBuild counts packages whose test binary failed to compile.
+//
+// Any non-zero answer makes every other number from this stream a partial count
+// rather than a total, which is what the delta layer needs to know before it
+// subtracts one week's totals from another's.
+func (s *TestSummary) PackagesThatWouldNotBuild() int {
+	var n int
+	for _, p := range s.Packages {
+		if p.BuildFailed {
+			n++
+		}
+	}
+	return n
+}
+
+// PackagesFailingToBuild names those packages, sorted, for a diagnostic that
+// tells an operator which ones to go and look at.
+func (s *TestSummary) PackagesFailingToBuild() []string {
+	var out []string
+	for _, p := range s.Packages {
+		if p.BuildFailed {
+			out = append(out, p.Package)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Totals sums the per-package numbers.
@@ -106,6 +160,14 @@ type testEvent struct {
 	Test    string  `json:"Test"`
 	Elapsed float64 `json:"Elapsed"`
 	Output  string  `json:"Output"`
+	// FailedBuild is set by the toolchain on the package-level fail event when
+	// the test binary would not compile. It carries the id of the package that
+	// failed to build, which is not always this one: a package fails when a
+	// dependency of its test binary fails.
+	//
+	// The toolchain has always told us this and the struct simply did not ask,
+	// so the answer was discarded by the decoder before anything could read it.
+	FailedBuild string `json:"FailedBuild"`
 }
 
 // ParseTestJSON reads a `go test -json` event stream.
@@ -152,9 +214,19 @@ func ParseTestJSON(r io.Reader) (*TestSummary, error) {
 		}
 		p := pkg(ev.Package)
 
+		// A build failure is announced on the fail event itself, and separately
+		// printed on the output stream. Either is enough, and both arrive before
+		// the package-level result is counted below.
+		if ev.FailedBuild != "" {
+			p.BuildFailed = true
+		}
+
 		if ev.Action == "output" {
 			if ev.Test == "" && strings.Contains(ev.Output, noTestFilesMarker) {
 				p.NoTestFiles = true
+			}
+			if ev.Test == "" && containsAny(ev.Output, buildFailedMarkers) {
+				p.BuildFailed = true
 			}
 			continue
 		}
@@ -201,4 +273,13 @@ func ParseTestJSON(r io.Reader) (*TestSummary, error) {
 
 func isResult(action string) bool {
 	return action == "pass" || action == "fail" || action == "skip"
+}
+
+func containsAny(s string, subs []string) bool {
+	for _, sub := range subs {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
 }

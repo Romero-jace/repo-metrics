@@ -150,12 +150,38 @@ func parseTestJSON(_ context.Context, src source) ([]store.Metric, []Diagnostic,
 		Value: float64(tests.PackagesWithoutTests()),
 	})
 
+	// Also unconditional, for the same reason and a different consumer: nothing
+	// reports this number, the delta layer reads it to decide whether the totals
+	// above are a total or a floor.
+	broken := tests.PackagesFailingToBuild()
+	metrics = append(metrics, store.Metric{
+		Key:   KeyTestBuildFailed,
+		Value: float64(len(broken)),
+	})
+
+	if len(broken) > 0 {
+		// Degrading rather than a plain warning. The counts above are real for
+		// every package that did build, so they are worth keeping, and they are
+		// not the totals they look like.
+		diags = append(diags, degradef(
+			"%s would not build, so its tests never ran and this repo's test counts are "+
+				"a partial sum rather than a total. Nothing here says how many tests it has: %s",
+			pluralPackages(len(broken)), strings.Join(broken, ", ")))
+	}
+
 	if tests.Malformed > 0 {
 		diags = append(diags, warnf(
 			"%d unparseable lines in the test output stream, which usually means a truncated or failed run",
 			tests.Malformed))
 	}
 	return metrics, diags, nil
+}
+
+func pluralPackages(n int) string {
+	if n == 1 {
+		return "1 package"
+	}
+	return fmt.Sprintf("%d packages", n)
 }
 
 // parseSARIF reads a static-analysis log into finding counts.

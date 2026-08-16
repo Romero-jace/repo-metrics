@@ -104,9 +104,17 @@ func runStep(ctx context.Context, repo config.Repo, step config.Signal, index in
 			// The command is unhappy but its output is real, so the numbers
 			// stand and the snapshot says they were taken under protest.
 			res.Degraded = true
-			res.Diagnostics = append(res.Diagnostics, warnf(
-				"command exited %d; its measurements were still collected. stderr: %s",
-				runRes.ExitCode, truncate(runRes.Stderr, 2000)))
+			// The stderr clause only when there is stderr. A great many tools
+			// say everything they have to say on stdout, and "stderr: " with
+			// nothing after it is a sentence that trails off in the middle of
+			// the report.
+			detail := ""
+			if s := strings.TrimSpace(runRes.Stderr); s != "" {
+				detail = ". stderr: " + truncate(s, 2000)
+			}
+			res.Diagnostics = append(res.Diagnostics, degradef(
+				"command exited %d; its measurements were still collected%s",
+				runRes.ExitCode, detail))
 		}
 	} else {
 		// Ingest mode: something else produces the artifact on its own schedule,
@@ -116,7 +124,7 @@ func runStep(ctx context.Context, repo config.Repo, step config.Signal, index in
 		}
 		if isStale(before, time.Duration(step.MaxAge), now) {
 			res.Degraded = true
-			res.Diagnostics = append(res.Diagnostics, warnf(
+			res.Diagnostics = append(res.Diagnostics, degradef(
 				"artifact at %s is %s old, past the %s limit, so these numbers are stale",
 				artifact, now.Sub(before.mtime).Round(time.Minute), time.Duration(step.MaxAge)))
 		}
@@ -190,6 +198,16 @@ func (r *stepResult) parseAll(
 			Now:  now,
 		})
 		r.Diagnostics = append(r.Diagnostics, diags...)
+		// A parser can report that it read its input and still lost something,
+		// which is a different thing from the read failing. Only the parser is
+		// in a position to know, so it says so on the diagnostic rather than
+		// this loop guessing from the severity: plenty of warnings here are the
+		// designed answer rather than a loss.
+		for _, d := range diags {
+			if d.Degrades {
+				r.Degraded = true
+			}
+		}
 		if err != nil {
 			failures = append(failures, errorf("could not read %s, so its measurements are missing: %v", src.what, err))
 			continue
@@ -205,6 +223,7 @@ func (r *stepResult) parseAll(
 		if r.OK {
 			r.Degraded = true
 			f.Severity = SeverityWarn
+			f.Degrades = true
 		}
 		r.Diagnostics = append(r.Diagnostics, f)
 	}

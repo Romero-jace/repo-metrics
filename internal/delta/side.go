@@ -108,13 +108,17 @@ func (s Side) measure(sig Signal) Measurement {
 	if !s.has(sig.Marker, sig.MarkerScope) {
 		return Unmeasured()
 	}
+	// Whether this side's number is a total or a floor. The value is published
+	// either way; what it loses is the right to be subtracted from another one.
+	incomplete := sig.PartialWhen != "" && s.repoVal[sig.PartialWhen] > 0
+
 	if sig.ScopeSetMustMatch {
 		// The value carries a fingerprint of what it summed over, so Compare can
 		// refuse two sums that covered different sets. See Signal.ScopeSetMustMatch
 		// for why this is per signal rather than automatic.
-		return measuredOver(sig.Extract(s), s.scopeKey(sig.Marker))
+		return measuredOver(sig.Extract(s), s.scopeKey(sig.Marker)).partially(incomplete)
 	}
-	return Measured(sig.Extract(s))
+	return Measured(sig.Extract(s)).partially(incomplete)
 }
 
 // Measure reads every registered signal off one snapshot's stored metrics.

@@ -652,8 +652,19 @@ func TestCollectReportsAStaleArtifactAsPartial(t *testing.T) {
 	if snap == nil || snap.Status != store.StatusPartial {
 		t.Fatalf("snapshot = %+v, want a partial one", snap)
 	}
-	if snap.Error != "" {
-		t.Errorf("a warning is not an error, got %q", snap.Error)
+	// A partial snapshot says what it cost. This assertion used to be the
+	// opposite, on the grounds that a warning is not an error, and it was
+	// pinning a real gap: the field stayed empty, and the report listed the repo
+	// under Collection problems as a bare name with nothing after the status
+	// word. Every repo with one failing test is in that state, since a non-zero
+	// exit degrades the step.
+	//
+	// The severity distinction still holds and is not what this field carries. A
+	// clean snapshot picks up nothing here, because a diagnostic only lands in
+	// it when it actually cost the snapshot something, and anything that did has
+	// already moved the status off ok.
+	if !strings.Contains(snap.Error, "stale") {
+		t.Errorf("a partial snapshot has to say what it cost, got %q", snap.Error)
 	}
 
 	// The numbers are still there. Partial means "believe this less", not

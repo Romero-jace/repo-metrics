@@ -164,17 +164,47 @@ func (r Result) finish(started time.Time, degraded bool) Result {
 	}
 
 	r.Snapshot.Duration = time.Since(started)
-	r.Snapshot.Error = firstError(r.Diagnostics)
+	r.Snapshot.Error = snapshotReason(r.Diagnostics)
 	return r
 }
 
-func firstError(diags []Diagnostic) string {
+// snapshotReason is what a snapshot records about why it is not clean.
+//
+// An error first and alone, since that is a snapshot carrying nothing
+// trustworthy and there is no more to say. Otherwise every diagnostic that
+// actually cost the snapshot something, in the order they happened.
+//
+// This whole function is the fix for a real gap: it used to look for errors
+// alone, so a snapshot degraded by a warning stored no reason at all, and the
+// report listed the repo under Collection problems as a bare name with nothing
+// after the status word. Every repo with one failing test is in that state,
+// because a non-zero exit degrades the step.
+//
+// All of them rather than the first, because the first is usually the least
+// informative. A broken test build makes the command exit non-zero AND makes the
+// counts partial, and the exit code is noticed first while the reason a person
+// can act on arrives second. Ranking them would mean inventing a scale; saying
+// both costs a line and loses nothing.
+//
+// It deliberately does not fall back to ordinary warnings. A clean snapshot
+// routinely carries several (a repo that is not a git checkout, a proxy nobody
+// consulted) and none of them is a reason for anything. Only a diagnostic that
+// says it cost something explains a snapshot that is not ok, which is also why an
+// ok snapshot picks up nothing here: nothing degrading can be present without the
+// status having moved.
+func snapshotReason(diags []Diagnostic) string {
 	for _, d := range diags {
 		if d.Severity == SeverityError {
 			return d.Message
 		}
 	}
-	return ""
+	var reasons []string
+	for _, d := range diags {
+		if d.Degrades {
+			reasons = append(reasons, d.Message)
+		}
+	}
+	return strings.Join(reasons, "; ")
 }
 
 // gitMetadata reads HEAD, the branch, and whether the tree is dirty. All three

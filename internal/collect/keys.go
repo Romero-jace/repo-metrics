@@ -29,6 +29,18 @@ const (
 	// test output or it did not; there is no state where it counted the passes
 	// but not the failures.
 	KeyPkgWithoutTest = "pkg.without_tests"
+	// KeyTestBuildFailed counts packages whose test binary would not compile. It
+	// is written at repo scope whenever the stream parses, zero included, so it
+	// behaves like a marker even though it is not one: no signal reports it, and
+	// nothing reads it for presence.
+	//
+	// It exists because a non-zero answer makes every other number from this
+	// stream a partial count rather than a total. The delta layer reads it to
+	// refuse a comparison, the way it refuses two lint sums taken over different
+	// sets of steps. A snapshot written before this key existed has no row, which
+	// reads as zero and compares normally, which is the right answer for a
+	// snapshot taken when nothing was checking.
+	KeyTestBuildFailed = "test.build_failed"
 
 	// The lint keys carry the STEP's name as their scope rather than being
 	// repo-level singletons, because SARIF is the one repeatable format: a
@@ -115,10 +127,30 @@ const (
 type Diagnostic struct {
 	Severity Severity
 	Message  string
+	// Degrades marks a diagnostic that cost the snapshot something. Severity
+	// says how bad the news is; this says whether the snapshot is still whole.
+	//
+	// They are close but not the same, and collapsing them was a bug. A warning
+	// that the module proxy was never consulted is not a degradation: the
+	// collector deliberately recorded nothing there, which is the designed
+	// answer rather than a loss. A warning that a package would not build is a
+	// degradation, because numbers are missing from a total that still got
+	// published.
+	//
+	// A degrading diagnostic makes the snapshot partial, and a partial snapshot
+	// reports the first one of these as its reason. Before that, a snapshot
+	// degraded by a warning stored no reason at all and the report listed the
+	// repo under Collection problems with nothing after its name.
+	Degrades bool
 }
 
 func warnf(format string, args ...any) Diagnostic {
 	return Diagnostic{Severity: SeverityWarn, Message: fmt.Sprintf(format, args...)}
+}
+
+// degradef is a warning that also costs the snapshot its completeness.
+func degradef(format string, args ...any) Diagnostic {
+	return Diagnostic{Severity: SeverityWarn, Message: fmt.Sprintf(format, args...), Degrades: true}
 }
 
 func errorf(format string, args ...any) Diagnostic {

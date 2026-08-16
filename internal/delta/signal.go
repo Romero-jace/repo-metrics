@@ -30,6 +30,15 @@ type Measurement struct {
 	// comparability rule below is permissive by default and only bites where a
 	// signal asked for it.
 	scopeKey string
+	// partial marks a value that is real but is a floor rather than a total,
+	// because something the collector could not measure belongs inside it.
+	//
+	// It is a different question from scopeKey. That one asks whether the two
+	// sides covered the same things; this one asks whether either side covered
+	// everything it claims to. A package whose test binary would not compile
+	// contributes no test count, so the repo's total is short by however many
+	// tests that package has, which is a number nobody knows.
+	partial bool
 }
 
 // Measured is a real measurement, including a real zero. A repo whose tests all
@@ -45,6 +54,14 @@ func measuredOver(v float64, scopeKey string) Measurement {
 // Unmeasured is the absence of a measurement. It is the zero value, spelled out
 // for the places that mean it deliberately.
 func Unmeasured() Measurement { return Measurement{} }
+
+// partially marks a measurement as a floor rather than a total. The value still
+// stands and is still published: what it cannot do is be subtracted from
+// another week's.
+func (m Measurement) partially(incomplete bool) Measurement {
+	m.partial = incomplete
+	return m
+}
 
 // Value returns the measurement and whether there is one. The comma-ok is the
 // whole point: a caller has to write the second variable to get the first.
@@ -79,11 +96,22 @@ type Change struct {
 // unguarded, a crashed linter posts its own findings as this week's improvement
 // and leads the report, and turning a second linter ON posts its entire backlog
 // as a regression. Both were real: found by review, reproduced, and now pinned.
+//
+// A fourth asks whether either side is a floor rather than a total. A package
+// whose test binary would not compile contributes no test count, so the repo's
+// total is short by an unknown amount, and subtracting last week's real total
+// from this week's short one reports a drop that is really a build error. That
+// one shipped too, and it was the worse kind: the same broken build also made
+// the package look newly untested, which is a number nobody measured being
+// published as a finding.
 func Compare(head, base Measurement, hasBaseline bool) Change {
 	if !hasBaseline || !head.measured || !base.measured {
 		return Change{}
 	}
 	if head.scopeKey != base.scopeKey {
+		return Change{}
+	}
+	if head.partial || base.partial {
 		return Change{}
 	}
 	return Change{delta: head.value - base.value, meaningful: true}
@@ -249,6 +277,23 @@ type Signal struct {
 	// The rule of thumb: set this when the scope names how the measurement was
 	// taken, and leave it off when the scope names what was measured.
 	ScopeSetMustMatch bool
+
+	// PartialWhen names a repo-scoped metric key whose non-zero value means this
+	// signal's number is a floor rather than a total, so it may be published but
+	// not compared.
+	//
+	// The neighboring rule asks whether the two sides covered the same things.
+	// This one asks whether either side covered everything it claims to, which a
+	// scope fingerprint cannot see: the missing contribution leaves no row to be
+	// missing from the set. A package whose test binary would not compile is
+	// exactly that shape. It is still a package, it still has however many tests
+	// it has, and the stream carries no count for any of them.
+	//
+	// Absent rows read as zero, so a snapshot written before the key existed
+	// compares normally. That is the right answer: nothing was checking then, and
+	// refusing every comparison against older history would be a worse lie than
+	// the one this prevents.
+	PartialWhen string
 }
 
 // signals is the one ordered list. Everything downstream ranges this rather
@@ -290,6 +335,9 @@ var signals = []Signal{
 		Marker:      collect.KeyPkgWithoutTest,
 		MarkerScope: ScopeRepo,
 		Extract:     sumOver(collect.KeyTestCount),
+		// A package that would not build contributes no count, so this total is
+		// short by however many tests it has, which nothing knows.
+		PartialWhen: collect.KeyTestBuildFailed,
 		Nominates:   true,
 		MinMove:     1,
 		Table:       true,
@@ -302,6 +350,7 @@ var signals = []Signal{
 		Marker:      collect.KeyPkgWithoutTest,
 		MarkerScope: ScopeRepo,
 		Extract:     sumOver(collect.KeyTestFailed),
+		PartialWhen: collect.KeyTestBuildFailed,
 		Nominates:   true,
 		MinMove:     1,
 		Table:       false,
@@ -314,6 +363,10 @@ var signals = []Signal{
 		Marker:      collect.KeyPkgWithoutTest,
 		MarkerScope: ScopeRepo,
 		Extract:     repoValue(collect.KeyPkgWithoutTest),
+		// A package that would not build is deliberately not counted here, and
+		// nobody can say whether it belongs: it may be full of tests or have
+		// none. So this is a floor too, for the opposite reason to the others.
+		PartialWhen: collect.KeyTestBuildFailed,
 		Nominates:   true,
 		MinMove:     1,
 		Table:       true,
@@ -326,6 +379,7 @@ var signals = []Signal{
 		Marker:      collect.KeyPkgWithoutTest,
 		MarkerScope: ScopeRepo,
 		Extract:     sumOver(collect.KeyTestSkipped),
+		PartialWhen: collect.KeyTestBuildFailed,
 		// Skips move for reasons that are rarely news on their own, so this is
 		// reported and never leads.
 		Nominates: false,
@@ -339,6 +393,7 @@ var signals = []Signal{
 		Marker:      collect.KeyPkgWithoutTest,
 		MarkerScope: ScopeRepo,
 		Extract:     sumOver(collect.KeyTestDurationMS),
+		PartialWhen: collect.KeyTestBuildFailed,
 		// The sum of per-package durations, which is not wall clock: go test
 		// runs packages in parallel, so this is machine work rather than time
 		// anyone waited. It also swings with load on the machine that ran it,

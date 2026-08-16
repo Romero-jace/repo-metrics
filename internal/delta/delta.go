@@ -68,6 +68,16 @@ type RepoDelta struct {
 	Head *store.Snapshot
 	Base *store.Snapshot
 
+	// HeadSignals and BaseSignals are what each side measured, keyed by signal.
+	//
+	// They are exported so a test can build a RepoDelta that Compute does not
+	// currently produce, which report/backstop_test.go exists to do. That is safe
+	// because a Measurement can only be built by Measured or Unmeasured, and a
+	// nil map answers Unmeasured for every key, so a half-filled literal fails
+	// closed instead of reporting confident zeroes.
+	HeadSignals map[SignalID]Measurement
+	BaseSignals map[SignalID]Measurement
+
 	HeadCoverage Coverage
 	BaseCoverage Coverage
 	HeadTests    int
@@ -119,16 +129,92 @@ type RepoDelta struct {
 	Removed []string
 }
 
+// Signal returns one signal's head measurement and its comparison against the
+// baseline.
+//
+// The Change is derived on every call rather than stored, so it cannot go stale
+// and cannot be hand-forged into a RepoDelta literal: the only way to get one is
+// through Compare, which is where the both-sides-measured rule lives.
+func (r RepoDelta) Signal(id SignalID) SignalDelta {
+	return SignalDelta{
+		Signal: SignalByID(id),
+		Head:   r.HeadSignals[id],
+		Change: Compare(r.HeadSignals[id], r.BaseSignals[id], r.HasBaseline),
+	}
+}
+
+// SignalDeltas returns every registered signal in registry order, including the
+// ones this repo did not measure. Ranging this rather than the maps is what
+// keeps rendering deterministic without sorting at each call site.
+func (r RepoDelta) SignalDeltas() []SignalDelta {
+	out := make([]SignalDelta, 0, len(signals))
+	for _, sig := range signals {
+		out = append(out, r.Signal(sig.ID))
+	}
+	return out
+}
+
+// SignalDelta is one signal as everything downstream reads it.
+//
+// It deliberately does not carry the baseline measurement. Handing a caller both
+// sides invites subtracting them directly, which is the same bug with two
+// discarded booleans instead of one. The arithmetic that genuinely needs the
+// baseline value stays inside this package.
+type SignalDelta struct {
+	Signal Signal
+	Head   Measurement
+	Change Change
+}
+
+// CoverageDetail is everything coverage carries beyond a bare value: the counts
+// that are its authority, and the package findings derived from them.
+type CoverageDetail struct {
+	Counts   Coverage
+	Change   Change
+	Culprits []PackageDelta
+	Added    []string
+	Removed  []string
+}
+
+// CoverageDetail returns coverage's detail and whether the head measured it.
+//
+// This is the sanctioned read of HeadCoverage. The counts are raw and carry no
+// measured flag of their own, so Pct() on a head that stored nothing answers 0
+// for want of a denominator, and that zero is precisely the figure this package
+// exists to withhold. Going through here puts the gate on the same expression as
+// the number.
+func (r RepoDelta) CoverageDetail() (CoverageDetail, bool) {
+	sd := r.Signal(SigCoverage)
+	if !sd.Head.IsMeasured() {
+		return CoverageDetail{}, false
+	}
+	return CoverageDetail{
+		Counts:   r.HeadCoverage,
+		Change:   sd.Change,
+		Culprits: r.Culprits,
+		Added:    r.Added,
+		Removed:  r.Removed,
+	}, true
+}
+
 // CoverageChange is the repo's movement in percentage points.
+//
+// It reads through the generic layer rather than subtracting the counts, so the
+// headline percentage has one implementation and the comparison rule has one
+// implementation, and neither is coverage-specific any more.
 func (r RepoDelta) CoverageChange() float64 {
-	return r.HeadCoverage.Pct() - r.BaseCoverage.Pct()
+	d, _ := r.Signal(SigCoverage).Change.Delta()
+	return d
 }
 
 // TestChange is the repo's movement in test count.
 //
 // Only meaningful when TestChangeMeaningful reports true: subtracting an
 // unmeasured side from a measured one manufactures the whole count as a delta.
-func (r RepoDelta) TestChange() int { return r.HeadTests - r.BaseTests }
+func (r RepoDelta) TestChange() int {
+	d, _ := r.Signal(SigTests).Change.Delta()
+	return int(d)
+}
 
 // CoverageChangeMeaningful reports whether both snapshots actually measured
 // coverage.
@@ -139,14 +225,14 @@ func (r RepoDelta) TestChange() int { return r.HeadTests - r.BaseTests }
 // a failed run was already fixed for, reached instead through a profile that
 // parsed cleanly and simply had nothing in it.
 func (r RepoDelta) CoverageChangeMeaningful() bool {
-	return r.HasBaseline && r.HasCoverageData && r.BaseHasCoverageData
+	return r.Signal(SigCoverage).Change.Meaningful()
 }
 
 // TestChangeMeaningful reports whether both snapshots actually measured tests.
 // Without it, a repo that gained a stdout_format between runs would post its
 // entire test suite as this week's growth.
 func (r RepoDelta) TestChangeMeaningful() bool {
-	return r.HasBaseline && r.HasTestData && r.BaseHasTestData
+	return r.Signal(SigTests).Change.Meaningful()
 }
 
 // Input is one repo's two snapshots and their metrics.
@@ -219,8 +305,15 @@ func Compute(inputs []Input, opts Options, now time.Time) Report {
 func computeRepo(in Input, opts Options) RepoDelta {
 	d := RepoDelta{Repo: in.Repo, Head: in.Head, Base: in.Base}
 
-	headPkgs := coverageByPackage(in.HeadMetrics)
-	d.HeadCoverage = sumCoverage(headPkgs)
+	// One pass per snapshot, indexed once. Every signal's extractor is then a
+	// map lookup, and the per-package coverage map the culprit ranking needs is
+	// not built a second time.
+	head := newSide(in.Head, in.HeadMetrics)
+	d.HeadSignals = measureAll(head)
+	d.BaseSignals = map[SignalID]Measurement{}
+
+	headPkgs := head.Packages
+	d.HeadCoverage = head.Coverage
 	d.HeadTests = sumMetric(in.HeadMetrics, collect.KeyTestCount)
 	d.PkgWithoutTests = repoLevel(in.HeadMetrics, collect.KeyPkgWithoutTest)
 	d.HasTestData = hasTestData(in.HeadMetrics)
@@ -231,8 +324,11 @@ func computeRepo(in Input, opts Options) RepoDelta {
 	}
 	d.HasBaseline = true
 
-	basePkgs := coverageByPackage(in.BaseMetrics)
-	d.BaseCoverage = sumCoverage(basePkgs)
+	base := newSide(in.Base, in.BaseMetrics)
+	d.BaseSignals = measureAll(base)
+
+	basePkgs := base.Packages
+	d.BaseCoverage = base.Coverage
 	d.BaseTests = sumMetric(in.BaseMetrics, collect.KeyTestCount)
 	d.BaseHasTestData = hasTestData(in.BaseMetrics)
 	d.BaseHasCoverageData = hasCoverageData(in.BaseMetrics)

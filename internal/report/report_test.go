@@ -108,6 +108,12 @@ func depsOffline(total int, medianAgeDays float64) []store.Metric {
 	}
 }
 
+// stepTiming is the wall time one step's command took. Scoped by step name, and
+// written only when something actually ran, so ingest mode has none.
+func stepTiming(step string, ms float64) store.Metric {
+	return store.Metric{Key: collect.KeySignalDurationMS, Scope: step, Value: ms}
+}
+
 func snap(id, repoID int64, env string, status store.Status, errText string) *store.Snapshot {
 	return &store.Snapshot{
 		ID:          id,

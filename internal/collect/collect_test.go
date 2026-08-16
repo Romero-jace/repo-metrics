@@ -833,6 +833,62 @@ var (
 	moduleNow      = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 )
 
+// The runner has measured every command's wall clock since it was written and
+// nothing ever read it. Now it is a metric, scoped by step, so a repo running
+// four of them can see which one got slower.
+func TestEachSignalRecordsItsOwnCommandDuration(t *testing.T) {
+	dir := repoDir(t)
+	src := writeProfile(t, dir, "src.out", 0)
+	dst := filepath.Join(dir, "coverage.out")
+
+	r := config.Repo{Name: "svc", Path: dir, Signals: []config.Signal{
+		coverageStep("sh", "-c", "sleep 0.2 && cp "+src+" "+dst),
+		lintStep("lint", writeFile(t, dir, "clean.sarif", cleanSARIF)),
+	}}
+
+	res := collectAt(t, r, time.Now())
+	if res.Snapshot.Status != store.StatusOK {
+		t.Fatalf("Status: got %q, want ok. Diagnostics:\n%s", res.Snapshot.Status, diagText(res))
+	}
+
+	// Per step, not per repo. A single repo-level number would say a collection
+	// got slower without saying which part of it did.
+	slow := metric(t, res, collect.KeySignalDurationMS, "coverage")
+	fast := metric(t, res, collect.KeySignalDurationMS, "lint")
+	if slow < 150 {
+		t.Errorf("the coverage step slept 200ms and recorded %v ms", slow)
+	}
+	if slow <= fast {
+		t.Errorf("the deliberately slow step recorded %v ms and the fast one %v ms, so this is not measuring per-step time at all",
+			slow, fast)
+	}
+
+	// The snapshot's own duration covers the whole collection including the git
+	// subprocesses and the toolchain fingerprint, so it is a different number and
+	// has to be at least the sum of the parts.
+	if res.Snapshot.Duration.Milliseconds() < int64(slow+fast) {
+		t.Errorf("snapshot duration %v is less than the sum of its steps (%v ms), so one of the two is measuring the wrong thing",
+			res.Snapshot.Duration, slow+fast)
+	}
+}
+
+// Ingest mode runs nothing, so there is no wall time to record. A zero here
+// would be a duration nobody measured, and over a baseline that ran a real
+// command it would render as the collection having got dramatically faster.
+func TestIngestModeRecordsNoDuration(t *testing.T) {
+	dir := repoDir(t)
+	writeProfile(t, dir, "coverage.out", 0)
+
+	res := collectOnce(t, repo(dir))
+
+	if res.Snapshot.Status != store.StatusOK {
+		t.Fatalf("Status: got %q, want ok. Diagnostics:\n%s", res.Snapshot.Status, diagText(res))
+	}
+	if hasMetric(res, collect.KeySignalDurationMS) {
+		t.Error("a duration was recorded for a signal that never ran a command")
+	}
+}
+
 // depsStep runs a command that prints a canned module stream.
 //
 // The stream is canned rather than produced by a real `go list`, which would

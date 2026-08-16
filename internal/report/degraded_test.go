@@ -227,10 +227,12 @@ func degradedRows() []degradedRow {
 				Repo: repoAt(8, repoHealthy),
 				Head: snap(81, 8, "go1.26.5", store.StatusOK, ""),
 				HeadMetrics: metrics(cov(pkgAlpha, 80, 100), testStream(1, testCount(pkgAlpha, 9)),
-					lintRun("lint", 5, 0, 1), depsRun(27, 400, 3)),
+					lintRun("lint", 5, 0, 1), depsRun(27, 400, 3),
+					[]store.Metric{stepTiming("coverage", 42000)}),
 				Base: snap(80, 8, "go1.26.5", store.StatusOK, ""),
 				BaseMetrics: metrics(cov(pkgAlpha, 75, 100), testStream(1, testCount(pkgAlpha, 8)),
-					lintRun("lint", 5, 0, 1), depsRun(27, 400, 3)),
+					lintRun("lint", 5, 0, 1), depsRun(27, 400, 3),
+					[]store.Metric{stepTiming("coverage", 42000)}),
 			},
 			cells: map[string]cellSpec{
 				"coverage":                      measured("80.0%"),
@@ -556,6 +558,13 @@ var repoWireFields = map[string]fieldKind{
 	"dependency_age":       kindGroup,
 	"dependency_age.value": kindMeasurement,
 	"dependency_age.delta": kindMeasurement,
+
+	// The only signal that measures what collection COST rather than what it
+	// found. It is null in ingest mode, where nothing ran, which is a different
+	// answer from a collection that took no time.
+	"collect_time":       kindGroup,
+	"collect_time.value": kindMeasurement,
+	"collect_time.delta": kindMeasurement,
 }
 
 // envelopeWireFields is the same census one level up, over the object the repo
@@ -788,6 +797,8 @@ func TestEveryNumberIsInsideANullableGroup(t *testing.T) {
 		}
 	}
 	want := []string{
+		"collect_time.delta",
+		"collect_time.value",
 		"coverage.covered",
 		"coverage.culprits[].contribution_points",
 		"coverage.culprits[].from_pct",

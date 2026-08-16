@@ -160,6 +160,9 @@ type RepoView struct {
 	Dependencies         *SignalView `json:"dependencies"`
 	OutdatedDependencies *SignalView `json:"outdated_dependencies"`
 	DependencyAge        *SignalView `json:"dependency_age"`
+	// CollectTime is the only signal here that measures what collection COST
+	// rather than what it found. It is null in ingest mode, where nothing ran.
+	CollectTime *SignalView `json:"collect_time"`
 	// HasSnapshot is false when this repo has never been collected. Every
 	// measurement group is nil in that case, so it is not gating a number; it
 	// tells a consumer which kind of nothing it is looking at, alongside Status.
@@ -366,6 +369,8 @@ func (r RepoView) group(id delta.SignalID) *SignalView {
 		return r.OutdatedDependencies
 	case delta.SigDependencyAge:
 		return r.DependencyAge
+	case delta.SigCollectTime:
+		return r.CollectTime
 	default:
 		return nil
 	}
@@ -757,6 +762,7 @@ func buildRepo(r delta.RepoDelta) RepoView {
 	out.Dependencies = buildSignal(r.Signal(delta.SigDependencies))
 	out.OutdatedDependencies = buildSignal(r.Signal(delta.SigOutdatedDeps))
 	out.DependencyAge = buildSignal(r.Signal(delta.SigDependencyAge))
+	out.CollectTime = buildSignal(r.Signal(delta.SigCollectTime))
 	for _, id := range r.MovedBy {
 		out.MovedBy = append(out.MovedBy, string(id))
 	}

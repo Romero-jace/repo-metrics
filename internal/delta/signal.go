@@ -90,6 +90,7 @@ const (
 	SigDependencies     SignalID = "dependencies"
 	SigOutdatedDeps     SignalID = "outdated_dependencies"
 	SigDependencyAge    SignalID = "dependency_age"
+	SigCollectTime      SignalID = "collect_time"
 )
 
 // Unit is how a signal's numbers should be read and rendered.
@@ -391,6 +392,29 @@ var signals = []Signal{
 		// This one drifts upward by a day every day just by nobody touching the
 		// repo, so an absolute floor would make every repo a mover every week.
 		// The relative floor asks whether the drift outran the calendar.
+		Nominates:       false,
+		MinMoveFraction: 0.25,
+		Table:           false,
+	},
+	{
+		ID:        SigCollectTime,
+		Label:     "Collection time",
+		Unit:      UnitMilliseconds,
+		Direction: LowerIsBetter,
+		// Wall clock across every step that ran a command, which is the build and
+		// test timing the brief asks for: whatever a repo is configured to run,
+		// this is how long running it took.
+		//
+		// Distinct from test_time, which sums the per-package durations `go test`
+		// reports. That is machine work and counts parallel packages more than
+		// once; this is time somebody waited. Both are worth having and neither
+		// is derivable from the other.
+		Marker:      collect.KeySignalDurationMS,
+		MarkerScope: ScopeDetail,
+		Extract:     sumOver(collect.KeySignalDurationMS),
+		// Never leads. This is the signal most sensitive to what else the machine
+		// was doing, and a report that led with it every time a laptop was busy
+		// would train its reader to skip the movers section.
 		Nominates:       false,
 		MinMoveFraction: 0.25,
 		Table:           false,

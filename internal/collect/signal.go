@@ -109,6 +109,19 @@ func runStep(ctx context.Context, repo config.Repo, step config.Signal, index in
 	}
 
 	res.parseAll(ctx, repo, step, artifact, stdoutPath, runRes, now)
+
+	// The runner has measured this since the day it was written and nothing has
+	// ever read it. It goes in the step's own batch rather than being appended by
+	// the caller, so the duplicate-key guard sees it along with everything else
+	// the step produced, and so a step that failed carries no timing: its metrics
+	// are dropped whole, and half a step's numbers are not a measurement.
+	if res.OK && step.HasCommand() {
+		res.Metrics = append(res.Metrics, store.Metric{
+			Key:   KeySignalDurationMS,
+			Scope: step.Name,
+			Value: float64(res.Duration.Milliseconds()),
+		})
+	}
 	return res.finish()
 }
 

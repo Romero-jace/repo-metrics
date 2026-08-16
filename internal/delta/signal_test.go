@@ -143,6 +143,17 @@ func signalFixtures() map[delta.SignalID]signalFixture {
 			absent:          []store.Metric{{Key: collect.KeyDepsTotal, Value: 27}},
 			zeroIsReachable: true,
 		},
+		delta.SigCollectTime: {
+			// A command that finished inside a millisecond. Rare and entirely
+			// real, and the row is written because something ran.
+			measuredZero: []store.Metric{
+				{Key: collect.KeySignalDurationMS, Scope: "coverage", Value: 0},
+			},
+			// Ingest mode. Nothing ran, so there is no wall time, and a zero here
+			// would be a duration nobody measured.
+			absent:          cov("m/a", 5, 10),
+			zeroIsReachable: true,
+		},
 	}
 }
 

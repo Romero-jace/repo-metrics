@@ -81,6 +81,20 @@ const (
 	// and "nothing was ever checked" are byte-identical streams. Recording the
 	// flattering zero from that is the exact bug this tool exists to refuse.
 	KeyDepsOutdatedDirect = "deps.outdated_direct"
+
+	// KeySignalDurationMS is how long one step's command took, scoped by the
+	// step's name so a repo running four of them can see which one got slower.
+	//
+	// It is not the same number as snapshots.duration_ms and both are worth
+	// having. That column is the whole collection's wall clock, including the
+	// three git subprocesses and the toolchain fingerprint, so it moves when the
+	// tool itself changes. This is one command, and it is the only thing here
+	// that measures a step's cost rather than what the step found.
+	//
+	// Written only for a step that actually ran something. Ingest mode has no
+	// command, so there is no wall time to record, and a zero there would be a
+	// duration nobody measured.
+	KeySignalDurationMS = "signal.duration_ms"
 )
 
 // Severity classifies a diagnostic.

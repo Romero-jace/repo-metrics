@@ -18,9 +18,12 @@ a process to babysit and buy none of that.
 
 ```sh
 cp examples/com.repo-metrics.daily.plist ~/Library/LaunchAgents/
-# edit the paths in the copy first: it points at /usr/local/bin/repo-metrics
-# and /srv/repo-metrics, and launchd will not expand ~ or $HOME for you
-mkdir -p /srv/repo-metrics/logs
+# Edit the paths in the copy first. It points at /usr/local/bin/repo-metrics and
+# at /Users/YOUR-USER/repo-metrics, which is a placeholder you have to replace by
+# hand. That is the one manual step and there is no way around it: launchd
+# expands neither ~ nor $HOME, so every path in the plist has to be spelled out,
+# and no example can know your home directory.
+mkdir -p /Users/YOUR-USER/repo-metrics/logs
 
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.repo-metrics.daily.plist
 launchctl print gui/$(id -u)/com.repo-metrics.daily     # confirm it is loaded
@@ -34,9 +37,10 @@ launchctl bootout gui/$(id -u)/com.repo-metrics.daily
 rm ~/Library/LaunchAgents/com.repo-metrics.daily.plist
 ```
 
-If nothing seems to happen, read `/srv/repo-metrics/logs/repo-metrics.err.log`.
-That is what the `StandardErrorPath` key in the plist is there for. A launchd job
-that fails has nowhere else to tell you.
+If nothing seems to happen, read
+`/Users/YOUR-USER/repo-metrics/logs/repo-metrics.err.log`. That is what the
+`StandardErrorPath` key in the plist is there for, so it moves if you put the
+directory somewhere else. A launchd job that fails has nowhere else to tell you.
 
 (`launchctl load` and `unload` still work and you will see them in older writeups.
 `bootstrap` and `bootout` are the current spelling and give real error messages
@@ -44,10 +48,17 @@ when something is wrong, so prefer them.)
 
 ## cron, on Linux
 
-Same thing, one line. Absolute paths for the same reason as above: cron gets a
-minimal `PATH` and will not find a binary you installed somewhere interesting.
-The per-repo command in your config inherits that same `PATH`, so if it starts
-with `go`, set a `PATH` at the top of the crontab rather than hoping.
+Same thing, one line. This section keeps `/srv/repo-metrics` while the launchd
+one above uses a home directory, and that is not an oversight: `/srv` is
+FHS-standard on Linux and works, but on macOS it cannot be created at all. The
+system volume there has been read-only since Catalina, so `mkdir -p /srv` fails
+with "Read-only file system" even under sudo, until you add an entry to
+`/etc/synthetic.conf` and reboot.
+
+Absolute paths, again, and this time because cron gets a minimal `PATH` and will
+not find a binary you installed somewhere interesting. The per-repo command in
+your config inherits that same `PATH`, so if it starts with `go`, set a `PATH` at
+the top of the crontab rather than hoping.
 
 ```
 PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin

@@ -99,8 +99,21 @@ repos:
     # env:
     #   GOWORK: "off"
     signals:
+      # -count=1 defeats the Go test cache, on purpose. Without it a second
+      # collection with nothing changed is served from the cache, and the
+      # per-package durations test_time sums collapse: three packages of a real
+      # repo went from 2.851s to 0.017s across two runs with no edit between
+      # them. Coverage is unharmed either way, because -coverprofile is rewritten
+      # even on a fully cached run, so test_time is the only thing at stake.
+      #
+      # The cost is that every collection now pays for a whole test run, which on
+      # a large repo is minutes. That is the trade taken here: collection is
+      # scheduled rather than interactive, and a duration nobody actually spent
+      # is the kind of number this tool would rather not record at all. Delete
+      # the flag if you would sooner have cheap collections and read test_time as
+      # noise.
       - name: coverage
-        command: ["go", "test", "./...", "-json", "-coverpkg=./...", "-coverprofile=coverage.out"]
+        command: ["go", "test", "./...", "-json", "-count=1", "-coverpkg=./...", "-coverprofile=coverage.out"]
         artifact: coverage.out
         artifact_format: %s
         stdout_format: %s

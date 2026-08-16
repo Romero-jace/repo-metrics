@@ -48,12 +48,14 @@ before a red CI surprises you:
   the code under test. `cmd/repo-metrics` has no test files, which is what makes
   the toolchain emit the `[no test files]` marker the JSON cross-check counts.
   `internal/delta` links the package under test transitively, so its test binary
-  re-emits every instrumented block and the profile arrives with 282 data lines
-  over 141 distinct spans. Without it exactly one binary emits counters, no span
-  appears twice, and the dedup logic the cross-check exists to protect is never
-  exercised: a profile like that passes the percentage comparison even with the
-  merge replaced by a sum, because doubling both halves of a ratio changes
-  nothing.
+  re-emits every instrumented block and the profile arrives with more data lines
+  than distinct blocks, 318 over 159 on the run this was last measured from.
+  `TestAgainstGoToolCover` logs that pair, and it moves as the code does, so
+  trust the run over this sentence. Without `internal/delta` exactly one binary
+  emits counters, no block appears twice, and the dedup logic the cross-check
+  exists to protect is never exercised: a profile like that passes the percentage
+  comparison even with the merge replaced by a sum, because doubling both halves
+  of a ratio changes nothing.
 
 Individual targets are `build`, `test`, `vet`, `lint`, `fmt`, `tidy`, `clean`.
 
@@ -83,7 +85,7 @@ you off debugging entirely the wrong thing. If you see that error, check
 
 ## House style
 
-- **Standard library first.** There are exactly two dependencies,
+- **Standard library first.** There are exactly two direct dependencies,
   `modernc.org/sqlite` and `github.com/goccy/go-yaml`, and both are load-bearing.
   A new one needs a reason in the pull request that says what it buys that the
   standard library cannot. No CLI framework, no test framework, no assertion
@@ -139,7 +141,7 @@ failures and a clean lint run all count as measured.
 
 Get this wrong and the signal is either permanently unmeasured, or permanently
 reported as a confident zero. The second is worse, and it is the bug this project
-has found and fixed nine times.
+has found and fixed eight times.
 
 There are three shapes in use, and the third is the one that gets copied wrong:
 
@@ -193,14 +195,34 @@ Signals in the second group set `ScopeSetMustMatch` on their registry entry.
 a mover on the strength of it. Set it when the scope names how the measurement
 was taken, and leave it off when the scope names what was measured.
 
+A second rule sits next to that one and asks a different question, so a new
+signal has to pick between them. `ScopeSetMustMatch` asks whether both sides
+covered the same things. `PartialWhen` asks whether either side covered
+everything it claims to, which a scope fingerprint cannot see: the contribution
+that went missing leaves no row to be missing from the set. A package whose test
+binary would not compile is exactly that shape. It is still a package, it still
+has however many tests it has, and the stream carries no count for any of them,
+so the repo's total is short by a number nobody knows.
+
+`PartialWhen` names a repo-scoped metric key whose non-zero value says this
+signal's value is a floor rather than a total. The five test signals set it to
+`test.build_failed`, which the `go test -json` parser writes whenever the stream
+parses, zero included. `delta.Compare` refuses the comparison when either side is
+a floor, and the value is still published, because it is real: what it cannot do
+is be subtracted from another week's. An absent row reads as zero, so a snapshot
+written before the key existed still compares, which is the right answer for a
+snapshot taken when nothing was checking. Nothing stops a signal setting both
+flags, and none does today.
+
 ## Adding a signal
 
 A signal is what the report publishes. It is not the same as a config `signals:`
 entry, which is a collection step: one `go test` step yields six reported
 signals, because the toolchain gives them up together.
 
-Seven places, and four drift guards will fail the build if you miss one, so the
-list is a shortcut rather than the enforcement:
+Seven places, and four drift guards will fail the build if you miss one, a fifth
+if the signal takes a column in the every-repo table, so the list is a shortcut
+rather than the enforcement:
 
 1. `internal/collect/keys.go` holds the metric key, with a comment saying which one
    is the marker and under what conditions it is written.
@@ -208,8 +230,9 @@ list is a shortcut rather than the enforcement:
    unconditionally once the parse succeeds.
 3. `internal/delta/signal.go` holds the registry entry: id, label, unit, direction,
    marker, marker scope, extractor, whether it may nominate a repo as a mover,
-   and `ScopeSetMustMatch` if its scope names the apparatus rather than the
-   subject.
+   `ScopeSetMustMatch` if its scope names the apparatus rather than the subject,
+   and `PartialWhen` if some input can leave its value a floor rather than a
+   total.
 4. `internal/report/view.go` needs a field on `RepoView`, a case in `group()`, and a
    line in `buildRepo`. Named fields rather than a map, because the field census
    collapses list-element paths and a map forces one value type on every entry.
@@ -219,7 +242,11 @@ list is a shortcut rather than the enforcement:
    table. That table is hand-written for the same reason the censuses are:
    deriving it from the struct would be deriving it from the thing it guards.
 5. `internal/report/degraded_test.go` needs three census entries (the group and its
-   two measurements) and the pinned measurement set below them.
+   two measurements) and the pinned measurement set below them. A signal that
+   also takes a column in the every-repo table needs a row in `pairedGroups` in
+   the same file, and `TestEveryTableSignalIsPaired` is the fifth guard that
+   fails without it: nothing else checks that a table signal's markdown cell and
+   its JSON group agree about whether anything measured it.
 6. `internal/delta/signal_test.go` needs a fixture saying what the collector stores
    when it looked and found zero, and what it stores when it never looked.
 7. A fixture in `degraded_test.go` that renders the group filled at least once

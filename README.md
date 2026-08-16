@@ -20,6 +20,14 @@ Coverage and test counts are read from Go's own formats. Lint findings are read
 as SARIF, which golangci-lint, eslint, ruff, semgrep, clippy and CodeQL all emit,
 so that one is not Go-specific at all.
 
+That cuts both ways, and it is worth saying plainly which way. SARIF is the only
+one of the four formats that is not Go's own, so a TypeScript or Python service
+collects lint findings, lint errors, lint suppressions and the time collection
+took, and reports null for coverage, for every test count and for every
+dependency signal. Those go through parsers that read a Go coverage profile, a
+`go test -json` stream and `go list -m -json`, and there is no second parser
+behind any of them yet.
+
 ## Install
 
 ```sh
@@ -46,15 +54,19 @@ repo-metrics report               # markdown to stdout
 ```
 
 `init` writes a config that already works: the first repo entry points at the
-current directory, so you can run the other three commands immediately and see
-real output before editing anything. Every path in the file is checked when it
-loads, so a config full of `/path/to/your-repo` placeholders is a load error
-rather than a mystery later.
+current directory, so you can run the rest immediately and see real output before
+editing anything. Every repo `path:` is checked when the config loads, so a file
+full of `/path/to/your-repo` placeholders is a load error rather than a mystery
+later. An `artifact:` path is not checked then, because the file it names is
+usually something a later command produces.
 
-The report needs two snapshots to compare, so the first one has nothing to say
-about deltas. Collect again tomorrow and it will.
+The report needs two snapshots to compare, and the second one has to be far
+enough back. The baseline is the newest snapshot at or before your window, which
+defaults to seven days, so collecting again tomorrow still leaves you with no
+baseline: yesterday is too recent to qualify, not too old. Either wait out the
+window, or pass `--window 1d` to compare against yesterday.
 
-## The five commands
+## The commands
 
 | command | what it is for |
 |---|---|
@@ -77,8 +89,8 @@ old-service  never                 never collected  -
 ```
 
 `history` is the one that reads back what is already in the database. `report`
-only ever compares two snapshots, so a slide that took six weeks looks the same
-as one that happened overnight:
+only ever compares two snapshots, so it tells you how far a number moved and over
+what span, and nothing at all about the shape in between:
 
 ```sh
 repo-metrics history --repo api --signal coverage --since 90d
@@ -90,19 +102,33 @@ through the week nobody was looking, and drawing them at zero turns a crashed
 test command into a coverage cliff:
 
 ```
-| when                 | Coverage      | status |
-| ---                  | ---           | ---    |
-| 2026-08-01 06:00 UTC | 83.6%         | ok     |
+| when | Coverage | status |
+| --- | --- | --- |
+| 2026-08-01 06:00 UTC | 83.6% | ok |
 | 2026-08-08 06:00 UTC | not collected | failed |
-| 2026-08-15 06:00 UTC | 57.4%         | ok     |
+| 2026-08-15 06:00 UTC | 57.4% | ok |
 ```
 
-There is also `repo-metrics version`, which does no work and takes no flags:
+The words in that middle cell are load-bearing. `not collected` is a run that
+failed outright, and `not measured` is a run that succeeded without producing
+this particular signal, which are different problems and are never given the
+same words. Under the table, a Collection problems section prints the error
+behind each run that reported one, matched to the rows by timestamp, so a row
+like that one is never a dead end. A repo that has only ever collected cleanly
+does not grow the heading at all.
+
+There is also `repo-metrics version`, which does no work and takes no flags.
+Built from a clean checkout of this repository, which carries no tag yet, it
+says:
 
 ```
-repo-metrics v0.1.0
+repo-metrics v0.0.0-20260816181544-8eba617e536d
 built with go1.26.5 for darwin/amd64
 ```
+
+That first line is the pseudo-version the toolchain derives when there is no tag
+to use, so it reads as the commit's date and hash. Installed from a tag it is
+the tag, `repo-metrics v0.1.0` and nothing else.
 
 Nothing has to be bumped to keep that honest. The Go toolchain stamps the
 version and the commit into every binary it builds, so this reads that back
@@ -114,8 +140,9 @@ version string is a measurement too.
 
 ## What it measures
 
-Thirteen signals, from three commands. You configure the commands; the signals
-are whatever those commands turn out to yield.
+Thirteen signals. Twelve of them are whatever three configured commands turn out
+to yield, and the thirteenth is the collector timing those commands itself. You
+configure the commands; you do not pick the signals.
 
 | signal | unit | from |
 |---|---|---|
@@ -155,6 +182,18 @@ the age aggregate need no network and are unaffected.
 `collect_time` is wall clock per signal, which is not `test_time`. That one sums
 the per-package durations `go test` reports, counting parallel packages more than
 once: it is machine work. `collect_time` is time somebody waited.
+
+`test_time` also mostly measures Go's test cache, which is worth knowing before
+charting it. A package `go test` did not rerun comes back marked `(cached)` and
+reports a near-zero elapsed time, and this signal sums whatever the stream says.
+Two
+collections of the same repo here, with nothing changed between them, summed to
+34.27s and then 588ms. Neither number is wrong and neither is about the code, so
+a chart of this signal shows swings that correspond to nothing that happened in
+the repo. That, plus load on whatever machine ran the suite, is why `test_time`
+is one of the signals that can never nominate a repo as a mover: it is on the
+wire and in `history` for anyone who wants it, and it is never the reason a repo
+leads the report.
 
 ## Configuring it
 
@@ -261,21 +300,26 @@ moved:
 
 | what you ask for | tokens |
 |---|---|
-| the whole report | 1508 |
-| `--repo one-of-three` | 767 |
-| `--section movers` | 740 |
-| `--section problems` | 517 |
-| `history` for one repo | 418 |
-| `repos` | 170 |
+| the whole report | 1882 |
+| `--repo one-of-three` | 1245 |
+| `--section movers` | 791 |
+| `--section problems` | 522 |
+| `history` for one repo | 192 |
+| `repos` | 158 |
 
-284 of those tokens is the signal catalog, the same in every response, which is
-worth knowing before you narrow: `--section problems` is 517 tokens and 284 of
-them are the legend. It says what each measurement is called, what unit it is in,
-and which direction is good news, which is how a consumer reads `"value": 214000`
-and knows it is milliseconds and that lower is better without the key saying so
-on every row of every repo. Paying once per response rather than once per number
-is why adding eleven signals roughly doubled these counts instead of multiplying
-them.
+284 of those tokens is the signal catalog, which is worth knowing before you
+narrow: `--section problems` is 522 tokens and 284 of them are the legend. It
+says what each measurement is called, what unit it is in, and which direction is
+good news, which is how a consumer reads `"value": 214000` and knows it is
+milliseconds and that lower is better without the key saying so on every row of
+every repo. Paying once per response rather than once per number is why adding
+eleven signals roughly doubled these counts instead of multiplying them.
+
+The catalog rides on `report --format json` and only there, whatever `--section`
+or `--repo` you narrow to. `repos` has no `signals` key at all, and `history`
+carries a single `signal` object describing the one measurement it charted, 20
+tokens rather than 284. That is the other half of why those two are so much
+cheaper than any slice of the report.
 
 `--section` works on markdown too, since a person narrowing to what moved is
 just as reasonable as a machine doing it.
@@ -286,15 +330,27 @@ Two things, and both exist because the same bug kept happening: something that
 was never measured getting published as a measurement of zero.
 
 **Numbers live inside nullable groups.** A repo that measured nothing does not
-have a coverage percentage of zero, it has no coverage object at all. A whole
-row, nothing left out:
+have a coverage percentage of zero, it has no coverage object at all. Here is
+one such row rendered whole, so the key set is the one a consumer really gets:
 
 ```json
 {"name": "legacy", "status": "failed", "collected_at": "2026-08-15 23:47 UTC",
- "coverage": null, "tests": null, "lint_findings": null, "dependencies": null,
+ "baseline_collected_at": null,
+ "coverage": null, "tests": null, "test_failures": null, "test_skipped": null,
+ "untested_packages": null, "test_time": null, "lint_findings": null,
+ "lint_errors": null, "lint_suppressed": null, "dependencies": null,
+ "outdated_dependencies": null, "dependency_age": null, "collect_time": null,
  "has_snapshot": true, "has_baseline": false, "env_changed": false,
+ "git_dirty": false, "moved_by": null,
  "error": "coverage: no artifact at /srv/legacy/coverage.out and no command configured to produce one"}
 ```
+
+Twenty-two keys, and every repo row in a report payload has all of them. `error`
+is the twenty-third and the only one that is omitted rather than nulled, since it
+is there when there is something to say and gone when there is not. A repo that
+collected cleanly is the same shape with the groups filled in. The rows `repos
+--format json` returns are a different and much smaller shape, since that command
+answers a different question.
 
 That shape is deliberate. If those fields were merely omitted, a consumer writing
 `row.coverage_pct ?? 0` would turn an absent measurement straight back into a
@@ -303,7 +359,7 @@ There are two levels of it: a null `coverage` means nothing was measured, while 
 null `delta` inside a present `coverage` means it was measured and there is no
 baseline to compare it against.
 
-A measured group is two keys and never signal-specific ones:
+Every measured group carries `value` and `delta`, whatever the signal is:
 
 ```json
 {"lint_findings": {"value": 2857, "delta": -14},
@@ -318,6 +374,58 @@ by 14, whose dependency ages were measured with no baseline to compare against,
 and whose outdated count was not measured at all, most likely because the module
 proxy was never consulted.
 
+Twelve of the thirteen groups are exactly those two keys. Coverage is the
+exception and carries five more, which is where the culprit ranking below
+actually lives. Walking signals still needs no per-signal knowledge, because
+`value` and `delta` are on this group too and mean what they mean everywhere
+else, but a consumer that wants the packages behind a coverage move reads them
+from here:
+
+```json
+{"value": 89.33459178857952, "delta": -1.7215452237896613,
+ "covered": 1893, "total": 2119,
+ "culprits": [
+   {"package": "github.com/Romero-jace/repo-metrics/internal/retention",
+    "state": "added", "from_pct": null, "to_pct": 0,
+    "contribution_points": -1.023403438150794, "statements": 24},
+   {"package": "github.com/Romero-jace/repo-metrics/internal/config",
+    "state": "changed", "from_pct": 95.27896995708154, "to_pct": 88.8,
+    "contribution_points": -0.7224966985755685, "statements": 250},
+   {"package": "github.com/Romero-jace/repo-metrics/internal/goingaway",
+    "state": "removed", "from_pct": 87.5, "to_pct": null,
+    "contribution_points": 0.020546058294868885, "statements": 24}],
+ "added_packages": ["github.com/Romero-jace/repo-metrics/internal/retention"],
+ "removed_packages": ["github.com/Romero-jace/repo-metrics/internal/goingaway"]}
+```
+
+`covered` and `total` are the statement counts `value` was computed from, so a
+consumer can re-derive the percentage or roll several repos up without averaging
+percentages. `contribution_points` is the ranking key described under "How it
+decides what to tell you": percentage points of the whole repo, not of the
+package, which is why a 24-statement package that arrived untested outranks a
+250-statement one that slipped six and a half points. `statements` is the larger of the two
+sides, which is the size the `min_statements` floor is applied to. `state` is
+`changed`, `added` or `removed`, and it is what stops the two percentages being
+misread: `from_pct` is null for a package that did not exist in the baseline and
+`to_pct` is null for one that is gone, because a zero there would chart a
+deletion as a collapse and a new package as a climb out of nothing.
+
+`added_packages` and `removed_packages` are the same churn without the ranking,
+and the floor does not apply to them: a three-statement package that appeared is
+too small to be a culprit and is still named here.
+
+All three of those lists are `null` rather than `[]` when there is nothing in
+them, so a repo whose coverage held steady has a coverage group with `value` and
+`delta` filled in and `"culprits": null` beside them. That is the opposite of
+how the report's three top-level sections behave, and the difference is not
+carrying a meaning: only the sections distinguish "you did not ask" from
+"nothing to report", because only they can be unasked for.
+
+`moved_by` on the repo row is the other half of this. It lists the signals that
+made the repo lead the report, by the same ids the catalog uses, so `["coverage",
+"tests", "untested_packages"]` says which three measurements qualified it. It is
+null for a repo that did not move, which is every repo outside the `movers` list.
+
 **Every report says what it covers.** A section you did not ask for comes back
 `null` rather than `[]`, so "not requested" is distinguishable from "nothing to
 report", and a `scope` object says which repos the answer is about:
@@ -328,8 +436,10 @@ report", and a `scope` object says which repos the answer is about:
  "movers": null, "repos": null, "problems": []}
 ```
 
-That one says every repo it looked at collected cleanly, and that it only looked
-at one of the three you configured. Without the scope object it would be
+That is the envelope with the `signals` catalog dropped out of it for length, and
+it is the one place in this section where something has been left out. It says
+every repo it looked at collected cleanly, and that it only looked at one of the
+three you configured. Without the scope object it would be
 byte-identical to the answer meaning "none of your three repos failed", which is
 a much stronger claim. `selected == configured` is how you know you are seeing
 all of it.
@@ -339,9 +449,20 @@ report --help` lists them all.
 
 ## How it decides what to tell you
 
-The report leads with which repos moved, and under each one, which packages are
-why. Picking those packages is the only genuinely interesting decision the tool
-makes, so here is how it works.
+The report leads with which repos moved, and says which measurements moved them.
+Seven of the thirteen signals are allowed to nominate a repo: `coverage`,
+`tests`, `test_failures`, `untested_packages`, `lint_findings`, `lint_errors`
+and `outdated_dependencies`. The other six are collected, published and
+chartable, and never make a repo the headline. That is deliberate rather than an
+oversight about their importance: a signal that moves on every run, like a test
+suite's wall time on a shared machine, would make every repo a mover every week
+and bury the ones that matter. The JSON says which ones qualified a repo in
+`moved_by`, and the markdown writes one line per qualifying signal.
+
+Under each repo in that list, whenever coverage was measured on both sides and
+some package actually shifted it, the report also says which packages are why.
+Picking those packages is the only genuinely interesting decision the tool makes,
+so here is how it works.
 
 For each package, it recomputes the repo's overall coverage with that one package
 held at its old numbers and everything else left at today's. The gap between that
@@ -367,6 +488,19 @@ statements still count toward its repo's coverage number in the per-repo table,
 which is where the headline figure comes from, and if it was added or deleted it
 is still listed among the packages that came and went. The floor applies to the
 "which package is why" ranking and to nothing else.
+
+There is one more way to be kept out of the headline, and it has nothing to do
+with packages. The baseline is the newest snapshot at or before the window's
+cutoff, with no floor on how far before it sits, so a repo nobody collected for
+two months is compared against a two-month-old snapshot. That comparison is
+still the best answer available and is still published, labeled with the span it
+actually covers rather than with the window you asked for, and every repo row
+carries the baseline's own timestamp in `baseline_collected_at`. What it loses,
+once the gap is more than three windows, is the right to lead the report. Three
+rather than two because a weekly cron that missed a single run has a
+fortnight-old baseline, which is common and harmless. The case the rule exists
+for is a quarter of accumulated drift outranking the repos that really moved
+this week.
 
 ## Design notes
 

@@ -33,7 +33,12 @@ window: 7d
 min_statements: 20
 
 # How far a repo's coverage has to move, in percentage points, before it earns a
-# spot in the movers section. Set this to 0 to see every twitch.
+# spot in the movers section. Lower it to catch smaller moves.
+#
+# Do not set it to 0 expecting to see everything. Zero is not "no floor": the
+# code reads a non-positive floor as unset and falls back to 1.0 percentage
+# point, which is twice as coarse as the default, so you would see strictly
+# less. Write a small number like 0.1 instead.
 # Default: 0.5
 min_repo_delta: 0.5
 
@@ -87,11 +92,28 @@ repos:
         # -coverpkg=./... matters: without it, packages that have no test files
         # are invisible in the profile and the repo percentage silently reads
         # high.
+        #
+        # -count=1 defeats the Go test cache, on purpose. Without it a second
+        # collection with nothing changed is served from the cache, and the
+        # per-package durations that test_time sums collapse: three packages of
+        # a real repo went from 2.851s to 0.017s across two runs with no edit
+        # between them, which charts as a huge improvement nobody made. Coverage
+        # is unharmed either way, since -coverprofile is rewritten even on a
+        # fully cached run, so test_time is the only measurement at stake.
+        #
+        # The cost is that every collection pays for a whole test run, which on
+        # a large repo is minutes, so check that the timeout below is still
+        # generous enough for yours. The trade is taken deliberately:
+        # collection is scheduled rather than interactive, and a duration
+        # nobody actually spent is the kind of number this tool would rather
+        # not record at all. Drop the flag if you would sooner have cheap
+        # collections and read test_time as noise.
         command:
           - go
           - test
           - ./...
           - -json
+          - -count=1
           - -coverpkg=./...
           - -coverprofile=coverage.out
 
@@ -208,13 +230,48 @@ repos:
         # Default: 24h
         max_age: 36h
 
-        # No command here, so no stdout_format and no timeout. Coverage only, no
-        # test counts, because nothing produced a -json stream for this repo.
+        # No command here, so no stdout_format: that one is rejected at load
+        # time, since there is no stdout to capture without a command. A timeout
+        # is accepted but does nothing for the same reason, so it is left out.
+        # Coverage only, no test counts, because nothing produced a -json stream
+        # for this repo.
 
-  # ${VAR} and $VAR are expanded from the environment in five places and only
-  # five: the top-level database, and each repo's path, plus each signal's
-  # artifact, command entries, and env VALUES. That is enough to keep the
-  # machine-specific parts of a checkout layout out of the file.
+  # A repo that is not written in Go. Every other entry in this file runs a Go
+  # toolchain, which makes the tool read as Go-only. It is not, but what a non-Go
+  # repo gets is narrower, and that is worth saying plainly rather than leaving
+  # someone to discover it after a week of collections.
+  #
+  # Lint is the whole of it, because SARIF is the one format here that is not
+  # tied to a language. ruff needs no extra package for it: --output-format takes
+  # sarif, and --output-file defaults to stdout, so the document lands where
+  # stdout_format can read it. eslint, semgrep, clippy and CodeQL emit SARIF too,
+  # and this entry is the same shape with the command swapped.
+  #
+  # What a repo like this records: lint_findings, lint_errors, lint_suppressed,
+  # and collect_time. What it does not record is coverage or test counts, not
+  # because they are switched off but because the only parsers for those are
+  # go-coverprofile and go-test-json, which read a Go coverage profile and a
+  # `go test -json` stream. Those signals come back empty rather than zero, which
+  # is the distinction this whole tool is built on: nothing measured is not the
+  # same as nothing found.
+  - name: python-service
+    path: /srv/checkouts/python-service
+    signals:
+      - name: lint
+        command: ["ruff", "check", "--output-format", "sarif"]
+        stdout_format: sarif
+
+        # ruff exits 1 when it finds anything, exactly as golangci-lint does
+        # above, and that is read as findings rather than as failure. It comes
+        # from the format rather than from a setting here, so there is nothing
+        # to configure for it.
+        timeout: 5m
+
+  # ${VAR} and $VAR are expanded from the environment in six places and only
+  # six: the top-level database, then each repo's path and its env VALUES, then
+  # each signal's artifact, command entries, and env VALUES. Both env blocks
+  # expand, the repo-level one above and the per-signal one. That is enough to
+  # keep the machine-specific parts of a checkout layout out of the file.
   #
   # Nothing else is expanded. A ${VAR} in a name or in an env KEY is kept as
   # literal text, and one in a format, timeout, or max_age makes the config fail

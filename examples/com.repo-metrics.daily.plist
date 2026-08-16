@@ -26,12 +26,20 @@
 	     print. That log is what StandardErrorPath below is for.
 
 	     Absolute paths everywhere on purpose: a launchd agent gets a minimal
-	     PATH, and it does not expand ~ or $HOME anywhere in this file. -->
+	     PATH, and it does not expand ~ or $HOME anywhere in this file.
+
+	     Every /Users/YOUR-USER below is a placeholder you have to replace by
+	     hand, in all four keys that carry it. Because ~ and $HOME are not
+	     expanded, a literal path is the only thing that can go here and no
+	     example can know your home directory. A home directory rather than
+	     something like /srv because /srv cannot be created on macOS: the
+	     system volume has been read-only since Catalina, so mkdir there fails
+	     with "Read-only file system" even under sudo. -->
 	<key>ProgramArguments</key>
 	<array>
 		<string>/bin/sh</string>
 		<string>-c</string>
-		<string>/usr/local/bin/repo-metrics collect --config /srv/repo-metrics/repo-metrics.yaml ; /usr/local/bin/repo-metrics report --config /srv/repo-metrics/repo-metrics.yaml --window 168h --out /srv/repo-metrics/report.md</string>
+		<string>/usr/local/bin/repo-metrics collect --config /Users/YOUR-USER/repo-metrics/repo-metrics.yaml ; /usr/local/bin/repo-metrics report --config /Users/YOUR-USER/repo-metrics/repo-metrics.yaml --window 168h --out /Users/YOUR-USER/repo-metrics/report.md</string>
 	</array>
 
 	<!-- launchd starts the job with a minimal PATH of /usr/bin:/bin:/usr/sbin:/sbin,
@@ -53,7 +61,7 @@
 	     config that says ./repo-metrics.db quietly writes to the filesystem
 	     root, or fails, depending on permissions. -->
 	<key>WorkingDirectory</key>
-	<string>/srv/repo-metrics</string>
+	<string>/Users/YOUR-USER/repo-metrics</string>
 
 	<!-- 6:05am daily. Use StartCalendarInterval, not StartInterval: an interval
 	     job drifts and fires at whatever time of day the machine happened to
@@ -69,9 +77,9 @@
 	<!-- Without these, a job that fails has nowhere to say so and you find out
 	     by noticing the report stopped changing. -->
 	<key>StandardOutPath</key>
-	<string>/srv/repo-metrics/logs/repo-metrics.log</string>
+	<string>/Users/YOUR-USER/repo-metrics/logs/repo-metrics.log</string>
 	<key>StandardErrorPath</key>
-	<string>/srv/repo-metrics/logs/repo-metrics.err.log</string>
+	<string>/Users/YOUR-USER/repo-metrics/logs/repo-metrics.err.log</string>
 
 	<!-- False so the job does not fire every time you log in or reload it, which
 	     would put a full test run in the way of you starting work. launchd

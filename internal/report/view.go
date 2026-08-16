@@ -149,6 +149,9 @@ type RepoView struct {
 	TestSkipped      *SignalView `json:"test_skipped"`
 	UntestedPackages *SignalView `json:"untested_packages"`
 	TestTime         *SignalView `json:"test_time"`
+	LintFindings     *SignalView `json:"lint_findings"`
+	LintErrors       *SignalView `json:"lint_errors"`
+	LintSuppressed   *SignalView `json:"lint_suppressed"`
 	// HasSnapshot is false when this repo has never been collected. Every
 	// measurement group is nil in that case, so it is not gating a number; it
 	// tells a consumer which kind of nothing it is looking at, alongside Status.
@@ -343,6 +346,12 @@ func (r RepoView) group(id delta.SignalID) *SignalView {
 		return r.UntestedPackages
 	case delta.SigTestTime:
 		return r.TestTime
+	case delta.SigLintFindings:
+		return r.LintFindings
+	case delta.SigLintErrors:
+		return r.LintErrors
+	case delta.SigLintSuppressed:
+		return r.LintSuppressed
 	default:
 		return nil
 	}
@@ -719,6 +728,9 @@ func buildRepo(r delta.RepoDelta) RepoView {
 	out.TestSkipped = buildSignal(r.Signal(delta.SigTestSkipped))
 	out.UntestedPackages = buildSignal(r.Signal(delta.SigUntestedPackages))
 	out.TestTime = buildSignal(r.Signal(delta.SigTestTime))
+	out.LintFindings = buildSignal(r.Signal(delta.SigLintFindings))
+	out.LintErrors = buildSignal(r.Signal(delta.SigLintErrors))
+	out.LintSuppressed = buildSignal(r.Signal(delta.SigLintSuppressed))
 	for _, id := range r.MovedBy {
 		out.MovedBy = append(out.MovedBy, string(id))
 	}

@@ -674,6 +674,147 @@ func TestHeaderOnlyProfileIsCollectedNotFailed(t *testing.T) {
 	}
 }
 
+// sampleSARIF is the shape golangci-lint v2 actually emits: one run, a driver
+// carrying only a name, and no rules array to resolve severities against.
+//
+// Three results, one of them suppressed. Active findings are therefore 2, errors
+// 1, suppressed 1, and the suppressed one is deliberately at error level so a
+// parser that folded suppressions into the totals would report 2 errors and be
+// caught here.
+const sampleSARIF = `{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"golangci-lint"}},"results":[
+  {"ruleId":"errcheck","level":"error","message":{"text":"unchecked error"}},
+  {"ruleId":"govet","level":"warning","message":{"text":"shadowed variable"}},
+  {"ruleId":"staticcheck","level":"error","message":{"text":"triaged"},"suppressions":[{"kind":"inSource"}]}
+]}]}`
+
+// cleanSARIF is a linter that ran and found nothing. It is the case the whole
+// marker contract exists for: without a row it is byte-identical to a repo
+// nobody lints, and a repo with nothing left to fix is the good news this tool
+// should be able to report.
+const cleanSARIF = `{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"golangci-lint"}},"results":[]}]}`
+
+func lintStep(name, path string) config.Signal {
+	return config.Signal{
+		Name:         name,
+		Command:      []string{"cat", path},
+		StdoutFormat: config.FormatSARIF,
+		Timeout:      config.Duration(30 * time.Second),
+	}
+}
+
+func TestSARIFStepCountsFindings(t *testing.T) {
+	dir := repoDir(t)
+	r := config.Repo{Name: "svc", Path: dir, Signals: []config.Signal{
+		lintStep("lint", writeFile(t, dir, "report.sarif", sampleSARIF)),
+	}}
+
+	res := collectOnce(t, r)
+	if res.Snapshot.Status != store.StatusOK {
+		t.Fatalf("Status: got %q, want ok. Diagnostics:\n%s", res.Snapshot.Status, diagText(res))
+	}
+
+	// Scoped by the step's name rather than repo-level, which is what lets two
+	// linters coexist in one repo.
+	if got := metric(t, res, collect.KeyLintFindings, "lint"); got != 2 {
+		t.Errorf("active findings: got %v, want 2", got)
+	}
+	if got := metric(t, res, collect.KeyLintErrors, "lint"); got != 1 {
+		t.Errorf("error-level findings: got %v, want 1; the suppressed error must not be counted", got)
+	}
+	if got := metric(t, res, collect.KeyLintSuppressed, "lint"); got != 1 {
+		t.Errorf("suppressed: got %v, want 1", got)
+	}
+}
+
+// A linter that ran and found nothing measured zero. That has to reach the
+// database as a row, because the alternative is indistinguishable from a repo
+// nobody lints, and the two call for opposite reactions.
+func TestCleanLintRunStoresAMeasuredZero(t *testing.T) {
+	dir := repoDir(t)
+	r := config.Repo{Name: "svc", Path: dir, Signals: []config.Signal{
+		lintStep("lint", writeFile(t, dir, "clean.sarif", cleanSARIF)),
+	}}
+
+	res := collectOnce(t, r)
+	if res.Snapshot.Status != store.StatusOK {
+		t.Fatalf("Status: got %q, want ok. Diagnostics:\n%s", res.Snapshot.Status, diagText(res))
+	}
+	if got := metric(t, res, collect.KeyLintFindings, "lint"); got != 0 {
+		t.Errorf("findings: got %v, want a measured 0", got)
+	}
+}
+
+// golangci-lint exits 1 whenever it finds anything, and so do eslint, ruff and
+// clippy. Treating that as degradation would mark every snapshot partial forever
+// on any repo that has a single outstanding nit, and the status field would stop
+// meaning anything.
+//
+// `go test` is the opposite case and is asserted separately by
+// TestFailingSuiteStillRecordsCoverage: a red suite IS worth flagging.
+func TestALinterExitingNonZeroIsNotDegradation(t *testing.T) {
+	dir := repoDir(t)
+	sarifPath := writeFile(t, dir, "report.sarif", sampleSARIF)
+
+	step := lintStep("lint", sarifPath)
+	step.Command = []string{"sh", "-c", "cat " + sarifPath + " && exit 1"}
+	r := config.Repo{Name: "svc", Path: dir, Signals: []config.Signal{step}}
+
+	res := collectOnce(t, r)
+
+	if res.Snapshot.Status != store.StatusOK {
+		t.Errorf("Status: got %q, want ok. A linter reporting findings is the measurement, not a failure.\nDiagnostics:\n%s",
+			res.Snapshot.Status, diagText(res))
+	}
+	if got := metric(t, res, collect.KeyLintFindings, "lint"); got != 2 {
+		t.Errorf("findings: got %v, want 2", got)
+	}
+}
+
+// SARIF is the one repeatable format, because a polyglot repo genuinely runs two
+// linters. Two steps have to sum rather than collide on the metrics primary key.
+func TestTwoLintStepsSumRatherThanCollide(t *testing.T) {
+	dir := repoDir(t)
+	r := config.Repo{Name: "svc", Path: dir, Signals: []config.Signal{
+		lintStep("go", writeFile(t, dir, "go.sarif", sampleSARIF)),
+		lintStep("js", writeFile(t, dir, "js.sarif", cleanSARIF)),
+	}}
+
+	res := collectOnce(t, r)
+	if res.Snapshot.Status != store.StatusOK {
+		t.Fatalf("Status: got %q, want ok. Diagnostics:\n%s", res.Snapshot.Status, diagText(res))
+	}
+	if len(res.Failed) != 0 {
+		t.Fatalf("Failed: got %v, want none: two lint steps must not collide", res.Failed)
+	}
+	if got := metric(t, res, collect.KeyLintFindings, "go"); got != 2 {
+		t.Errorf("go findings: got %v, want 2", got)
+	}
+	// The clean one still stores its zero, which is the whole reason the rows are
+	// scoped: a repo whose JavaScript is clean and whose Go is not must not read
+	// as either one alone.
+	if got := metric(t, res, collect.KeyLintFindings, "js"); got != 0 {
+		t.Errorf("js findings: got %v, want a measured 0", got)
+	}
+}
+
+// A crashed linter's partial output must not read as a clean repo. The parser
+// refuses it, and the step fails rather than storing a flattering zero.
+func TestTruncatedSARIFFailsRatherThanReportingZero(t *testing.T) {
+	dir := repoDir(t)
+	r := config.Repo{Name: "svc", Path: dir, Signals: []config.Signal{
+		lintStep("lint", writeFile(t, dir, "broken.sarif", `{"version":"2.1.0","runs":[{"tool":`)),
+	}}
+
+	res := collectOnce(t, r)
+
+	if res.Snapshot.Status != store.StatusFailed {
+		t.Errorf("Status: got %q, want failed", res.Snapshot.Status)
+	}
+	if hasMetric(res, collect.KeyLintFindings) {
+		t.Error("a truncated analysis log produced a findings count, which would read as a clean repo")
+	}
+}
+
 func writeFile(t *testing.T, dir, name, body string) string {
 	t.Helper()
 	path := filepath.Join(dir, name)

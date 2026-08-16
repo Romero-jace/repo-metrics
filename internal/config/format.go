@@ -19,6 +19,13 @@ const (
 	FormatGoCoverprofile Format = "go-coverprofile"
 	// FormatGoTestJSON is the event stream `go test -json` writes to stdout.
 	FormatGoTestJSON Format = "go-test-json"
+	// FormatSARIF is the OASIS static-analysis interchange format, which
+	// golangci-lint, eslint, ruff, semgrep, clippy and CodeQL all emit.
+	//
+	// It is the first format here that is not Go-specific, which is the point of
+	// choosing it over each linter's native output. One parser covers every
+	// language this tool will ever be pointed at.
+	FormatSARIF Format = "sarif"
 )
 
 // formatPolicy is what the tool needs to know about a format beyond how to parse
@@ -27,23 +34,21 @@ const (
 type formatPolicy struct {
 	// Repeatable says two steps in one repo may both use this format.
 	//
-	// Neither of today's two can. A repo has one test suite, so two steps
-	// emitting test.count for the same package would write over each other on the
-	// metrics table's primary key and cost the whole snapshot. The flag exists
-	// because the exception is coming and is real: a polyglot repo genuinely runs
-	// two linters side by side, and a format whose findings can be filed under the
-	// step's own name sums instead of colliding.
+	// Most cannot. A repo has one test suite, so two steps emitting test.count
+	// for the same package would write over each other on the metrics table's
+	// primary key and cost the whole snapshot. SARIF is the exception and a real
+	// one: a polyglot repo genuinely runs golangci-lint and eslint side by side,
+	// and lint findings are filed under the step's own name, so two of them sum
+	// rather than collide.
 	Repeatable bool
 
 	// NonZeroExitIsNormal says this format's producers exit non-zero as a way of
 	// reporting findings rather than of reporting failure.
 	//
-	// Neither of today's two does, and the flag is here so the eventual lint
-	// format does not arrive needing a knob in the config file. Linters exit 1
-	// when they find something: golangci-lint, eslint, ruff and clippy all do.
-	// Without this, a lint step would mark its snapshot degraded on every run
-	// where the linter did its job, and the status field would stop meaning
-	// anything.
+	// Every SARIF-emitting linter does: golangci-lint exits 1 when it finds
+	// issues, and so do eslint, ruff and clippy. Without this, a lint step would
+	// mark its snapshot degraded on every run where the linter did its job, and
+	// the status field would stop meaning anything.
 	//
 	// `go test` is the opposite case and deliberately not covered by it. A
 	// non-zero exit there means the suite is red, which is a real fact about the
@@ -61,6 +66,7 @@ type formatPolicy struct {
 var formats = map[Format]formatPolicy{
 	FormatGoCoverprofile: {},
 	FormatGoTestJSON:     {},
+	FormatSARIF:          {Repeatable: true, NonZeroExitIsNormal: true},
 }
 
 // formatOrder fixes the order for help text and error messages, because ranging
@@ -68,6 +74,7 @@ var formats = map[Format]formatPolicy{
 var formatOrder = []Format{
 	FormatGoCoverprofile,
 	FormatGoTestJSON,
+	FormatSARIF,
 }
 
 // Formats lists every readable format, in a stable order.

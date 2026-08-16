@@ -56,7 +56,7 @@ func newSide(snap *store.Snapshot, metrics []store.Metric) Side {
 			continue
 		}
 		s.pkgSum[m.Key] += m.Value
-		s.present[markerKey{m.Key, ScopePackage}] = true
+		s.present[markerKey{m.Key, ScopeDetail}] = true
 	}
 	return s
 }
@@ -99,7 +99,7 @@ func Measure(metrics []store.Metric) map[SignalID]Measurement {
 // denominator and publishing the result as a percentage.
 func CoverageCounts(metrics []store.Metric) (Coverage, bool) {
 	side := newSide(nil, metrics)
-	if !side.has(SignalByID(SigCoverage).Marker, ScopePackage) {
+	if !side.has(SignalByID(SigCoverage).Marker, ScopeDetail) {
 		return Coverage{}, false
 	}
 	return side.Coverage, true

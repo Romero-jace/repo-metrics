@@ -32,6 +32,8 @@ var degradedColumns = [...]string{
 	"tests change",
 	"packages without tests",
 	"packages without tests change",
+	"lint findings",
+	"lint findings change",
 }
 
 // cellSpec says what one table cell is allowed to be.
@@ -196,12 +198,13 @@ func degradedRows() []degradedRow {
 			in: delta.Input{
 				Repo:        repoAt(7, repoPartial),
 				Head:        snap(71, 7, "go1.26.5", store.StatusPartial, "test command exited 1"),
-				HeadMetrics: metrics(cov(pkgAlpha, 33, 100), testStream(2, testCount(pkgAlpha, 7))),
+				HeadMetrics: metrics(cov(pkgAlpha, 33, 100), testStream(2, testCount(pkgAlpha, 7)), lintRun("lint", 4, 1, 2)),
 			},
 			cells: map[string]cellSpec{
 				"coverage":               measured("33.0%"),
 				"tests":                  measured("7"),
 				"packages without tests": measured("2"),
+				"lint findings":          measured("4"),
 			},
 		},
 		{
@@ -210,9 +213,9 @@ func degradedRows() []degradedRow {
 			in: delta.Input{
 				Repo:        repoAt(8, repoHealthy),
 				Head:        snap(81, 8, "go1.26.5", store.StatusOK, ""),
-				HeadMetrics: metrics(cov(pkgAlpha, 80, 100), testStream(1, testCount(pkgAlpha, 9))),
+				HeadMetrics: metrics(cov(pkgAlpha, 80, 100), testStream(1, testCount(pkgAlpha, 9)), lintRun("lint", 5, 0, 1)),
 				Base:        snap(80, 8, "go1.26.5", store.StatusOK, ""),
-				BaseMetrics: metrics(cov(pkgAlpha, 75, 100), testStream(1, testCount(pkgAlpha, 8))),
+				BaseMetrics: metrics(cov(pkgAlpha, 75, 100), testStream(1, testCount(pkgAlpha, 8)), lintRun("lint", 5, 0, 1)),
 			},
 			cells: map[string]cellSpec{
 				"coverage":                      measured("80.0%"),
@@ -221,6 +224,11 @@ func degradedRows() []degradedRow {
 				"tests change":                  measured("+1"),
 				"packages without tests":        measured("1"),
 				"packages without tests change": measured("+0"),
+				// Held level across the two sides on purpose. A moving lint count
+				// would nominate this repo a second time and change what the mover
+				// assertions below are actually testing.
+				"lint findings":        measured("5"),
+				"lint findings change": measured("+0"),
 			},
 			mover:                true,
 			moverBeforeFiltering: true,
@@ -312,6 +320,7 @@ func TestDegradedStatesNeverRenderAnUnmeasuredNumber(t *testing.T) {
 				{"coverage", "coverage"},
 				{"tests", "tests"},
 				{"untested_packages", "packages without tests"},
+				{"lint_findings", "lint findings"},
 			} {
 				v, present := wireRow[group.key]
 				if !present {
@@ -492,6 +501,25 @@ var repoWireFields = map[string]fieldKind{
 	"test_time":       kindGroup,
 	"test_time.value": kindMeasurement,
 	"test_time.delta": kindMeasurement,
+
+	// The lint signals. They share a marker and null together, the way the test
+	// signals do, because all three come out of one parsed analysis log.
+	//
+	// Suppressed findings are their own group rather than being folded into the
+	// total, and that is a measurement decision rather than a layout one: adding
+	// them to the total would make a repo look worse for having triaged its
+	// findings.
+	"lint_findings":       kindGroup,
+	"lint_findings.value": kindMeasurement,
+	"lint_findings.delta": kindMeasurement,
+
+	"lint_errors":       kindGroup,
+	"lint_errors.value": kindMeasurement,
+	"lint_errors.delta": kindMeasurement,
+
+	"lint_suppressed":       kindGroup,
+	"lint_suppressed.value": kindMeasurement,
+	"lint_suppressed.delta": kindMeasurement,
 }
 
 // envelopeWireFields is the same census one level up, over the object the repo
@@ -732,6 +760,12 @@ func TestEveryNumberIsInsideANullableGroup(t *testing.T) {
 		"coverage.delta",
 		"coverage.total",
 		"coverage.value",
+		"lint_errors.delta",
+		"lint_errors.value",
+		"lint_findings.delta",
+		"lint_findings.value",
+		"lint_suppressed.delta",
+		"lint_suppressed.value",
 		"test_failures.delta",
 		"test_failures.value",
 		"test_skipped.delta",

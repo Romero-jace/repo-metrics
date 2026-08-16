@@ -29,6 +29,27 @@ const (
 	// test output or it did not; there is no state where it counted the passes
 	// but not the failures.
 	KeyPkgWithoutTest = "pkg.without_tests"
+
+	// The lint keys carry the STEP's name as their scope rather than being
+	// repo-level singletons, because SARIF is the one repeatable format: a
+	// polyglot repo runs golangci-lint and eslint as two steps, and two
+	// repo-scoped rows would collide on the metrics primary key. Scoped, they sum.
+	//
+	// KeyLintFindings is their marker. A clean lint run emits it at zero, which is
+	// the whole distinction between a repo with nothing to fix and a repo nobody
+	// linted.
+	KeyLintFindings = "lint.findings"
+	// KeyLintErrors is the subset at SARIF's error level. A new error-level
+	// finding is worth more attention than a new nit, and folding the two together
+	// would hide that.
+	KeyLintErrors = "lint.findings.error"
+	// KeyLintSuppressed counts findings excluded by an inline suppression.
+	//
+	// It is deliberately NOT folded into the totals: counting suppressed findings
+	// against a repo would make it look worse for having triaged them, which is
+	// the opposite of the incentive this tool should create. It is tracked
+	// separately because a rising suppression count is its own finding.
+	KeyLintSuppressed = "lint.suppressed"
 )
 
 // Severity classifies a diagnostic.

@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/Romero-jace/repo-metrics/internal/collect/golang"
+	"github.com/Romero-jace/repo-metrics/internal/collect/sarif"
 	"github.com/Romero-jace/repo-metrics/internal/config"
 	"github.com/Romero-jace/repo-metrics/internal/run"
 	"github.com/Romero-jace/repo-metrics/internal/store"
@@ -47,6 +48,7 @@ type parser func(src source) ([]store.Metric, []Diagnostic, error)
 var parsers = map[config.Format]parser{
 	config.FormatGoCoverprofile: parseCoverprofile,
 	config.FormatGoTestJSON:     parseTestJSON,
+	config.FormatSARIF:          parseSARIF,
 }
 
 // parserFor returns the parser for a format. An unknown format is a programming
@@ -139,4 +141,63 @@ func parseTestJSON(src source) ([]store.Metric, []Diagnostic, error) {
 			tests.Malformed))
 	}
 	return metrics, diags, nil
+}
+
+// parseSARIF reads a static-analysis log into finding counts.
+//
+// The counts are scoped by the STEP's name rather than being repo-level, because
+// SARIF is the one repeatable format: a polyglot repo runs two linters as two
+// steps, and two repo-scoped rows would collide on the metrics primary key.
+// Scoped, they sum, and the report reads the total across every linter.
+func parseSARIF(src source) ([]store.Metric, []Diagnostic, error) {
+	f, err := os.Open(src.Path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("opening the analysis log: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	summary, sarifDiags, err := sarif.Parse(f)
+	diags := adoptSARIFDiags(sarifDiags)
+	if err != nil {
+		return nil, diags, fmt.Errorf("parsing the analysis log: %w", err)
+	}
+
+	// Emitted unconditionally, including all-zero, because a linter that ran and
+	// found nothing is the good news this tool should be able to report. Without
+	// the row it is indistinguishable from a repo nobody lints.
+	scope := src.Step.Name
+	metrics := []store.Metric{
+		{Key: KeyLintFindings, Scope: scope, Value: float64(summary.Active())},
+		{Key: KeyLintErrors, Scope: scope, Value: float64(summary.Levels[sarif.LevelError])},
+		{Key: KeyLintSuppressed, Scope: scope, Value: float64(summary.Suppressed)},
+	}
+
+	if len(summary.Drivers) == 0 {
+		// A log with no runs at all. It parsed, so this is not a failure, but
+		// zero findings from a tool that never identified itself is worth saying
+		// out loud rather than charting as an improvement.
+		diags = append(diags, warnf(
+			"the analysis log names no tool at all, so these zero findings are from a run that may not have happened"))
+	}
+	return metrics, diags, nil
+}
+
+// adoptSARIFDiags converts the parser's own diagnostics into this package's.
+//
+// The two types are deliberately separate: internal/collect/sarif has no
+// dependency on collect, which is what lets it stay a parser of a public format
+// rather than a piece of this tool.
+func adoptSARIFDiags(in []sarif.Diagnostic) []Diagnostic {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]Diagnostic, 0, len(in))
+	for _, d := range in {
+		severity := SeverityWarn
+		if d.Severity == sarif.SeverityError {
+			severity = SeverityError
+		}
+		out = append(out, Diagnostic{Severity: severity, Message: d.Message})
+	}
+	return out
 }

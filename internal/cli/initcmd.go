@@ -25,6 +25,7 @@ var starterConfig = fmt.Sprintf(
 	config.DefaultMinRepoDelta,
 	config.FormatGoCoverprofile,
 	config.FormatGoTestJSON,
+	config.FormatSARIF,
 	config.FormatGoCoverprofile,
 )
 
@@ -45,7 +46,7 @@ func defaultWindowText() string {
 
 // starterConfigFormat is the file with its tunables left as verbs, filled in by
 // starterConfig above. The verbs are database, window, min_statements,
-// min_repo_delta, and then the three format names, in that order.
+// min_repo_delta, and then the four format names, in that order.
 //
 // The format names come from the config package rather than being typed here
 // for the same reason the tunables do: a starter config naming a format the
@@ -102,6 +103,21 @@ repos:
         artifact_format: %s
         stdout_format: %s
         timeout: 10m
+
+      # Lint findings, read as SARIF so this entry is the same shape whatever
+      # the repo is written in: golangci-lint, eslint, ruff, semgrep and clippy
+      # all emit it. Commented out because it needs golangci-lint on your PATH,
+      # and a starter config should not fail on a machine that lacks it.
+      #
+      # The two max-issues flags are not optional if you want a measurement.
+      # golangci-lint caps output at 50 per linter and 3 per repeated message by
+      # DEFAULT, so without them the number you track is a cap. Measured on a
+      # real repo: 623 findings capped, 2760 uncapped, same run.
+      # - name: lint
+      #   command: ["golangci-lint", "run", "--output.sarif.path", "stdout",
+      #             "--max-issues-per-linter", "0", "--max-same-issues", "0"]
+      #   stdout_format: %s
+      #   timeout: 5m
 
   # Ingest only: no command, so it parses whatever CI already left on disk.
   # max_age is the freshness limit, past which the numbers get reported as stale

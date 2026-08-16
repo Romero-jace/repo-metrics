@@ -88,6 +88,41 @@ func signalFixtures() map[delta.SignalID]signalFixture {
 			absent:          cov("m/a", 5, 10),
 			zeroIsReachable: true,
 		},
+		delta.SigLintFindings: {
+			// A clean lint run. This is the single most important measured zero
+			// in the whole table: a repo with nothing left to fix is the good
+			// news the tool should be able to report, and it is byte-identical
+			// to a repo nobody lints unless the marker is there.
+			measuredZero:    lintRunMarker("lint", 0, 0, 0),
+			absent:          cov("m/a", 5, 10),
+			zeroIsReachable: true,
+		},
+		delta.SigLintErrors: {
+			// Findings, but none at error level. Reporting that as unmeasured
+			// would throw away the distinction the signal exists for.
+			measuredZero:    lintRunMarker("lint", 4, 0, 0),
+			absent:          cov("m/a", 5, 10),
+			zeroIsReachable: true,
+		},
+		delta.SigLintSuppressed: {
+			// Nothing suppressed, which is the state a rising count is measured
+			// against.
+			measuredZero:    lintRunMarker("lint", 4, 1, 0),
+			absent:          cov("m/a", 5, 10),
+			zeroIsReachable: true,
+		},
+	}
+}
+
+// lintRunMarker is what the SARIF parser stores for one lint step: all three
+// keys together, scoped by the step's name, written even when every count is
+// zero. Scoped rather than repo-level because a polyglot repo runs two linters
+// as two steps and they have to sum rather than collide.
+func lintRunMarker(step string, findings, errs, suppressed int) []store.Metric {
+	return []store.Metric{
+		{Key: collect.KeyLintFindings, Scope: step, Value: float64(findings)},
+		{Key: collect.KeyLintErrors, Scope: step, Value: float64(errs)},
+		{Key: collect.KeyLintSuppressed, Scope: step, Value: float64(suppressed)},
 	}
 }
 

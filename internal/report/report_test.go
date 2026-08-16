@@ -71,6 +71,21 @@ func testStream(withoutTests int, counts ...store.Metric) []store.Metric {
 		store.Metric{Key: collect.KeyPkgWithoutTest, Value: float64(withoutTests)})
 }
 
+// lintRun wraps lint counts the way the parser actually emits them: all three
+// keys together, scoped by the collection step's name rather than repo-level,
+// and written even when every count is zero.
+//
+// The marker is what distinguishes a repo with nothing to fix from a repo nobody
+// lints. The step scope is what lets a polyglot repo run two linters without the
+// second colliding with the first on the metrics primary key.
+func lintRun(step string, findings, errs, suppressed int) []store.Metric {
+	return []store.Metric{
+		{Key: collect.KeyLintFindings, Scope: step, Value: float64(findings)},
+		{Key: collect.KeyLintErrors, Scope: step, Value: float64(errs)},
+		{Key: collect.KeyLintSuppressed, Scope: step, Value: float64(suppressed)},
+	}
+}
+
 func snap(id, repoID int64, env string, status store.Status, errText string) *store.Snapshot {
 	return &store.Snapshot{
 		ID:          id,

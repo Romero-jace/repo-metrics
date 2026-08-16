@@ -84,6 +84,9 @@ const (
 	SigTestSkipped      SignalID = "test_skipped"
 	SigUntestedPackages SignalID = "untested_packages"
 	SigTestTime         SignalID = "test_time"
+	SigLintFindings     SignalID = "lint_findings"
+	SigLintErrors       SignalID = "lint_errors"
+	SigLintSuppressed   SignalID = "lint_suppressed"
 )
 
 // Unit is how a signal's numbers should be read and rendered.
@@ -117,16 +120,22 @@ const (
 	LowerIsBetter
 )
 
-// MarkerScope says whether a signal's presence marker is a repo-level row or a
-// package-scoped one.
+// MarkerScope says whether a signal's presence marker is a repo-level row or one
+// of possibly several rows carrying a scope.
 type MarkerScope int8
 
 // The two scopes a metric row can carry.
 const (
 	// ScopeRepo is the empty scope column: one row for the whole repo.
 	ScopeRepo MarkerScope = iota
-	// ScopePackage is a per-package row, so presence means at least one exists.
-	ScopePackage
+	// ScopeDetail is a row carrying a scope value, so presence means at least
+	// one exists.
+	//
+	// What the scope names depends on the signal, which is why this is no longer
+	// spelled ScopePackage: coverage breaks down by package, lint by the
+	// collection step that produced it, since a polyglot repo can run two linters
+	// and their findings have to sum rather than collide.
+	ScopeDetail
 )
 
 // Signal declares one metric the report publishes.
@@ -192,7 +201,7 @@ var signals = []Signal{
 		// packages stores neither, which is the header-only case this marker
 		// exists to catch.
 		Marker:      collect.KeyTotalStmts,
-		MarkerScope: ScopePackage,
+		MarkerScope: ScopeDetail,
 		Extract:     func(s Side) float64 { return s.Coverage.Pct() },
 		Nominates:   true,
 		// Filled from Options.MinRepoDelta at compute time, so the existing
@@ -269,6 +278,55 @@ var signals = []Signal{
 		Nominates:       false,
 		MinMoveFraction: 0.25,
 		Table:           false,
+	},
+	{
+		ID:        SigLintFindings,
+		Label:     "Lint findings",
+		Unit:      UnitCount,
+		Direction: LowerIsBetter,
+		// The three lint signals share this marker and this scope, for the same
+		// reason the test signals share theirs: they come out of one parsed log
+		// together. The scope holds the collection step's name rather than a
+		// package, so a repo running two linters sums them.
+		//
+		// Suppressed findings are deliberately NOT in this total. Counting them
+		// would make a repo look worse for having triaged its findings, which is
+		// the opposite of the incentive this tool should create.
+		Marker:      collect.KeyLintFindings,
+		MarkerScope: ScopeDetail,
+		Extract:     sumOver(collect.KeyLintFindings),
+		Nominates:   true,
+		MinMove:     1,
+		Table:       true,
+	},
+	{
+		ID:          SigLintErrors,
+		Label:       "Lint errors",
+		Unit:        UnitCount,
+		Direction:   LowerIsBetter,
+		Marker:      collect.KeyLintFindings,
+		MarkerScope: ScopeDetail,
+		Extract:     sumOver(collect.KeyLintErrors),
+		// Nominates on its own rather than leaving it to the total, because a
+		// week that trades ten nits for one error-level finding moves the total
+		// down and is not good news.
+		Nominates: true,
+		MinMove:   1,
+		Table:     false,
+	},
+	{
+		ID:          SigLintSuppressed,
+		Label:       "Suppressed findings",
+		Unit:        UnitCount,
+		Direction:   LowerIsBetter,
+		Marker:      collect.KeyLintFindings,
+		MarkerScope: ScopeDetail,
+		Extract:     sumOver(collect.KeyLintSuppressed),
+		// Reported and never leading. A rising suppression count is worth
+		// knowing about, but it moves for legitimate reasons often enough that
+		// leading the report on it would cost the reader's attention.
+		Nominates: false,
+		Table:     false,
 	},
 }
 

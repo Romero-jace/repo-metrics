@@ -1,6 +1,7 @@
 package report_test
 
 import (
+	"slices"
 	"strings"
 	"testing"
 
@@ -47,12 +48,21 @@ func TestUnmeasuredTestsAreNotRenderedAsZero(t *testing.T) {
 		t.Errorf("unmeasured tests rendered as a zero count:\n%s", unmeasured)
 	}
 
-	measured := repoRow(t, md, repoFresh)
-	if strings.Contains(measured, "not measured") {
-		t.Errorf("a repo that really was measured is claimed unmeasured:\n%s", measured)
+	// Checked cell by cell rather than by scanning the whole row. This repo
+	// legitimately says "not measured" in the lint columns, since nothing linted
+	// it, so a row-wide scan asserts something this test never meant: that a repo
+	// measuring ANY signal measured EVERY signal. It held only while every column
+	// came from the same two parsers.
+	measuredCells := tableCells(t, md, repoFresh)
+	for _, col := range []string{"tests", "packages without tests"} {
+		got := measuredCells[slices.Index(degradedColumns[:], col)]
+		if strings.Contains(got, "not measured") {
+			t.Errorf("the %s column reads %q for a repo whose test stream really was parsed:\n%s",
+				col, got, repoRow(t, md, repoFresh))
+		}
 	}
-	if !strings.Contains(measured, "| 3 |") {
-		t.Errorf("measured packages-without-tests count of 3 is missing:\n%s", measured)
+	if got := measuredCells[slices.Index(degradedColumns[:], "packages without tests")]; got != "3" {
+		t.Errorf("packages without tests reads %q, want the measured count 3", got)
 	}
 
 	rows := jsonRepoRows(t, rep)

@@ -123,6 +123,44 @@ repos:
         # Default: 10m
         timeout: 15m
 
+      - # Lint findings, read as SARIF rather than as any one linter's native
+        # output. golangci-lint, eslint, ruff, semgrep, clippy and CodeQL all
+        # emit it, so this entry is the same shape whatever the repo is written
+        # in. It is also the one format two signals in a repo may share, for
+        # exactly that reason: a polyglot repo runs two linters and the findings
+        # sum rather than collide.
+        name: lint
+
+        # The two max-issues flags are not optional if you want a measurement.
+        # golangci-lint caps output at 50 issues per linter and 3 per repeated
+        # message by DEFAULT, so without them the tracked number is a cap and a
+        # repo that doubles its findings can chart as flat. Measured on a real
+        # repo: 623 findings capped, 2760 uncapped, from the same run.
+        command:
+          - golangci-lint
+          - run
+          - --output.sarif.path
+          - stdout
+          - --max-issues-per-linter
+          - "0"
+          - --max-same-issues
+          - "0"
+        stdout_format: sarif
+
+        # A signal's env merges over the repo's rather than replacing it, so
+        # this entry still gets GOWORK=off from above.
+        env:
+          GOGC: "50"
+
+        timeout: 5m
+
+        # No artifact and no timeout worry about the exit code: golangci-lint
+        # exits 1 whenever it finds anything, and so do eslint, ruff and clippy.
+        # That is the tool reporting findings rather than reporting failure, and
+        # repo-metrics knows the difference from the format rather than from a
+        # setting here. A `go test` command exiting non-zero is treated as the
+        # red suite it is.
+
   # Ingest only: no command, so repo-metrics parses whatever is already on disk.
   # This is how you consume a profile your CI already produced.
   - name: built-by-ci

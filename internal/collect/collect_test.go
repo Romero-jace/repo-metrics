@@ -999,6 +999,50 @@ func TestModuleStreamCountsDependencies(t *testing.T) {
 	}
 }
 
+// mainOnlyStream is a repo that vendors nothing: `go list` always emits the main
+// module, so an empty dependency set is still a stream with one object in it
+// rather than an empty stream, which the parser rejects outright.
+const mainOnlyStream = `{"Path":"example.com/m","Main":true,"Dir":"/tmp/m"}
+`
+
+// A repo with no dependencies at all measured zero, which has to reach the
+// database as a row for the same reason a clean lint run does: without it, a
+// repo that vendors nothing is indistinguishable from one whose module list
+// never ran, and the report goes quiet about a signal it is watching instead of
+// saying the number is zero. This is the dependency half of
+// TestCleanLintRunStoresAMeasuredZero.
+//
+// Rare in Go and entirely real. internal/delta already describes this fixture at
+// the signal level, so the collector is the end nothing pinned.
+func TestARepoThatVendorsNothingStoresAMeasuredZero(t *testing.T) {
+	dir := repoDir(t)
+	step := depsStep(t, dir, mainOnlyStream, true)
+	step.Env = map[string]string{"GOPROXY": "https://proxy.example"}
+
+	res := collectAt(t, config.Repo{Name: "svc", Path: dir, Signals: []config.Signal{step}}, moduleNow)
+
+	// The anti-vacuity control. An empty dependency set is a stream that parsed
+	// fine, so a failed snapshot would mean the assertions below are about a
+	// collection that measured nothing at all.
+	if res.Snapshot.Status != store.StatusOK {
+		t.Fatalf("Status: got %q, want ok. A repo with no dependencies is a measurement, not a parse failure.\nDiagnostics:\n%s",
+			res.Snapshot.Status, diagText(res))
+	}
+	if !hasMetric(res, collect.KeyDepsTotal) {
+		t.Fatalf("the dependency marker was not written, so a repo that vendors nothing reads as one nobody has ever counted. Metrics: %+v",
+			res.Metrics)
+	}
+	if got := metric(t, res, collect.KeyDepsTotal, ""); got != 0 {
+		t.Errorf("dependencies: got %v, want a measured 0; the main module is not one of its own dependencies", got)
+	}
+	// The other measurement from the same stream, and the reason the three
+	// dependency signals do not share a marker: with nothing in the set there is
+	// no publish date to age, so that row is absent rather than zero.
+	if hasMetric(res, collect.KeyDepsAgeMedianDays) {
+		t.Error("an age was recorded for a dependency set with nothing in it, which is an age nobody measured")
+	}
+}
+
 // The case this whole design exists for.
 //
 // With GOPROXY=off the toolchain exits 0, writes nothing to stderr, streams

@@ -1,6 +1,8 @@
 package delta_test
 
 import (
+	"sort"
+	"strings"
 	"testing"
 
 	"github.com/Romero-jace/repo-metrics/internal/collect"
@@ -25,14 +27,42 @@ func testStreamMarker(withoutTests int) store.Metric {
 type signalFixture struct {
 	measuredZero []store.Metric
 	absent       []store.Metric
-	// zeroIsReachable is false for a signal whose measured-zero state cannot be
-	// produced by any real collector, which is true of coverage: a profile
-	// carrying no instrumented packages stores no rows at all, so there is no
-	// such thing as a measured coverage of zero with a marker present. Saying so
-	// here is a claim about the collector, checked by the comment above the row
-	// rather than by the compiler, so it is spelled out rather than inferred.
+	// zeroIsReachable is false for a signal whose measured-zero state no real
+	// collector can produce. Nothing sets it false today, and zeroUnreachable
+	// below is what pins that. It is a claim about the collector, so it is
+	// spelled out here rather than inferred from anything the compiler sees.
+	//
+	// Coverage is the one worth spelling out, because it reads like an exception
+	// and is not. Two different things arrive as zero and only one of them is a
+	// measurement. A profile with no instrumented packages stores no rows at
+	// all, so the marker is absent and the signal is unmeasured: collect's
+	// parser warns and emits nothing. A profile whose blocks are all present and
+	// none of them covered stores both keys for every package, so the marker is
+	// there and the value is 0.0 percent. The second is the ordinary state of an
+	// untested package under -coverpkg, and `go tool cover -func` prints
+	// "total: (statements) 0.0%" for it, so the toolchain calls it a
+	// measurement too.
 	zeroIsReachable bool
 }
+
+// zeroUnreachable pins which signals are allowed to set zeroIsReachable false,
+// with the reason each one is exempt, in the same idiom as the wire census's
+// pinned measurement list in report/degraded_test.go.
+//
+// It is empty on purpose. Every registered signal has a measured zero a real
+// collector produces, including coverage, so nothing here should opt out of the
+// measured-zero half of TestEverySignalDistinguishesZeroFromUnmeasured. The
+// field's doc comment above says why coverage is not the exception it looks
+// like; that sentence used to claim the opposite and was wrong.
+//
+// The reason it exists at all: zeroIsReachable wraps that entire assertion and
+// has no else branch, so flipping one fixture's bool deleted the check for that
+// signal while the subtest kept running and kept reporting ok. An audit did
+// exactly that to SigLintFindings, whose own fixture comment calls it the single
+// most important measured zero in the table, and build, vet, the full test run
+// and golangci-lint all stayed green. Opting a signal out now has to be a diff
+// against this map with a written reason, which a reviewer sees.
+var zeroUnreachable = map[delta.SignalID]string{}
 
 // The fixture table. A signal missing from here fails the test below, which is
 // the mechanism that stops a new signal shipping without anyone deciding what
@@ -188,19 +218,27 @@ func TestEverySignalDistinguishesZeroFromUnmeasured(t *testing.T) {
 		}
 
 		t.Run(string(sig.ID), func(t *testing.T) {
-			if fixture.zeroIsReachable {
-				measured := one(t, delta.Input{
-					Repo: store.Repo{Name: "measured"},
-					Head: snap("go1.26"), HeadMetrics: fixture.measuredZero,
-				}, opts()).Signal(sig.ID)
+			measured := one(t, delta.Input{
+				Repo: store.Repo{Name: "measured"},
+				Head: snap("go1.26"), HeadMetrics: fixture.measuredZero,
+			}, opts()).Signal(sig.ID)
+			value, got := measured.Head.Value()
 
-				value, got := measured.Head.Value()
+			if fixture.zeroIsReachable {
 				if !got {
 					t.Errorf("a collector that looked and found zero reports unmeasured, so a real finding is being thrown away")
 				}
 				if value != 0 {
 					t.Errorf("the measured-zero fixture measured %v, not 0, so this test is not exercising the case it names", value)
 				}
+			} else if got && value == 0 {
+				// The opt-out is a claim about the collector: no input it can be
+				// handed produces this signal's marker with a value of zero.
+				// Nothing here can check a collector, but the fixture can be held
+				// to the claim made on its behalf, so a signal opted out while its
+				// own measuredZero rows still measure zero fails here instead of
+				// silently dropping the assertion above.
+				t.Errorf("this signal is opted out of the measured-zero check on the grounds that a real collector cannot produce a measured zero, and yet its own measuredZero fixture produces exactly that. One of the two is wrong: either the rows are not really unreachable, or they are not the rows a collector would store")
 			}
 
 			absent := one(t, delta.Input{
@@ -212,6 +250,48 @@ func TestEverySignalDistinguishesZeroFromUnmeasured(t *testing.T) {
 				t.Errorf("a collector that never looked reports a measurement, which is this project's recurring bug: an absence published as a number")
 			}
 		})
+	}
+}
+
+// TestNoSignalOptsOutOfTheMeasuredZeroCheckUnannounced closes the hole in the
+// test above.
+//
+// zeroIsReachable is a one-word switch that deletes the measured-zero assertion
+// for whichever signal carries it, and the subtest that loses the assertion
+// still runs and still passes on the strength of the absent-metrics check alone.
+// Nothing else in the package reads the field, so a flip is invisible in a
+// review of the test run: it looks like a bool changing in a fixture table.
+//
+// Pinning the opt-out set turns that into a failure here, naming the signal, so
+// dropping the check for coverage or for a clean lint run costs a second diff
+// with a reason in it. The set is empty today, which is the claim being pinned:
+// every registered signal has a measured zero, so none of them opt out.
+func TestNoSignalOptsOutOfTheMeasuredZeroCheckUnannounced(t *testing.T) {
+	var optedOut []string
+	for id, fixture := range signalFixtures() {
+		if !fixture.zeroIsReachable {
+			optedOut = append(optedOut, string(id))
+		}
+	}
+	sort.Strings(optedOut)
+
+	pinned := make([]string, 0, len(zeroUnreachable))
+	for id := range zeroUnreachable {
+		pinned = append(pinned, string(id))
+	}
+	sort.Strings(pinned)
+
+	if strings.Join(optedOut, ",") != strings.Join(pinned, ",") {
+		t.Errorf("signals skipping the measured-zero assertion: got %v, pinned %v. A signal whose fixture sets zeroIsReachable false is asserting that no real collector can store its marker with a value of zero, which is a claim about a collector and belongs in zeroUnreachable with the reason written next to it, not in a bool nobody reads.", optedOut, pinned)
+	}
+
+	for id, reason := range zeroUnreachable {
+		if strings.TrimSpace(reason) == "" {
+			t.Errorf("zeroUnreachable[%q] carries no reason, so the opt-out it grants cannot be reviewed", id)
+		}
+		if delta.SignalByID(id).ID != id {
+			t.Errorf("zeroUnreachable exempts %q, which is not a registered signal, so the exemption is rot from a rename or a removal", id)
+		}
 	}
 }
 

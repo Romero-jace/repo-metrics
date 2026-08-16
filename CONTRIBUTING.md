@@ -26,7 +26,7 @@ before a red CI surprises you:
   at artifacts you made:
 
   ```sh
-  GOWORK=off go test ./internal/collect/golang/ ./cmd/repo-metrics/ \
+  GOWORK=off go test ./internal/collect/golang/ ./internal/delta/ ./cmd/repo-metrics/ \
     -coverpkg=./internal/collect/golang/... \
     -coverprofile=/tmp/coverage.out -json > /tmp/test-stream.json
   REPO_METRICS_TEST_PROFILE=/tmp/coverage.out \
@@ -38,6 +38,17 @@ before a red CI surprises you:
 
   `-count=1` matters: the test cache will otherwise hand back a pass from a run
   against a different profile.
+
+  Each package in that selection earns its place. `internal/collect/golang` is
+  the code under test. `cmd/repo-metrics` has no test files, which is what makes
+  the toolchain emit the `[no test files]` marker the JSON cross-check counts.
+  `internal/delta` links the package under test transitively, so its test binary
+  re-emits every instrumented block and the profile arrives with 282 data lines
+  over 141 distinct spans. Without it exactly one binary emits counters, no span
+  appears twice, and the dedup logic the cross-check exists to protect is never
+  exercised: a profile like that passes the percentage comparison even with the
+  merge replaced by a sum, because doubling both halves of a ratio changes
+  nothing.
 
 Individual targets are `build`, `test`, `vet`, `lint`, `fmt`, `tidy`, `clean`.
 
@@ -183,7 +194,7 @@ A signal is what the report publishes. It is not the same as a config `signals:`
 entry, which is a collection step: one `go test` step yields six reported
 signals, because the toolchain gives them up together.
 
-Seven places, and two drift guards will fail the build if you miss one, so the
+Seven places, and four drift guards will fail the build if you miss one, so the
 list is a shortcut rather than the enforcement:
 
 1. `internal/collect/keys.go` holds the metric key, with a comment saying which one
@@ -197,6 +208,11 @@ list is a shortcut rather than the enforcement:
 4. `internal/report/view.go` needs a field on `RepoView`, a case in `group()`, and a
    line in `buildRepo`. Named fields rather than a map, because the field census
    collapses list-element paths and a map forces one value type on every entry.
+   All three parts are guarded, by `TestEverySignalReachesTheWire` and
+   `TestEverySignalIsPublishedUnderItsRegistryID` in
+   `internal/report/wiring_test.go`, which also needs a row in its `signalFills`
+   table. That table is hand-written for the same reason the censuses are:
+   deriving it from the struct would be deriving it from the thing it guards.
 5. `internal/report/degraded_test.go` needs three census entries (the group and its
    two measurements) and the pinned measurement set below them.
 6. `internal/delta/signal_test.go` needs a fixture saying what the collector stores
@@ -213,6 +229,13 @@ on their own whether rising numbers are bad news. Pick one.
 every week and buries the ones that matter, so anything sensitive to machine load
 or to the calendar should be reported and never lead. If it moves in proportion
 to its own size, give it a `MinMoveFraction` rather than a fixed floor.
+
+The `repos` and `history` payloads carry their own censuses, in
+`internal/report/payload_census_test.go`, separate from the report's because they
+are separate wire contracts. A number added to either one lands outside any
+nullable group, and a consumer writing `row.lint_findings ?? 0` turns an absent
+measurement straight back into a measured zero, which is the bug at the top of
+this file arriving through a door the report's census cannot see.
 
 ## Adding a format
 

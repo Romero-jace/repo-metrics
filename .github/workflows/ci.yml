@@ -58,12 +58,18 @@ jobs:
       # is what makes go emit the "[no test files]" marker the JSON cross-check
       # counts. Without it that assertion compares zero against zero.
       #
-      # Honest about the scope: this exercises the wiring and the parser's
-      # agreement with go tool cover on a real profile. It is one package's
-      # worth of coverage, not a repo-scale -coverpkg=./... profile where the
-      # same block appears once per test binary, which is the case the
-      # dedup logic exists for. Widening the profile is the obvious next move if
-      # this proves cheap.
+      # internal/delta is in the selection for the dedup case specifically. It
+      # links the package under test transitively, so its binary re-emits every
+      # instrumented block and the profile arrives with each span twice, which is
+      # what the merge logic exists to handle. Before it was added exactly one
+      # binary emitted counters, no span appeared twice, and replacing the merge
+      # with a sum still passed: doubling both halves of a ratio leaves the
+      # percentage alone. The cross-check now recounts the artifact and compares
+      # absolute statement counts, which is the part a percentage cannot see.
+      #
+      # Still one package's worth of coverage rather than a repo-scale
+      # -coverpkg=./... profile. Widening it is the obvious next move if this
+      # proves cheap.
       - name: Produce real toolchain artifacts
         # Both artifacts go to the runner's temp dir rather than the workspace,
         # so nothing here can be mistaken for a checked-in file or picked up by
@@ -72,7 +78,7 @@ jobs:
         # The -json stream has to land in a file, so a failure here would show
         # an empty log. Replay the file before failing.
         run: |
-          go test ./internal/collect/golang/ ./cmd/repo-metrics/ \
+          go test ./internal/collect/golang/ ./internal/delta/ ./cmd/repo-metrics/ \
             -coverpkg=./internal/collect/golang/... \
             -coverprofile=${{ runner.temp }}/coverage.out \
             -json > ${{ runner.temp }}/test-stream.json \

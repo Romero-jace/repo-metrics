@@ -91,6 +91,7 @@ window: %s
 min_statements: %d
 
 # How far a repo's coverage has to move, in percentage points, to lead the report.
+# One number for both coverage signals, statement and line alike.
 min_repo_delta: %v
 
 # Each repo carries a list of signals: one entry per thing to measure. A signal

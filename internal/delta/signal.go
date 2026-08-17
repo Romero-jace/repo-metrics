@@ -276,6 +276,18 @@ type Signal struct {
 	// noisy in proportion to their size. A test suite has to get meaningfully
 	// slower, not slower by a fixed number of milliseconds.
 	MinMoveFraction float64
+	// FloorFromMinRepoDelta says this signal takes its absolute floor from the
+	// config's min_repo_delta rather than from MinMove above.
+	//
+	// It exists because the config has spelled that field min_repo_delta since
+	// before there was more than one coverage signal, and one knob still governs
+	// both. Declaring it here rather than naming the signals at the comparison
+	// site is what stopped this from being a bug twice: it WAS an `if sig.ID ==
+	// SigCoverage` test, so when line coverage arrived it silently fell through
+	// to the generic floor of 1 and needed ten times the movement of statement
+	// coverage to nominate a repo, under a doc comment claiming otherwise.
+	// TestEveryPercentSignalTakesItsFloorFromTheConfig pins it now.
+	FloorFromMinRepoDelta bool
 
 	// Table says this signal earns a column in the every-repo table. It is a
 	// layout decision and nothing else: a signal left out of the table is still
@@ -367,10 +379,10 @@ var signals = []Signal{
 		Markers:   []Marker{{collect.KeyTotalStmts, ScopeDetail}},
 		Extract:   func(s Side) float64 { return s.Coverage.Pct() },
 		Nominates: true,
-		// Filled from Options.MinRepoDelta at compute time, so the existing
-		// config field keeps working and no config file changes.
-		MinMove: 0,
-		Table:   true,
+		// The floor comes from the config's min_repo_delta, so the existing field
+		// keeps working and no config file changes.
+		FloorFromMinRepoDelta: true,
+		Table:                 true,
 	},
 	{
 		ID: SigCoverageLines,
@@ -387,10 +399,12 @@ var signals = []Signal{
 		Markers:   []Marker{{collect.KeyTotalLines, ScopeDetail}},
 		Extract:   ratioOver(collect.KeyCoveredLines, collect.KeyTotalLines),
 		Nominates: true,
-		// Filled from Options.MinRepoDelta at compute time, like the statement
-		// signal, so one config field still governs both.
-		MinMove: 0,
-		Table:   true,
+		// The same floor as the statement signal, from the same config field.
+		// This line is the fix for the bug described on the field: it used to say
+		// MinMove: 0 under a comment asserting that min_repo_delta governed both
+		// signals, while the comparison site named only the statement one.
+		FloorFromMinRepoDelta: true,
+		Table:                 true,
 	},
 	{
 		ID:        SigTests,

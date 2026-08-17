@@ -373,10 +373,12 @@ func nominate(d RepoDelta, base Side, opts Options) (movedBy []SignalID, severit
 		}
 
 		floor := sig.MinMove
-		if sig.ID == SigCoverage {
-			// Coverage's floor comes from the config, which has always spelled
-			// it min_repo_delta. Reading it here rather than duplicating it into
-			// the registry is what keeps existing config files working.
+		if sig.FloorFromMinRepoDelta {
+			// The registry says which signals these are, rather than this line
+			// naming them. Naming them here is what made line coverage ten times
+			// harder to nominate than statement coverage: the test read
+			// `sig.ID == SigCoverage`, and a second percent signal added later
+			// could not be seen from the config field it was documented to use.
 			floor = opts.MinRepoDelta
 		}
 		if floor <= 0 {

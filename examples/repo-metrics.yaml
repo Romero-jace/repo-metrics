@@ -35,6 +35,12 @@ min_statements: 20
 # How far a repo's coverage has to move, in percentage points, before it earns a
 # spot in the movers section. Lower it to catch smaller moves.
 #
+# One number governs BOTH coverage signals: statement coverage from a Go profile
+# and line coverage from an LCOV tracefile. They are different units and are
+# never summed, but the bar for leading a report is the same for each, so a
+# polyglot fleet does not need its Go repos held to a different threshold than
+# its Python and TypeScript ones.
+#
 # Do not set it to 0 expecting to see everything. Zero is not "no floor": the
 # code reads a non-positive floor as unset and falls back to 1.0 percentage
 # point, which is twice as coarse as the default, so you would see strictly

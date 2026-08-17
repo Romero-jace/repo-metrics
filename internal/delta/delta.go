@@ -46,12 +46,19 @@ const (
 	StateRemoved State = "removed"
 )
 
-// PackageDelta is one package's movement.
+// PackageDelta is one scope's movement.
+//
+// Named for the Go case it was written for, and kept that way because the shape
+// is identical in both units. What changed is the field below: the scope is a Go
+// import path when the counts are statements and a source file path when they
+// are lines, so it can no longer be called Package.
 type PackageDelta struct {
-	Package string
-	Head    Coverage
-	Base    Coverage
-	State   State
+	// Scope is whatever the collector filed these counts under: an import path
+	// from a Go profile, a file path from an LCOV tracefile.
+	Scope string
+	Head  Coverage
+	Base  Coverage
+	State State
 	// Contribution is how many percentage points of the repo's overall move
 	// this package accounts for. See culprits for why it is not simply the
 	// package's own change in percentage.
@@ -97,6 +104,16 @@ type RepoDelta struct {
 	HeadCoverage Coverage
 	BaseCoverage Coverage
 
+	// HeadCoverageLines and BaseCoverageLines are the same counts in the other
+	// unit, and they are protected by their own signal's gate rather than by
+	// coverage's: SigCoverageLines. Reading these behind a check on SigCoverage
+	// would publish an LCOV repo's numbers only when it also emitted a Go
+	// profile, and a Go repo's line counts whenever it emitted neither.
+	//
+	// They are never added to the pair above. See coverageByScope.
+	HeadCoverageLines Coverage
+	BaseCoverageLines Coverage
+
 	// HasBaseline is false when there is no earlier snapshot to compare
 	// against. There is no synthetic delta in that case: the report says so.
 	HasBaseline bool
@@ -140,13 +157,29 @@ type RepoDelta struct {
 	// are not in the same unit and never will be.
 	Severity float64
 
-	// Culprits are the packages that account for the repo's move, ranked by
-	// absolute contribution and capped.
+	// Culprits are the packages that account for the repo's statement-coverage
+	// move, ranked by absolute contribution and capped.
 	Culprits []PackageDelta
 	// Added and Removed are package names. They are report lines, not deltas:
 	// a deleted package is not a coverage regression.
 	Added   []string
 	Removed []string
+
+	// LineCulprits, AddedFiles and RemovedFiles are the same three findings for
+	// line coverage, ranked over source files instead of packages.
+	//
+	// Separate fields rather than one set whose meaning depends on which unit the
+	// repo happened to measure. A repo can measure both, and a single list would
+	// then have to pick one or interleave contributions computed against two
+	// different denominators — the second being arithmetic nobody could read.
+	//
+	// Before these existed, min_statements and the whole culprit ranking governed
+	// nothing at all for a repo measured through LCOV: the per-scope map was built
+	// only from statement keys, so every Python and TypeScript repo had an empty
+	// one and the report could name a coverage move without ever naming a file.
+	LineCulprits []PackageDelta
+	AddedFiles   []string
+	RemovedFiles []string
 }
 
 // Signal returns one signal's head measurement and its comparison against the
@@ -265,6 +298,8 @@ func computeRepo(in Input, opts Options) RepoDelta {
 
 	headPkgs := head.Packages
 	d.HeadCoverage = head.Coverage
+	headFiles := head.Files
+	d.HeadCoverageLines = head.CoverageLines
 
 	if in.Base == nil {
 		return d
@@ -303,6 +338,8 @@ func computeRepo(in Input, opts Options) RepoDelta {
 
 	basePkgs := base.Packages
 	d.BaseCoverage = base.Coverage
+	baseFiles := base.Files
+	d.BaseCoverageLines = base.CoverageLines
 
 	// Three states, not two. Either side being unidentified means the comparison
 	// cannot be made at all, and it is checked first: a repo that names no
@@ -318,6 +355,11 @@ func computeRepo(in Input, opts Options) RepoDelta {
 	}
 
 	d.Culprits, d.Added, d.Removed = culprits(headPkgs, basePkgs, d.HeadCoverage, opts)
+	// The same ranking over the other unit. culprits needs no changes for this:
+	// it was already generic over a scope-to-counts map and reads its floors from
+	// opts, so the only thing that had ever tied it to Go was the caller handing
+	// it a map built from statement keys.
+	d.LineCulprits, d.AddedFiles, d.RemovedFiles = culprits(headFiles, baseFiles, d.HeadCoverageLines, opts)
 
 	// A test-count change only counts when both sides measured tests. Otherwise
 	// turning on stdout_format would make every repo a mover on the strength of
@@ -433,7 +475,7 @@ func culprits(head, base map[string]Coverage, headTotal Coverage, opts Options) 
 		h, inHead := head[name]
 		b, inBase := base[name]
 
-		d := PackageDelta{Package: name, Head: h, Base: b, State: StateChanged}
+		d := PackageDelta{Scope: name, Head: h, Base: b, State: StateChanged}
 		switch {
 		case !inBase:
 			d.State = StateAdded
@@ -465,7 +507,7 @@ func culprits(head, base map[string]Coverage, headTotal Coverage, opts Options) 
 			return a > b
 		}
 		// Stable tiebreak so report output is deterministic.
-		return ranked[i].Package < ranked[j].Package
+		return ranked[i].Scope < ranked[j].Scope
 	})
 	if len(ranked) > opts.MaxCulprits {
 		ranked = ranked[:opts.MaxCulprits]
@@ -476,7 +518,20 @@ func culprits(head, base map[string]Coverage, headTotal Coverage, opts Options) 
 	return ranked, added, removed
 }
 
-func coverageByPackage(metrics []store.Metric) map[string]Coverage {
+// coverageByScope indexes one snapshot's per-scope coverage counts under the key
+// pair it is given.
+//
+// The key pair is a parameter rather than a constant because there are two
+// coverage units and they must never meet. A Go profile counts statements and an
+// LCOV tracefile counts lines; several statements on one source line collapse to
+// one line, so a map holding both would sum two denominators into a rate that
+// means neither. Calling this twice with different keys keeps them in separate
+// maps by construction, which is the same reasoning that gave line coverage its
+// own metric keys and its own signal rather than reusing coverage's.
+//
+// Anything else scoped in the snapshot is skipped: a lint or test row shares the
+// scope column and answers a different question.
+func coverageByScope(metrics []store.Metric, coveredKey, totalKey string) map[string]Coverage {
 	out := make(map[string]Coverage)
 	for _, m := range metrics {
 		if m.Scope == "" {
@@ -484,9 +539,9 @@ func coverageByPackage(metrics []store.Metric) map[string]Coverage {
 		}
 		c := out[m.Scope]
 		switch m.Key {
-		case collect.KeyCoveredStmts:
+		case coveredKey:
 			c.Covered = int(m.Value)
-		case collect.KeyTotalStmts:
+		case totalKey:
 			c.Total = int(m.Value)
 		default:
 			continue

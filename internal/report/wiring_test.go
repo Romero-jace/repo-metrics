@@ -48,7 +48,11 @@ var signalFills = []struct {
 	{delta.SigCoverage, func(r *report.RepoView) {
 		r.Coverage = &report.CoverageView{SignalView: report.SignalView{Value: signalSentinel}}
 	}},
-	{delta.SigCoverageLines, func(r *report.RepoView) { r.CoverageLines = signalGroup() }},
+	// A CoverageView like SigCoverage above, not a bare SignalView: the line
+	// group carries its own counts and its own per-file ranking now.
+	{delta.SigCoverageLines, func(r *report.RepoView) {
+		r.CoverageLines = &report.CoverageView{SignalView: report.SignalView{Value: signalSentinel}}
+	}},
 	{delta.SigTests, func(r *report.RepoView) { r.Tests = signalGroup() }},
 	{delta.SigTestFailures, func(r *report.RepoView) { r.TestFailures = signalGroup() }},
 	{delta.SigTestSkipped, func(r *report.RepoView) { r.TestSkipped = signalGroup() }},

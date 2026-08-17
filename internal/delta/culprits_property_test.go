@@ -210,10 +210,10 @@ func checkCase(t *testing.T, label string, c genCase, rng *rand.Rand) {
 	}
 	for _, p := range got.Culprits {
 		if math.IsNaN(p.Contribution) || math.IsInf(p.Contribution, 0) {
-			t.Fatalf("%s: %s contributes %v", label, p.Package, p.Contribution)
+			t.Fatalf("%s: %s contributes %v", label, p.Scope, p.Contribution)
 		}
 		if math.IsNaN(p.PointChange()) || math.IsInf(p.PointChange(), 0) {
-			t.Fatalf("%s: %s point change is %v", label, p.Package, p.PointChange())
+			t.Fatalf("%s: %s point change is %v", label, p.Scope, p.PointChange())
 		}
 	}
 
@@ -222,7 +222,7 @@ func checkCase(t *testing.T, label string, c genCase, rng *rand.Rand) {
 	// which makes absence here equivalent to a contribution of exactly zero and
 	// this an unconditional check on the counterfactual arithmetic.
 	for _, p := range got.Culprits {
-		if p.Package == twinPackage {
+		if p.Scope == twinPackage {
 			t.Fatalf("%s: a package unchanged between snapshots is ranked as a culprit contributing %v",
 				label, p.Contribution)
 		}
@@ -235,8 +235,8 @@ func checkCase(t *testing.T, label string, c genCase, rng *rand.Rand) {
 		if a < b {
 			t.Fatalf("%s: culprits are not ranked by absolute contribution: %v before %v", label, prev, cur)
 		}
-		if a == b && prev.Package > cur.Package {
-			t.Fatalf("%s: tied culprits are not in name order: %q before %q", label, prev.Package, cur.Package)
+		if a == b && prev.Scope > cur.Scope {
+			t.Fatalf("%s: tied culprits are not in name order: %q before %q", label, prev.Scope, cur.Scope)
 		}
 	}
 
@@ -265,7 +265,7 @@ func checkCase(t *testing.T, label string, c genCase, rng *rand.Rand) {
 	}
 	for i := range got.Culprits {
 		a, b := got.Culprits[i], again.Culprits[i]
-		if a.Package != b.Package || a.State != b.State || a.Contribution != b.Contribution {
+		if a.Scope != b.Scope || a.State != b.State || a.Contribution != b.Contribution {
 			t.Fatalf("%s: shuffling the input changed culprit %d from %+v to %+v", label, i, a, b)
 		}
 	}

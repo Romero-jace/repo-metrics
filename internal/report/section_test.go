@@ -236,21 +236,21 @@ func TestACulpritQuotesNoPercentageForASideThatDidNotExist(t *testing.T) {
 		switch c.State {
 		case "added":
 			if c.FromPct != nil {
-				t.Errorf("%s appears only in the newer snapshot, so its earlier coverage is %v rather than absent, which reads as a climb from nothing", c.Package, *c.FromPct)
+				t.Errorf("%s appears only in the newer snapshot, so its earlier coverage is %v rather than absent, which reads as a climb from nothing", c.Scope, *c.FromPct)
 			}
 			if c.ToPct == nil {
-				t.Errorf("%s was measured in the newer snapshot, so its coverage must still be published", c.Package)
+				t.Errorf("%s was measured in the newer snapshot, so its coverage must still be published", c.Scope)
 			}
 		case "removed":
 			if c.ToPct != nil {
-				t.Errorf("%s is gone, so quoting a later coverage of %v reads as a collapse to that figure rather than a deletion", c.Package, *c.ToPct)
+				t.Errorf("%s is gone, so quoting a later coverage of %v reads as a collapse to that figure rather than a deletion", c.Scope, *c.ToPct)
 			}
 			if c.FromPct == nil {
-				t.Errorf("%s was measured in the baseline, so its coverage must still be published", c.Package)
+				t.Errorf("%s was measured in the baseline, so its coverage must still be published", c.Scope)
 			}
 		default:
 			if c.FromPct == nil || c.ToPct == nil {
-				t.Errorf("%s exists in both snapshots, so both figures were measured and must both be published: from=%v to=%v", c.Package, c.FromPct, c.ToPct)
+				t.Errorf("%s exists in both snapshots, so both figures were measured and must both be published: from=%v to=%v", c.Scope, c.FromPct, c.ToPct)
 			}
 		}
 	}

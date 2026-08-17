@@ -21,14 +21,26 @@ Heads up: these two snapshots were taken under different toolchains, so some of 
 Heads up: nothing identified the toolchain either of these snapshots was measured under, so a runtime upgrade between them would look exactly like this.
 {{- end }}
 {{ if .Culprits }}
-Where it came from:
+Where the statement coverage came from:
 {{ range .Culprits }}
 {{- if eq .State "added" }}
-- `{{ .Package }}` (new code, {{ pctOf .ToPct }} covered): shifts the repo total by {{ pts .ContributionPoints }} just by showing up ({{ .Statements }} statements)
+- `{{ .Scope }}` (new code, {{ pctOf .ToPct }} covered): shifts the repo total by {{ pts .ContributionPoints }} just by showing up ({{ .Units }} statements)
 {{- else if eq .State "removed" }}
-- `{{ .Package }}` (gone, was {{ pctOf .FromPct }}): shifts the repo total by {{ pts .ContributionPoints }} just by going away ({{ .Statements }} statements)
+- `{{ .Scope }}` (gone, was {{ pctOf .FromPct }}): shifts the repo total by {{ pts .ContributionPoints }} just by going away ({{ .Units }} statements)
 {{- else }}
-- `{{ .Package }}`: {{ pctOf .FromPct }} to {{ pctOf .ToPct }}, worth {{ pts .ContributionPoints }} of the repo total ({{ .Statements }} statements)
+- `{{ .Scope }}`: {{ pctOf .FromPct }} to {{ pctOf .ToPct }}, worth {{ pts .ContributionPoints }} of the repo total ({{ .Units }} statements)
+{{- end }}
+{{- end }}
+{{ end -}}
+{{ if .LineCulprits }}
+Where the line coverage came from:
+{{ range .LineCulprits }}
+{{- if eq .State "added" }}
+- `{{ .Scope }}` (new file, {{ pctOf .ToPct }} covered): shifts the repo total by {{ pts .ContributionPoints }} just by showing up ({{ .Units }} lines)
+{{- else if eq .State "removed" }}
+- `{{ .Scope }}` (gone, was {{ pctOf .FromPct }}): shifts the repo total by {{ pts .ContributionPoints }} just by going away ({{ .Units }} lines)
+{{- else }}
+- `{{ .Scope }}`: {{ pctOf .FromPct }} to {{ pctOf .ToPct }}, worth {{ pts .ContributionPoints }} of the repo total ({{ .Units }} lines)
 {{- end }}
 {{- end }}
 {{ end -}}
@@ -57,7 +69,7 @@ printing them would claim the repo sits at 0.0% with every package tested. */}}
 | {{ .Name }} |{{ range .TableSignals }} {{ .Value }} | {{ .Delta }} |{{ end }} {{ if .CollectedAt }}{{ .CollectedAt }}{{ else }}never{{ end }}{{ if .EnvWarned }}, toolchain changed{{ end }}{{ if .EnvUnknownWarned }}, toolchain unidentified{{ end }}{{ if .DirtyWarned }}, uncommitted changes{{ end }} |
 {{- end }}
 
-Coverage is covered statements over total statements across the whole repo, so a big package counts for more than a small one.
+Coverage is covered over total across the whole repo, so a big package or file counts for more than a small one. Statement coverage counts statements from a Go profile and line coverage counts lines from an LCOV tracefile; several statements on one source line collapse to one line, so the two are different units and neither column is derivable from the other.
 {{ if anyEnvWarned .Repos }}
 A row marked toolchain changed had its two snapshots taken under different toolchains, so some of that move is not code. It is flagged whether or not the repo moved enough to lead the report.
 {{ end -}}
@@ -83,6 +95,28 @@ New:
 {{- if .RemovedPackages }}
 Gone:
 {{- range .RemovedPackages }}
+- `{{ . }}`
+{{- end }}
+{{ end }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{ if anyFileChurn .Repos }}
+## Files that came and went
+
+The same, for repos measured by line coverage rather than by a Go profile. Kept apart from the packages above because they are different units and different vocabularies: an import path is not a file path, and one list of both would invite reading them as one population.
+{{ range .Repos }}
+{{- if or .AddedFiles .RemovedFiles }}
+**{{ .Name }}**
+{{ if .AddedFiles }}
+New:
+{{- range .AddedFiles }}
+- `{{ . }}`
+{{- end }}
+{{ end }}
+{{- if .RemovedFiles }}
+Gone:
+{{- range .RemovedFiles }}
 - `{{ . }}`
 {{- end }}
 {{ end }}

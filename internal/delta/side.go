@@ -4,6 +4,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Romero-jace/repo-metrics/internal/collect"
 	"github.com/Romero-jace/repo-metrics/internal/store"
 )
 
@@ -16,11 +17,27 @@ import (
 type Side struct {
 	Snapshot *store.Snapshot
 
-	// Packages and Coverage are coverage's counts, which are its authority.
-	// Repo coverage is the sum of covered over the sum of total, never the mean
-	// of the per-package rates, so the counts have to survive as counts.
+	// Packages and Coverage are statement coverage's counts, which are its
+	// authority. Repo coverage is the sum of covered over the sum of total, never
+	// the mean of the per-package rates, so the counts have to survive as counts.
 	Packages map[string]Coverage
 	Coverage Coverage
+
+	// Files and CoverageLines are the same two things for line coverage, kept
+	// deliberately apart rather than folded into the pair above.
+	//
+	// They are a separate pair because statements and lines are separate units:
+	// merging the maps would produce a repo rate over two denominators that
+	// counts different things, which is the arithmetic the split metric keys
+	// exist to make impossible. The scope is a source file path here where it is
+	// an import path above, so even the map keys are drawn from different
+	// vocabularies and a collision between them would be meaningless rather than
+	// merely wrong.
+	//
+	// A repo can legitimately fill one, the other, or both — a Go service
+	// emitting an LCOV tracefile alongside its profile is not a misconfiguration.
+	Files         map[string]Coverage
+	CoverageLines Coverage
 
 	// pkgSum totals every scoped row per key. repoVal holds the repo-scoped row
 	// per key. present records which (key, scope) pairs existed at all, which is
@@ -52,13 +69,15 @@ type markerKey struct {
 func newSide(snap *store.Snapshot, metrics []store.Metric) Side {
 	s := Side{
 		Snapshot:  snap,
-		Packages:  coverageByPackage(metrics),
+		Packages:  coverageByScope(metrics, collect.KeyCoveredStmts, collect.KeyTotalStmts),
+		Files:     coverageByScope(metrics, collect.KeyCoveredLines, collect.KeyTotalLines),
 		pkgSum:    make(map[string]float64),
 		repoVal:   make(map[string]float64),
 		present:   make(map[markerKey]bool),
 		scopeSets: make(map[string]map[string]bool),
 	}
 	s.Coverage = sumCoverage(s.Packages)
+	s.CoverageLines = sumCoverage(s.Files)
 
 	for _, m := range metrics {
 		if m.Scope == "" {

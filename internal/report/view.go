@@ -162,10 +162,16 @@ type RepoView struct {
 	// both. Neither ever stands in for the other, which is why there is no
 	// fallback here: a Go repo reports null line coverage, honestly.
 	//
-	// It carries no counts or culprits of its own. The per-file ranking is
-	// statement coverage's, and duplicating it here would mean two culprit lists
-	// in different units competing to explain one repo.
-	CoverageLines *SignalView `json:"coverage_lines"`
+	// It is a full CoverageView, with its own counts and its own per-file
+	// ranking. It was a bare SignalView, on the reasoning that duplicating the
+	// ranking would mean two culprit lists in different units competing to
+	// explain one repo. That was wrong in the case that matters: a repo measured
+	// only through LCOV has no statement ranking to compete with, so the effect
+	// was not one list instead of two but no list at all — every Python and
+	// TypeScript repo reporting a coverage move with nothing named as its cause,
+	// and min_statements governing nothing. Two lists in two units, each labeled,
+	// is the honest shape; one list silently in the wrong unit is not.
+	CoverageLines *CoverageView `json:"coverage_lines"`
 	// The rest of the signals. Each is nil when nothing measured it, for the
 	// same reason and by the same mechanism.
 	//
@@ -262,11 +268,14 @@ type SignalView struct {
 // unable to say which level was not measured.
 type CoverageView struct {
 	SignalView
-	Covered         int           `json:"covered"`
-	Total           int           `json:"total"`
-	Culprits        []CulpritView `json:"culprits"`
-	AddedPackages   []string      `json:"added_packages"`
-	RemovedPackages []string      `json:"removed_packages"`
+	Covered  int           `json:"covered"`
+	Total    int           `json:"total"`
+	Culprits []CulpritView `json:"culprits"`
+	// AddedScopes and RemovedScopes are packages under statement coverage and
+	// files under line coverage, renamed off `added_packages` for the reason
+	// CulpritView.Scope was: one type serves both units now.
+	AddedScopes   []string `json:"added_scopes"`
+	RemovedScopes []string `json:"removed_scopes"`
 }
 
 // buildSignal is the only place a SignalView is constructed.
@@ -401,7 +410,16 @@ func (r RepoView) group(id delta.SignalID) *SignalView {
 		}
 		return &r.Coverage.SignalView
 	case delta.SigCoverageLines:
-		return r.CoverageLines
+		// Nil-checked for the same reason SigCoverage above is, and it became
+		// necessary the moment this field stopped being a bare *SignalView:
+		// taking the address of an embedded field panics on a nil parent. The
+		// panic would land only on repos that measured NO line coverage, which
+		// is most of them and is the path a test built from measured fixtures
+		// never touches.
+		if r.CoverageLines == nil {
+			return nil
+		}
+		return &r.CoverageLines.SignalView
 	case delta.SigTests:
 		return r.Tests
 	case delta.SigTestFailures:
@@ -578,7 +596,7 @@ func (r RepoView) AddedPackages() []string {
 	if r.Coverage == nil {
 		return nil
 	}
-	return r.Coverage.AddedPackages
+	return r.Coverage.AddedScopes
 }
 
 // RemovedPackages reads through a nil coverage group. See Culprits.
@@ -586,7 +604,34 @@ func (r RepoView) RemovedPackages() []string {
 	if r.Coverage == nil {
 		return nil
 	}
-	return r.Coverage.RemovedPackages
+	return r.Coverage.RemovedScopes
+}
+
+// LineCulprits, AddedFiles and RemovedFiles are the same three accessors for the
+// line-coverage group, nil-safe for the same reason and more often exercised on
+// the nil path: a Go repo measures no line coverage at all, so every one of these
+// reads through a nil group on the majority of a Go-heavy fleet.
+func (r RepoView) LineCulprits() []CulpritView {
+	if r.CoverageLines == nil {
+		return nil
+	}
+	return r.CoverageLines.Culprits
+}
+
+// AddedFiles reads through a nil line-coverage group. See LineCulprits.
+func (r RepoView) AddedFiles() []string {
+	if r.CoverageLines == nil {
+		return nil
+	}
+	return r.CoverageLines.AddedScopes
+}
+
+// RemovedFiles reads through a nil line-coverage group. See LineCulprits.
+func (r RepoView) RemovedFiles() []string {
+	if r.CoverageLines == nil {
+		return nil
+	}
+	return r.CoverageLines.RemovedScopes
 }
 
 // EnvWarned reports whether this repo's delta has to carry the toolchain
@@ -632,14 +677,23 @@ func (r RepoView) DirtyWarned() bool {
 	return r.GitDirty && r.HasSnapshot && r.Status != string(store.StatusFailed)
 }
 
-// CulpritView is one package named as accounting for a repo's move.
+// CulpritView is one scope named as accounting for a repo's move.
 //
 // It carries no gate of its own. A culprit only exists inside a non-nil
 // CoverageView, so the parent already says these figures were measured, and
 // restating it here would be the redundant second source of truth the boolean
 // gates were removed for.
+//
+// The two size-bearing fields are named for no unit on purpose. This one type
+// serves both coverage groups, and its numbers are statements under `coverage`
+// and lines under `coverage_lines` — so a field called `statements` would have
+// published a line count under a statement's name at the wire, one layer past
+// where the split metric keys make that impossible in the store. The parent
+// group names the unit; these do not restate it.
 type CulpritView struct {
-	Package string `json:"package"`
+	// Scope is a Go import path under statement coverage and a source file path
+	// under line coverage. It was `package`, from when only the first existed.
+	Scope string `json:"scope"`
 	// State is changed, added, or removed. An added or removed package is
 	// listed for context, never described as a regression.
 	State string `json:"state"`
@@ -663,7 +717,11 @@ type CulpritView struct {
 	// shifts the repo total by appearing or disappearing just as much as by
 	// being tested more.
 	ContributionPoints float64 `json:"contribution_points"`
-	Statements         int     `json:"statements"`
+	// Units is the scope's size in whichever unit its parent group counts, and it
+	// is the larger of the two sides, which is the size min_statements is applied
+	// to. It was `statements`; see the type comment for why that name could not
+	// survive a second coverage unit.
+	Units int `json:"units"`
 }
 
 // Build converts a whole computed report into the render-ready view.
@@ -872,11 +930,6 @@ func buildRepo(r delta.RepoDelta) RepoView {
 	// unmeasured rule and the has-a-baseline rule are both inside buildSignal,
 	// which means neither can be written differently for a new signal by
 	// accident.
-	// Assigned here rather than beside the statement-coverage block below,
-	// because that block returns early when nothing measured statements. A Python
-	// or TypeScript repo is exactly that case, and it is the one that has line
-	// coverage to report.
-	out.CoverageLines = buildSignal(r.Signal(delta.SigCoverageLines))
 	out.Tests = buildSignal(r.Signal(delta.SigTests))
 	out.TestFailures = buildSignal(r.Signal(delta.SigTestFailures))
 	out.TestSkipped = buildSignal(r.Signal(delta.SigTestSkipped))
@@ -893,61 +946,80 @@ func buildRepo(r delta.RepoDelta) RepoView {
 		out.MovedBy = append(out.MovedBy, string(id))
 	}
 
-	// Coverage is the one signal built by hand, because it carries counts and
-	// package findings the others do not. Its value and its delta still come
-	// from buildSignal, so the part that can go wrong is shared and only the
-	// extras are bespoke.
-	base := buildSignal(r.Signal(delta.SigCoverage))
+	// The two coverage groups are the ones built by hand, because they carry
+	// counts and per-scope findings the others do not. Both go through one
+	// constructor, so the measured gate, the churn gate and the culprit gate
+	// cannot be written differently for one unit than for the other — which is
+	// how line coverage came to have none of them.
+	out.Coverage = buildCoverageGroup(
+		r.Signal(delta.SigCoverage), r.HeadCoverage, r.Culprits, r.Added, r.Removed, r.HasBaseline)
+	out.CoverageLines = buildCoverageGroup(
+		r.Signal(delta.SigCoverageLines), r.HeadCoverageLines, r.LineCulprits, r.AddedFiles, r.RemovedFiles, r.HasBaseline)
+	return out
+}
+
+// buildCoverageGroup assembles one coverage group in one unit.
+//
+// It takes the counts and the ranking as arguments rather than reading them off
+// the RepoDelta, which is what keeps it unit-agnostic: the caller pairs a signal
+// with the counts measured in that signal's own unit, and nothing here can reach
+// the other pair. A nil return renders as null, the same as any other unmeasured
+// group.
+func buildCoverageGroup(
+	sd delta.SignalDelta,
+	counts delta.Coverage,
+	ranked []delta.PackageDelta,
+	added, removed []string,
+	hasBaseline bool,
+) *CoverageView {
+	// The value and the delta still come from buildSignal, so the part that can
+	// go wrong is shared and only the extras are bespoke.
+	base := buildSignal(sd)
 	if base == nil {
-		return out
+		return nil
 	}
-	coverage := CoverageView{
-		SignalView: *base,
-		Covered:    r.HeadCoverage.Covered,
-		Total:      r.HeadCoverage.Total,
+	out := CoverageView{SignalView: *base, Covered: counts.Covered, Total: counts.Total}
+
+	// Scope churn is a comparison too. A head that measured no coverage makes
+	// every baseline scope look deleted, so the report would list a repo's whole
+	// tree as gone on the strength of an empty profile.
+	if sd.Change.Meaningful() || !hasBaseline {
+		out.AddedScopes = added
+		out.RemovedScopes = removed
 	}
 
-	// Package churn is a comparison too. A head that measured no coverage makes
-	// every baseline package look deleted, so the report would list a repo's
-	// whole tree as gone on the strength of an empty profile.
-	if r.Signal(delta.SigCoverage).Change.Meaningful() || !r.HasBaseline {
-		coverage.AddedPackages = r.Added
-		coverage.RemovedPackages = r.Removed
-	}
-
-	// A baseline existing is not enough for a coverage delta: both sides have
-	// to have measured. Otherwise an empty profile subtracts its zero from a
-	// real baseline and posts the entire baseline as this week's drop.
+	// A baseline existing is not enough for a coverage delta: both sides have to
+	// have measured. Otherwise an empty profile subtracts its zero from a real
+	// baseline and posts the entire baseline as this week's drop.
 	//
 	// Culprits explain a coverage move under the same condition. With nothing
 	// measured on one side there is no move to explain, only an artifact, and
-	// naming a package as its cause is worse than saying nothing.
-	if r.Signal(delta.SigCoverage).Change.Meaningful() {
-		for _, c := range r.Culprits {
-			view := CulpritView{
-				Package:            c.Package,
-				State:              string(c.State),
-				ContributionPoints: c.Contribution,
-				Statements:         maxInt(c.Head.Total, c.Base.Total),
-			}
-			// Each side is published only in the states where something
-			// measured it. Coverage.Pct() answers 0 on a package that is not
-			// there, because its total is zero, and that zero is the fabricated
-			// figure this switch exists to withhold.
-			if c.State != delta.StateAdded {
-				from := c.Base.Pct()
-				view.FromPct = &from
-			}
-			if c.State != delta.StateRemoved {
-				to := c.Head.Pct()
-				view.ToPct = &to
-			}
-			coverage.Culprits = append(coverage.Culprits, view)
-		}
+	// naming a scope as its cause is worse than saying nothing.
+	if !sd.Change.Meaningful() {
+		return &out
 	}
-
-	out.Coverage = &coverage
-	return out
+	for _, c := range ranked {
+		view := CulpritView{
+			Scope:              c.Scope,
+			State:              string(c.State),
+			ContributionPoints: c.Contribution,
+			Units:              maxInt(c.Head.Total, c.Base.Total),
+		}
+		// Each side is published only in the states where something measured it.
+		// Coverage.Pct() answers 0 on a scope that is not there, because its total
+		// is zero, and that zero is the fabricated figure this switch exists to
+		// withhold.
+		if c.State != delta.StateAdded {
+			from := c.Base.Pct()
+			view.FromPct = &from
+		}
+		if c.State != delta.StateRemoved {
+			to := c.Head.Pct()
+			view.ToPct = &to
+		}
+		out.Culprits = append(out.Culprits, view)
+	}
+	return &out
 }
 
 func maxInt(a, b int) int {

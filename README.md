@@ -489,17 +489,17 @@ from here:
 {"value": 89.33459178857952, "delta": -1.7215452237896613,
  "covered": 1893, "total": 2119,
  "culprits": [
-   {"package": "github.com/Romero-jace/repo-metrics/internal/retention",
+   {"scope": "github.com/Romero-jace/repo-metrics/internal/retention",
     "state": "added", "from_pct": null, "to_pct": 0,
-    "contribution_points": -1.023403438150794, "statements": 24},
-   {"package": "github.com/Romero-jace/repo-metrics/internal/config",
+    "contribution_points": -1.023403438150794, "units": 24},
+   {"scope": "github.com/Romero-jace/repo-metrics/internal/config",
     "state": "changed", "from_pct": 95.27896995708154, "to_pct": 88.8,
-    "contribution_points": -0.7224966985755685, "statements": 250},
-   {"package": "github.com/Romero-jace/repo-metrics/internal/goingaway",
+    "contribution_points": -0.7224966985755685, "units": 250},
+   {"scope": "github.com/Romero-jace/repo-metrics/internal/goingaway",
     "state": "removed", "from_pct": 87.5, "to_pct": null,
-    "contribution_points": 0.020546058294868885, "statements": 24}],
- "added_packages": ["github.com/Romero-jace/repo-metrics/internal/retention"],
- "removed_packages": ["github.com/Romero-jace/repo-metrics/internal/goingaway"]}
+    "contribution_points": 0.020546058294868885, "units": 24}],
+ "added_scopes": ["github.com/Romero-jace/repo-metrics/internal/retention"],
+ "removed_scopes": ["github.com/Romero-jace/repo-metrics/internal/goingaway"]}
 ```
 
 `covered` and `total` are the statement counts `value` was computed from, so a
@@ -507,16 +507,29 @@ consumer can re-derive the percentage or roll several repos up without averaging
 percentages. `contribution_points` is the ranking key described under "How it
 decides what to tell you": percentage points of the whole repo, not of the
 package, which is why a 24-statement package that arrived untested outranks a
-250-statement one that slipped six and a half points. `statements` is the larger of the two
-sides, which is the size the `min_statements` floor is applied to. `state` is
+250-statement one that slipped six and a half points. `units` is the larger of the two
+sides, which is the size the `min_statements` floor is applied to. It counts
+statements under `coverage` and lines under `coverage_lines`, and is named for
+neither: the same group type serves both units, and a field called `statements`
+holding a line count would put a wrong-unit label at the wire, which is what the
+two separate metric keys exist to prevent one layer down. `scope` is a Go import
+path under `coverage` and a source file path under `coverage_lines`, for the same
+reason. `state` is
 `changed`, `added` or `removed`, and it is what stops the two percentages being
 misread: `from_pct` is null for a package that did not exist in the baseline and
 `to_pct` is null for one that is gone, because a zero there would chart a
 deletion as a collapse and a new package as a climb out of nothing.
 
-`added_packages` and `removed_packages` are the same churn without the ranking,
-and the floor does not apply to them: a three-statement package that appeared is
-too small to be a culprit and is still named here.
+`added_scopes` and `removed_scopes` are the same churn without the ranking, and
+the floor does not apply to them: a three-statement package that appeared is too
+small to be a culprit and is still named here.
+
+`coverage_lines` carries this identical shape, in lines over files. That is the
+whole of what it means for a Python or TypeScript repo to be a first-class
+citizen here: not just a percentage in the table, but a named file to go and look
+at when the percentage moves. The two groups are never summed and never stand in
+for one another, so a Go repo reports `"coverage_lines": null` and a repo measured
+only through LCOV reports `"coverage": null`, each honestly.
 
 All three of those lists are `null` rather than `[]` when there is nothing in
 them, so a repo whose coverage held steady has a coverage group with `value` and

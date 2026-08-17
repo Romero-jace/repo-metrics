@@ -563,14 +563,35 @@ var repoWireFields = map[string]fieldKind{
 	// exception clause for lists of objects. An exception clause is how this
 	// guard gets quietly relaxed.
 	"coverage.culprits":                       kindContext,
-	"coverage.culprits[].package":             kindContext,
+	"coverage.culprits[].scope":               kindContext,
 	"coverage.culprits[].state":               kindContext,
 	"coverage.culprits[].from_pct":            kindMeasurement,
 	"coverage.culprits[].to_pct":              kindMeasurement,
 	"coverage.culprits[].contribution_points": kindMeasurement,
-	"coverage.culprits[].statements":          kindMeasurement,
-	"coverage.added_packages":                 kindContext,
-	"coverage.removed_packages":               kindContext,
+	"coverage.culprits[].units":               kindMeasurement,
+	"coverage.added_scopes":                   kindContext,
+	"coverage.removed_scopes":                 kindContext,
+
+	// coverage_lines carries the identical shape, because it is the same group
+	// type in the other unit. Listed out rather than generated from the block
+	// above for the reason the per-signal keys below are: this guard exists to
+	// make a person classify every field that reaches the wire, and deriving one
+	// coverage group's entries from the other's is the automatic agreement it
+	// refuses. The duplication is the guard working.
+	// Its group, value and delta keys are already in the per-signal block below,
+	// from when this was a bare SignalView. Only the coverage-specific fields are
+	// new.
+	"coverage_lines.covered":                        kindMeasurement,
+	"coverage_lines.total":                          kindMeasurement,
+	"coverage_lines.culprits":                       kindContext,
+	"coverage_lines.culprits[].scope":               kindContext,
+	"coverage_lines.culprits[].state":               kindContext,
+	"coverage_lines.culprits[].from_pct":            kindMeasurement,
+	"coverage_lines.culprits[].to_pct":              kindMeasurement,
+	"coverage_lines.culprits[].contribution_points": kindMeasurement,
+	"coverage_lines.culprits[].units":               kindMeasurement,
+	"coverage_lines.added_scopes":                   kindContext,
+	"coverage_lines.removed_scopes":                 kindContext,
 
 	// Every signal but coverage renders the same two keys, because they share
 	// one SignalView. Listing them per signal rather than deriving them is the
@@ -885,12 +906,18 @@ func TestEveryNumberIsInsideANullableGroup(t *testing.T) {
 		"coverage.covered",
 		"coverage.culprits[].contribution_points",
 		"coverage.culprits[].from_pct",
-		"coverage.culprits[].statements",
 		"coverage.culprits[].to_pct",
+		"coverage.culprits[].units",
 		"coverage.delta",
 		"coverage.total",
 		"coverage.value",
+		"coverage_lines.covered",
+		"coverage_lines.culprits[].contribution_points",
+		"coverage_lines.culprits[].from_pct",
+		"coverage_lines.culprits[].to_pct",
+		"coverage_lines.culprits[].units",
 		"coverage_lines.delta",
+		"coverage_lines.total",
 		"coverage_lines.value",
 		"dependencies.delta",
 		"dependencies.value",

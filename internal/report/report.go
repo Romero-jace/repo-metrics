@@ -60,6 +60,19 @@ var funcs = template.FuncMap{
 		return false
 	},
 
+	// anyFileChurn is the same question for line coverage. Separate rather than
+	// folded into the one above, because the two feed separate sections: one
+	// heading over both would put Go import paths and TypeScript file paths in one
+	// list under the word "packages".
+	"anyFileChurn": func(repos []RepoView) bool {
+		for _, r := range repos {
+			if len(r.AddedFiles()) > 0 || len(r.RemovedFiles()) > 0 {
+				return true
+			}
+		}
+		return false
+	},
+
 	// repos renders a count of repos with its noun, so a single-repo config
 	// cannot produce "out of 1 repos in this config". It goes through the same
 	// helper as days for the same reason.

@@ -78,9 +78,9 @@ func TestCulpritsRankByContributionNotPercentageSwing(t *testing.T) {
 
 	// m/tiny swung a full 100 points on its own; m/big only swung 40.
 	// Contribution has to disagree with that ordering.
-	if got.Culprits[0].Package != "m/big" {
+	if got.Culprits[0].Scope != "m/big" {
 		t.Errorf("top culprit: got %q, want m/big. Ranking fell back to per-package percentage swing.",
-			got.Culprits[0].Package)
+			got.Culprits[0].Scope)
 	}
 	if !approx(got.Culprits[0].Contribution, -39.88) {
 		t.Errorf("m/big contribution: got %.2f, want about -39.88", got.Culprits[0].Contribution)
@@ -115,8 +115,8 @@ func TestNoiseFloorExcludesTinyPackages(t *testing.T) {
 	if len(got.Culprits) != 1 {
 		t.Fatalf("want only the big package, got %+v", got.Culprits)
 	}
-	if got.Culprits[0].Package != "m/big" {
-		t.Errorf("got %q", got.Culprits[0].Package)
+	if got.Culprits[0].Scope != "m/big" {
+		t.Errorf("got %q", got.Culprits[0].Scope)
 	}
 }
 
@@ -161,7 +161,7 @@ func TestAddedAndRemovedPackagesAreClassified(t *testing.T) {
 	}
 
 	for _, c := range got.Culprits {
-		switch c.Package {
+		switch c.Scope {
 		case "m/new":
 			if c.State != delta.StateAdded {
 				t.Errorf("m/new state: got %q, want added", c.State)
@@ -184,7 +184,7 @@ func TestRemovedPackageIsNotAHundredPointDrop(t *testing.T) {
 	}, opts())
 
 	for _, c := range got.Culprits {
-		if c.Package == "m/gone" && c.PointChange() <= -99 {
+		if c.Scope == "m/gone" && c.PointChange() <= -99 {
 			// The point change is arithmetically -100; what matters is that
 			// it is labeled removed so the report never calls it a drop.
 			if c.State != delta.StateRemoved {
@@ -337,8 +337,8 @@ func TestCulpritsAreCappedAndSorted(t *testing.T) {
 		}
 	}
 	// m/a fell furthest, so it must lead.
-	if got.Culprits[0].Package != "m/a" {
-		t.Errorf("top culprit: got %q, want m/a", got.Culprits[0].Package)
+	if got.Culprits[0].Scope != "m/a" {
+		t.Errorf("top culprit: got %q, want m/a", got.Culprits[0].Scope)
 	}
 }
 

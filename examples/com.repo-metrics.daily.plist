@@ -7,29 +7,43 @@
 	<key>Label</key>
 	<string>com.repo-metrics.daily</string>
 
-	<!-- ProgramArguments is argv, not a shell line, so there is no way to say
-	     "collect and then report" without handing the pair to a shell. This is
-	     the one place a shell string is the right answer.
+	<!-- This runs repo-metrics-daily.sh beside this file rather than the two
+	     commands directly, and the reason is the tradeoff the previous version of
+	     this comment described and could not escape.
 
-	     The two commands are separated by ";" and deliberately not by "&&".
-	     collect exits 1 whenever any single repo failed, which is the design:
-	     it keeps going so one unreachable repo does not cost you the other
-	     nine (see runCollect in internal/cli/collect.go, which tallies failed
-	     repos and returns an error at the end, and main.go, which turns that
-	     into exit status 1). Chained with "&&", that same deliberate exit code
-	     would cancel the report entirely because one repo out of ten was down,
-	     which is the exact opposite of the promise. With ";" the report always
-	     renders from whatever did collect. Please do not "fix" this back.
+	     It used to be "collect ; report" in a shell string, separated by ";" and
+	     deliberately not "&&". collect exits 1 whenever any single repo failed,
+	     which is the design: it keeps going so one unreachable repo does not cost
+	     you the other nine (see runCollect in internal/cli/collect.go, which
+	     tallies failed repos and returns an error at the end, and main.go, which
+	     turns that into exit status 1). Chained with "&&", that same deliberate
+	     exit code would cancel the report because one repo out of ten was down.
+	     So ";" was correct, and its price was that the job's status became
+	     report's alone — and report's status is unconditionally 0. The job could
+	     not fail.
 
-	     The price of ";" is that the job's status is now report's alone, so a
-	     collect failure shows up in the error log rather than in launchctl
-	     print. That log is what StandardErrorPath below is for.
+	     The wrapper is not a reversal of that reasoning, it is the way out of it.
+	     It decides the exit code from what the database actually stored, runs the
+	     report regardless, and then exits with the code it decided. The report
+	     still always renders. The job can now also fail, with a distinct code per
+	     cause: 1 nothing stored, 2 a repo failed, 3 the database is corrupt,
+	     4 the data is stale, 5 a run was already in progress. It also takes a lock
+	     and backs the database up first, neither of which the tool does itself.
+
+	     Do NOT put "collect ; report" back here. Read the header of
+	     repo-metrics-daily.sh first if it looks like the simpler option.
+
+	     ONE THING THIS JOB CANNOT DO: notice that it stopped running. The staleness
+	     check lives inside it, so a launchd that never fires never runs the check
+	     either, and a report built a month later still looks current. Schedule
+	     `repo-metrics-daily.sh check <config>` somewhere that does not share a fate
+	     with this job — another machine, or a shell profile hook. See examples/README.md.
 
 	     Absolute paths everywhere on purpose: a launchd agent gets a minimal
 	     PATH, and it does not expand ~ or $HOME anywhere in this file.
 
 	     Every /Users/YOUR-USER below is a placeholder you have to replace by
-	     hand, in all four keys that carry it. Because ~ and $HOME are not
+	     hand, in all five keys that carry it. Because ~ and $HOME are not
 	     expanded, a literal path is the only thing that can go here and no
 	     example can know your home directory. A home directory rather than
 	     something like /srv because /srv cannot be created on macOS: the
@@ -38,20 +52,33 @@
 	<key>ProgramArguments</key>
 	<array>
 		<string>/bin/sh</string>
-		<string>-c</string>
-		<string>/usr/local/bin/repo-metrics collect --config /Users/YOUR-USER/repo-metrics/repo-metrics.yaml ; /usr/local/bin/repo-metrics report --config /Users/YOUR-USER/repo-metrics/repo-metrics.yaml --window 168h --out /Users/YOUR-USER/repo-metrics/report.md</string>
+		<string>/Users/YOUR-USER/repo-metrics/repo-metrics-daily.sh</string>
+		<string>/Users/YOUR-USER/repo-metrics/repo-metrics.yaml</string>
 	</array>
 
-	<!-- launchd starts the job with a minimal PATH of /usr/bin:/bin:/usr/sbin:/sbin,
-	     not the one your shell profile builds. The per-repo command in the
-	     config runs as a child of this job, so it inherits this environment and
-	     not yours: a config whose command starts with "go" fails every night
-	     with "executable file not found" unless go's directory is listed here.
-	     The entries below cover the official Go pkg install and both Homebrew
-	     prefixes. Add wherever your toolchain actually lives, and use literal
-	     absolute paths, because launchd expands neither ~ nor $HOME. -->
+	<!-- The wrapper reads these. RM_REPORT_OUT is what makes it render the report
+	     at all: leave it unset and it collects and verifies without writing one. -->
 	<key>EnvironmentVariables</key>
 	<dict>
+		<key>RM_BIN</key>
+		<string>/usr/local/bin/repo-metrics</string>
+		<key>RM_REPORT_OUT</key>
+		<string>/Users/YOUR-USER/repo-metrics/report.md</string>
+		<key>RM_WINDOW</key>
+		<string>168h</string>
+
+		<!-- launchd starts the job with a minimal PATH of
+		     /usr/bin:/bin:/usr/sbin:/sbin, not the one your shell profile builds.
+		     The per-repo command in the config runs as a grandchild of this job, so
+		     it inherits this environment and not yours: a config whose command
+		     starts with "go" fails every night with "executable file not found"
+		     unless go's directory is listed here. The entries below cover the
+		     official Go pkg install and both Homebrew prefixes. Add wherever your
+		     toolchain actually lives, and use literal absolute paths, because
+		     launchd expands neither ~ nor $HOME.
+
+		     sqlite3 lives in /usr/bin on macOS and is already covered. The wrapper
+		     needs it for the backup and both checks. -->
 		<key>PATH</key>
 		<string>/usr/local/go/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
 	</dict>

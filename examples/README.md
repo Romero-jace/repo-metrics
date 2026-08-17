@@ -4,8 +4,11 @@
   modes. Copy it, edit the paths, and point `--config` at your copy. It will not
   load unedited: every repo path is checked at load time and has to be a
   directory that exists.
-- `com.repo-metrics.daily.plist` is a macOS launchd agent that runs `collect` and
-  then `report` once a day.
+- `repo-metrics-daily.sh` is the wrapper you actually want a scheduler to call. It
+  takes a lock, backs the database up, collects, verifies what landed, and exits
+  with a distinct code per failure. See "Why not just call collect" below.
+- `com.repo-metrics.daily.plist` is a macOS launchd agent that runs that wrapper
+  once a day.
 
 ## Why there is no built-in scheduler
 
@@ -62,15 +65,69 @@ the top of the crontab rather than hoping.
 
 ```
 PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin
+RM_BIN=/usr/local/bin/repo-metrics
+RM_REPORT_OUT=/srv/repo-metrics/report.md
+RM_WINDOW=7d
 
-5 6 * * *  /usr/local/bin/repo-metrics collect --config /srv/repo-metrics/repo-metrics.yaml ; /usr/local/bin/repo-metrics report --config /srv/repo-metrics/repo-metrics.yaml --window 7d --out /srv/repo-metrics/report.md
+5 6 * * *  /srv/repo-metrics/repo-metrics-daily.sh /srv/repo-metrics/repo-metrics.yaml
 ```
 
-`;` between the two, not `&&`. `collect` exits 1 when any single repo failed,
-deliberately, because it keeps going so one unreachable repo does not cost you
-the other nine. Chained with `&&`, that same exit code hands one bad repo a veto
-over the whole report. The plist ships `;` for the same reason and says so, and
-the README's "Streams and exit codes" section has the rest of the exit contract.
+## Why not just call collect
+
+Because a scheduled run is judged entirely by its exit status, and the tool's exit
+status cannot carry what a scheduled run needs to know.
+
+`collect` has two exit codes. It exits 1 when any repo's snapshot came back failed
+— verified, not assumed: one bad repo out of ten is enough. And it exits 0 when a
+repo merely degraded, so a repo that lost three signals but kept the rest is
+invisible. Those two facts together mean exit 1 cannot tell "nothing works" from
+"nine of ten are fine", and exit 0 cannot tell "all good" from "half the signals
+went dark".
+
+The older version of this file put `collect ; report` in the crontab, with `;`
+rather than `&&` on the grounds that one unreachable repo should not veto the whole
+report. That reasoning was right, and its price was that the job's status became
+`report`'s alone — and `report` exits 0 unconditionally. **The job could not fail.**
+
+The wrapper resolves that rather than reverting it: it decides the exit code from
+what the database stored, runs the report regardless, then exits with the code it
+decided. Codes are `1` nothing stored, `2` a repo failed, `3` the database is
+corrupt, `4` the data is stale, `5` a run was already in progress.
+
+It also does two things the tool deliberately does not do itself:
+
+- **Backs up the database first**, with `sqlite3 .backup`. Snapshots cannot be
+  re-collected — they measured a working tree at a commit that has moved on — and
+  `cp` is not safe here, because WAL is on unconditionally and a plain copy can
+  miss committed transactions still living in the `-wal` file.
+- **Takes a lock**, with `mkdir` rather than `flock`, since `flock` is util-linux
+  and is not present on macOS. The store opens with `busy_timeout` at 0, so a
+  second process touching the database mid-collection gets an immediate "database
+  is locked" rather than waiting.
+
+## Schedule the staleness check separately
+
+This is the one that needs saying out loud, because the obvious setup does not work.
+
+A database nobody has added to for a month still produces a report with a fresh
+`generated_at`, a full table of real numbers, "Nothing failed to collect", and exit
+0. Every figure in it is true and a month old. The `last collected` column does
+carry the real date, so a person reading the table can see it — but nothing fails,
+and nothing in the problems section mentions it, so no automation ever will.
+
+The wrapper checks for that. But the check lives inside the collection job, and a
+job that never fires never runs its own checks either. So:
+
+```sh
+repo-metrics-daily.sh check /srv/repo-metrics/repo-metrics.yaml   # writes nothing, takes no lock
+```
+
+Run that from somewhere that does not share a fate with the collection job. A
+second cron entry is better than nothing but dies with the same cron. Better is
+another machine, or a line in your shell profile, or simply the thing you run
+before you read a report. Complete coverage needs an external dead-man's switch —
+something that alarms when it stops *hearing* from you — which is a third-party
+service and so deliberately not wired in here.
 
 ## 7d or 168h
 

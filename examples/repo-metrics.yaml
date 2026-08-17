@@ -162,6 +162,24 @@ repos:
         # message by DEFAULT, so without them the tracked number is a cap and a
         # repo that doubles its findings can chart as flat. Measured on a real
         # repo: 623 findings capped, 2760 uncapped, from the same run.
+        # `stdout` here is the simplest thing that works and it warns on every
+        # single run. golangci-lint appends its own human summary after the SARIF
+        # document when the log goes to stdout — literally "0 issues.\n" on a clean
+        # repo — so the parser reports "ignored N bytes of non-JSON text after the
+        # SARIF log" each time. That is the parser being right, and it is also a
+        # line of noise per Go repo per night: four of them on a fleet of four,
+        # forever, which is how a reader learns to skim past warnings.
+        #
+        # Give it a path instead and it writes the document and nothing else:
+        #
+        #   command: [golangci-lint, run, --output.sarif.path, /abs/lint.sarif, ...]
+        #   artifact: /abs/lint.sarif
+        #   artifact_format: sarif
+        #
+        # That also upgrades the freshness check from nothing to this-run-wrote-it,
+        # since an artifact in command mode has to change during the run. Prefer it
+        # for anything scheduled. stdout is kept below because it is the shorter
+        # thing to read first.
         command:
           - golangci-lint
           - run

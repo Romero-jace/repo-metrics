@@ -3,6 +3,7 @@ package config_test
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -381,7 +382,7 @@ repos:
 			name: "unknown stdout format",
 			body: `
 repos:
-  - {name: svc, path: $REPO, signals: [{name: c, command: ["go", "test"], stdout_format: junit-xml}]}
+  - {name: svc, path: $REPO, signals: [{name: c, command: ["go", "test"], stdout_format: not-a-real-format}]}
 `,
 			want: "unknown stdout_format",
 		},
@@ -389,7 +390,7 @@ repos:
 			name: "unknown artifact format",
 			body: `
 repos:
-  - {name: svc, path: $REPO, signals: [{name: c, artifact: c.xml, artifact_format: lcov}]}
+  - {name: svc, path: $REPO, signals: [{name: c, artifact: c.xml, artifact_format: not-a-real-format}]}
 `,
 			want: "unknown artifact_format",
 		},
@@ -422,7 +423,10 @@ repos:
     signals:
       - {name: lint, command: ["golangci-lint", "run"], artifact: out.sarif, artifact_format: sarif, stdout_format: sarif}
 `,
-			want: "from both its artifact and its stdout",
+			// The message stopped naming the two sources when a step could read
+			// several artifacts: it can now collide with itself without stdout
+			// being involved at all.
+			want: "reads sarif twice",
 		},
 		{
 			name: "negative timeout",
@@ -486,6 +490,122 @@ repos:
   - {name: svc, path: $REPO, signals: [{name: c, artifact: c.out, artifact_format: go-coverprofile, timeout: "ten minutes"}]}
 `,
 			want: "duration",
+		},
+		{
+			// The likeliest way to get an entry wrong is writing the shorthand's
+			// key names inside the list, which strict mode reports as two unknown
+			// fields rather than as the wrong shape. These say which two words the
+			// entry wants.
+			name: "artifacts entry with no path",
+			body: `
+repos:
+  - name: svc
+    path: $REPO
+    signals:
+      - {name: t, command: ["pytest"], artifacts: [{format: junit-xml}]}
+`,
+			want: "needs a path saying which file to read",
+		},
+		{
+			name: "artifacts entry with no format",
+			body: `
+repos:
+  - name: svc
+    path: $REPO
+    signals:
+      - {name: t, command: ["pytest"], artifacts: [{path: j.xml}]}
+`,
+			want: "needs a format saying how to read it",
+		},
+		{
+			name: "artifacts entry naming an unreadable format",
+			body: `
+repos:
+  - name: svc
+    path: $REPO
+    signals:
+      - {name: t, command: ["pytest"], artifacts: [{path: j.xml, format: not-a-real-format}]}
+`,
+			want: "unknown format",
+		},
+		{
+			// Either precedence rule would be a config doing something other than
+			// what it says, and no operator writing both meant one of them.
+			name: "both artifact spellings at once",
+			body: `
+repos:
+  - name: svc
+    path: $REPO
+    signals:
+      - {name: t, command: ["pytest"], artifact: j.xml, artifact_format: junit-xml, artifacts: [{path: c.info, format: lcov}]}
+`,
+			want: "names both artifacts and the single artifact/artifact_format pair",
+		},
+		{
+			// Two entries for one file parse it twice and write its metrics twice,
+			// which the collector answers by dropping the whole step.
+			name: "the same file listed twice",
+			body: `
+repos:
+  - name: svc
+    path: $REPO
+    signals:
+      - {name: t, command: ["pytest"], artifacts: [{path: j.xml, format: junit-xml}, {path: j.xml, format: junit-xml}]}
+`,
+			want: "reads j.xml twice",
+		},
+		{
+			// Two files of one non-repeatable format collide with each other
+			// whether they sit in one step or two, so the per-signal rule has to
+			// catch the in-one-step case the repeatability sweep cannot see.
+			name: "two artifacts of the same format in one step",
+			body: `
+repos:
+  - name: svc
+    path: $REPO
+    signals:
+      - {name: t, command: ["c"], artifacts: [{path: a.info, format: lcov}, {path: b.info, format: lcov}]}
+`,
+			want: "reads lcov twice",
+		},
+		{
+			// goccy discards a key nothing declares, so a misspelled fingerprint
+			// would load clean and leave the repo unidentified forever. That is the
+			// same silent-absence shape the field exists to close, arriving through
+			// the config file instead of the collector.
+			name: "misspelled fingerprint key",
+			body: `
+repos:
+  - name: svc
+    path: $REPO
+    fingerprnt: ["node", "--version"]
+    signals: [{name: c, artifact: c.out, artifact_format: go-coverprofile}]
+`,
+			want: "Write it as fingerprint",
+		},
+		{
+			name: "plural fingerprint key",
+			body: `
+repos:
+  - name: svc
+    path: $REPO
+    fingerprints: ["node", "--version"]
+    signals: [{name: c, artifact: c.out, artifact_format: go-coverprofile}]
+`,
+			want: "Write it as fingerprint",
+		},
+		{
+			// Not skipped. exec passes an empty element through as an empty
+			// argument, so the probe that ran would differ from the one in the file.
+			name: "empty element in the fingerprint argv",
+			body: `
+repos:
+  - name: svc
+    path: $REPO
+    fingerprint: ["node", ""]
+    signals: [{name: c, artifact: c.out, artifact_format: go-coverprofile}]
+`,
+			want: "fingerprint[1] is empty",
 		},
 	}
 
@@ -684,7 +804,7 @@ repos:
 func TestLoadReportsSignalProblemsFromEveryRepo(t *testing.T) {
 	_, err := config.Load(write(t, `
 repos:
-  - {name: alpha, path: $REPO, signals: [{name: c, command: ["go", "test"], stdout_format: junit-xml}]}
+  - {name: alpha, path: $REPO, signals: [{name: c, command: ["go", "test"], stdout_format: not-a-real-format}]}
   - {name: beta, path: $REPO, signals: [{name: c, artifact_format: go-coverprofile}]}
 `))
 	if err == nil {
@@ -720,5 +840,354 @@ func TestFormatsIsStableAndComplete(t *testing.T) {
 		if second := config.Formats(); strings.Join(second, ",") != strings.Join(got, ",") {
 			t.Fatalf("Formats is not stable: %v then %v", got, second)
 		}
+	}
+}
+
+// UsesGoToolchain decides whether the collector asks `go env` to identify a
+// repo's toolchain, so it has to answer from the formats rather than from
+// anything an operator could get wrong.
+//
+// The lint-only case is the one that matters. It used to be fingerprinted with
+// `go env` like every other repo, which on a machine with Go installed succeeds
+// and records the ambient Go version for a repo with no Go in it at all.
+func TestUsesGoToolchainReadsTheFormats(t *testing.T) {
+	repoWith := func(sigs ...config.Signal) config.Repo {
+		return config.Repo{Name: "svc", Path: "/tmp", Signals: sigs}
+	}
+	lint := config.Signal{Name: "lint", Command: []string{"eslint", "."}, StdoutFormat: config.FormatSARIF}
+	tests := config.Signal{Name: "tests", Command: []string{"go", "test"}, StdoutFormat: config.FormatGoTestJSON}
+	cover := config.Signal{Name: "cover", Artifact: "c.out", ArtifactFormat: config.FormatGoCoverprofile}
+
+	cases := []struct {
+		name string
+		repo config.Repo
+		want bool
+	}{
+		{"lint only", repoWith(lint), false},
+		{"no signals at all", repoWith(), false},
+		{"go test on stdout", repoWith(tests), true},
+		{"go coverage as an artifact", repoWith(cover), true},
+		// The mixed case is the whole point of scanning every step rather than
+		// the first: a polyglot repo running eslint beside `go test` is still
+		// measured under a Go toolchain, and checking only signals[0] would miss it.
+		{"lint first, go second", repoWith(lint, tests), true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.repo.UsesGoToolchain(); got != tc.want {
+				t.Errorf("UsesGoToolchain() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// Every format has to say which toolchain it belongs to, or nothing does, and a
+// format added without an answer silently means "not Go" — which routes its
+// repos to the unidentified branch while looking configured.
+func TestEveryFormatDeclaresItsToolchain(t *testing.T) {
+	var owned int
+	for _, name := range config.Formats() {
+		f := config.Format(name)
+		if f.Toolchain() != "" {
+			owned++
+		}
+		if tc := f.Toolchain(); tc != "" && tc != config.ToolchainGo {
+			t.Errorf("format %q claims toolchain %q, which the collector has no probe for", name, tc)
+		}
+	}
+	// SARIF is language-agnostic by design, so at least one format must answer
+	// empty and at least one must not. Without both halves this passes on a table
+	// where every entry says the same thing.
+	if owned == 0 || owned == len(config.Formats()) {
+		t.Errorf("%d of %d formats name a toolchain; expected a mix, since SARIF names none and Go's formats all do",
+			owned, len(config.Formats()))
+	}
+}
+
+// Two JUnit steps in one repo is the case the format exists to allow: a repo
+// running pytest beside vitest. It is legal because every row that parser writes
+// is prefixed with the step's own name, which is the same property that earns
+// SARIF its repeatability.
+func TestTwoJUnitStepsAreAllowedInOneRepo(t *testing.T) {
+	_, err := config.Load(write(t, `
+repos:
+  - name: svc
+    path: $REPO
+    signals:
+      - {name: py, artifact: py.xml, artifact_format: junit-xml}
+      - {name: web, artifact: web.xml, artifact_format: junit-xml}
+`))
+	if err != nil {
+		t.Fatalf("two JUnit steps rejected: %v", err)
+	}
+}
+
+// A Go test step beside a JUnit step is legal too, and this is the pairing the
+// repo-scoped-key guard had to be written carefully enough to permit.
+//
+// go-test-json owns two repo-level rows; junit-xml owns none, so their sets do
+// not intersect and nothing collides. A guard that had simply forbidden two test
+// formats in one repo would have blocked the polyglot case it was written for.
+func TestAGoTestStepAndAJUnitStepCoexist(t *testing.T) {
+	_, err := config.Load(write(t, `
+repos:
+  - name: svc
+    path: $REPO
+    signals:
+      - {name: go-tests, command: ["go", "test", "-json", "./..."], stdout_format: go-test-json}
+      - {name: web-tests, artifact: junit.xml, artifact_format: junit-xml}
+`))
+	if err != nil {
+		t.Fatalf("a Go test step beside a JUnit step was rejected: %v", err)
+	}
+}
+
+// Two steps that would write the same repo-level row are rejected at load,
+// rather than being discovered on every collection when the second one fails.
+//
+// The per-format count above cannot see this: it answers whether one format
+// appears twice, and these are two different formats. Today the only way to
+// reach it is two go-test-json steps, which the per-format rule also catches, so
+// this asserts the collision message specifically rather than merely that
+// something failed.
+func TestStepsWritingTheSameRepoScopedRowAreRejected(t *testing.T) {
+	_, err := config.Load(write(t, `
+repos:
+  - name: svc
+    path: $REPO
+    signals:
+      - {name: first, command: ["go", "test", "-json", "./..."], stdout_format: go-test-json}
+      - {name: second, command: ["go", "test", "-json", "./x/..."], stdout_format: go-test-json}
+`))
+	if err == nil {
+		t.Fatal("Load accepted two steps that would write the same repo-level row")
+	}
+	if !strings.Contains(err.Error(), "pkg.without_tests") {
+		t.Errorf("the error does not name the colliding row, so nobody can act on it: %v", err)
+	}
+	if !strings.Contains(err.Error(), "first") || !strings.Contains(err.Error(), "second") {
+		t.Errorf("the error does not name both steps: %v", err)
+	}
+}
+
+// A key this tool does not read is an error, at every level of the file.
+//
+// goccy discards an unrecognized key by default, which turns a typo into the
+// exact failure this project is built against: the file loads, the tool runs,
+// and the setting the operator wrote does nothing. `fingerprnt:` leaves a repo
+// unidentified forever; `artifcts:` leaves a step reading nothing.
+//
+// The signals case is the one that matters. Signal implements its own
+// UnmarshalYAML and re-decodes with a fresh decoder, so the strict option passed
+// in Load does not reach it. Without repeating the option there, every key
+// inside a signals entry escapes the check while the rest of the file is
+// covered, which is worse than not being strict at all: the guard looks on and
+// is off exactly where the most keys are.
+func TestLoadRejectsUnknownKeysAtEveryLevel(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			name: "top level",
+			body: `
+databse: /tmp/x.db
+repos:
+  - {name: svc, path: $REPO, signals: [{name: c, artifact: c.out, artifact_format: go-coverprofile}]}
+`,
+			want: "databse",
+		},
+		{
+			name: "repo level",
+			body: `
+repos:
+  - name: svc
+    path: $REPO
+    pth: /somewhere/else
+    signals: [{name: c, artifact: c.out, artifact_format: go-coverprofile}]
+`,
+			want: "pth",
+		},
+		{
+			name: "inside a signal",
+			body: `
+repos:
+  - name: svc
+    path: $REPO
+    signals:
+      - {name: c, artifact: c.out, artifact_format: go-coverprofile, artifcts: []}
+`,
+			want: "artifcts",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := config.Load(write(t, tc.body))
+			if err == nil {
+				t.Fatal("Load accepted a config carrying a key this tool does not read")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not name the offending key %q", err, tc.want)
+			}
+		})
+	}
+
+	// The control: a config using only real keys still loads. Without it, a
+	// decoder that rejected everything would pass every case above.
+	if _, err := config.Load(write(t, `
+repos:
+  - {name: svc, path: $REPO, signals: [{name: c, artifact: c.out, artifact_format: go-coverprofile}]}
+`)); err != nil {
+		t.Errorf("a config using only real keys was rejected: %v", err)
+	}
+}
+
+// Several files from one run, which is the shape a single pytest or vitest
+// command actually produces.
+func TestLoadAcceptsSeveralArtifactsInOneStep(t *testing.T) {
+	cfg, err := config.Load(write(t, `
+repos:
+  - name: svc
+    path: $REPO
+    signals:
+      - name: tests
+        command: ["pytest", "--junitxml=j.xml", "--cov-report=lcov:c.info"]
+        artifacts:
+          - {path: j.xml, format: junit-xml}
+          - {path: c.info, format: lcov}
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	s := onlySignal(t, cfg)
+	got := s.ArtifactList()
+	if len(got) != 2 {
+		t.Fatalf("ArtifactList: got %d entries, want 2: %+v", len(got), got)
+	}
+	if got[0].Path != "j.xml" || got[0].Format != config.FormatJUnitXML {
+		t.Errorf("first artifact: got %+v", got[0])
+	}
+	if got[1].Path != "c.info" || got[1].Format != config.FormatLCOV {
+		t.Errorf("second artifact: got %+v", got[1])
+	}
+
+	// Formats has to see both, or the repeatability sweep and the repo-scoped
+	// collision check are reasoning about half the step.
+	if len(s.Formats()) != 2 {
+		t.Errorf("Formats: got %v, want both artifact formats", s.Formats())
+	}
+}
+
+// The shorthand is RETURNED by ArtifactList, never copied into Artifacts.
+//
+// A copy would leave both shapes populated, so Formats would report the format
+// twice and the per-signal dedup rule would reject a config that named the file
+// once. This is the assertion that keeps that from being reintroduced as a
+// simplification.
+func TestTheArtifactShorthandIsNotDuplicated(t *testing.T) {
+	cfg, err := config.Load(write(t, `
+repos:
+  - {name: svc, path: $REPO, signals: [{name: c, artifact: c.out, artifact_format: go-coverprofile}]}
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	s := onlySignal(t, cfg)
+	if got := s.ArtifactList(); len(got) != 1 || got[0].Path != "c.out" {
+		t.Fatalf("ArtifactList: got %+v, want the shorthand as one entry", got)
+	}
+	if len(s.Artifacts) != 0 {
+		t.Errorf("Artifacts was populated from the shorthand: %+v. Formats would then report the format twice", s.Artifacts)
+	}
+	if got := s.Formats(); len(got) != 1 {
+		t.Errorf("Formats: got %v, want exactly one", got)
+	}
+}
+
+// ${VAR} expands inside an artifacts entry, the same as in the shorthand.
+//
+// The expansion walk runs between unmarshal and validate and nothing downstream
+// expands anything, so a path missed here reaches the collector as literal text
+// while the identical variable in the shorthand works. That asymmetry is a
+// config silently doing something other than what it says.
+func TestLoadExpandsEnvVarsInsideArtifacts(t *testing.T) {
+	t.Setenv("RM_TEST_REPORT", "from-env.xml")
+
+	cfg, err := config.Load(write(t, `
+repos:
+  - name: svc
+    path: $REPO
+    signals:
+      - name: tests
+        command: ["pytest"]
+        artifacts:
+          # Block style, not flow style: a ${VAR} inside {…} ends the mapping at
+          # the variable's own closing brace.
+          - path: ${RM_TEST_REPORT}
+            format: junit-xml
+`))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	got := onlySignal(t, cfg).ArtifactList()
+	if len(got) != 1 || got[0].Path != "from-env.xml" {
+		t.Errorf("artifact path not expanded: got %+v", got)
+	}
+}
+
+// The shipped example config has to load.
+//
+// Nothing checked it before: no test read it, no Makefile target built it, no CI
+// step touched it. It is 300 lines of documentation about a schema, and the only
+// thing keeping it true was somebody remembering. A key renamed in this package
+// would leave it describing a tool that no longer exists — and now that unknown
+// keys are rejected, a stale key in it is a file that does not load at all.
+//
+// The repo paths are rewritten to a real temp directory, because Load stats
+// every one of them and the file ships with placeholders on purpose.
+func TestTheExampleConfigLoads(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("..", "..", "examples", "repo-metrics.yaml"))
+	if err != nil {
+		t.Fatalf("reading the example config: %v", err)
+	}
+
+	dir := t.TempDir()
+	body := regexp.MustCompile(`(?m)^(\s*path:) /srv/checkouts/\S+`).
+		ReplaceAllString(string(raw), "${1} "+dir)
+	// The first repo's path is the one the file leaves as a placeholder for the
+	// reader to edit; the rest are under /srv/checkouts.
+	body = strings.ReplaceAll(body, "path: /path/to/your-repo", "path: "+dir)
+
+	path := filepath.Join(dir, "example.yaml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("writing the rewritten example: %v", err)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("the shipped example config does not load: %v", err)
+	}
+	if len(cfg.Repos) < 2 {
+		t.Errorf("the example describes %d repos; it is meant to show several shapes", len(cfg.Repos))
+	}
+
+	// It has to actually exercise the polyglot shape, or it stops being the
+	// worked example the docs point at.
+	var multi int
+	for _, r := range cfg.Repos {
+		for _, s := range r.Signals {
+			if len(s.ArtifactList()) > 1 {
+				multi++
+			}
+		}
+	}
+	if multi == 0 {
+		t.Error("no step in the example reads more than one artifact, so the shape this config exists to demonstrate is undocumented")
 	}
 }

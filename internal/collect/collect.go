@@ -12,6 +12,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -58,7 +59,7 @@ func Collect(ctx context.Context, repo config.Repo, now time.Time) Result {
 	// than any one step's, because it is what tells the report whether two
 	// snapshots are comparable at all.
 	var envDiag []Diagnostic
-	res.Snapshot.Env, envDiag = envFingerprint(ctx, repo.Path, envPairs(repo.Env))
+	res.Snapshot.Env, envDiag = envFingerprint(ctx, repo, envPairs(repo.Env))
 	res.Diagnostics = append(res.Diagnostics, envDiag...)
 
 	var degraded bool
@@ -239,20 +240,112 @@ func gitOutput(ctx context.Context, dir string, args ...string) (string, error) 
 	return strings.TrimSpace(buf.String()), nil
 }
 
+// EnvUnidentified is the fingerprint recorded when nothing established which
+// toolchain a measurement was taken under.
+//
+// It is a value the delta layer recognizes rather than an ordinary string,
+// because two of them must not compare as the same toolchain. That is the whole
+// defect this constant replaces: the old placeholder was a plain "go=unknown",
+// so a repo that failed the probe on both snapshots read as "the toolchain did
+// not change", which is a fact nobody established being published as one.
+const EnvUnidentified = "unidentified"
+
+// envUnknownLegacy is the placeholder written before EnvUnidentified existed.
+//
+// Snapshots carrying it are still in databases and still get compared, so it has
+// to keep meaning what it meant. Recognizing it here rather than rewriting rows
+// also keeps the migration out of this change: a stored fingerprint is evidence
+// about a run that already happened, and editing it would be editing the record.
+const envUnknownLegacy = "go=unknown"
+
+// EnvIsUnidentified reports whether a stored fingerprint names no toolchain.
+//
+// The empty string counts. A snapshot written by something that never set the
+// column, or a hand-built fixture, has established nothing either, and failing
+// closed is the answer everywhere else in this tool.
+func EnvIsUnidentified(env string) bool {
+	return env == "" || env == EnvUnidentified || env == envUnknownLegacy
+}
+
 // envFingerprint identifies the toolchain a measurement was taken with.
 //
-// Go workspaces make this necessary: a repo inside a go.work compiles against
-// its siblings' working trees, while the same repo with GOWORK=off compiles
-// against the versions pinned in go.mod. Same command, same commit, different
-// source, different coverage. Recording the fingerprint is what lets the report
-// refuse to diff across that boundary silently.
-// The failure is disclosed rather than swallowed, unlike before. gitMetadata,
-// the sibling best-effort probe, has always warned when it came up empty, and
-// this one silently returned a placeholder. It matters more than git metadata
-// does: two snapshots that both failed the probe record the same "go=unknown"
-// string and therefore compare as the SAME toolchain, so the one boundary this
-// fingerprint exists to flag goes unflagged exactly when nothing measured it.
-func envFingerprint(ctx context.Context, dir string, env []string) (string, []Diagnostic) {
+// Go workspaces are what made this necessary: a repo inside a go.work compiles
+// against its siblings' working trees, while the same repo with GOWORK=off
+// compiles against the versions pinned in go.mod. Same command, same commit,
+// different source, different coverage. Recording the fingerprint is what lets
+// the report refuse to diff across that boundary silently.
+//
+// Which probe to run is derived rather than assumed, and that is the part that
+// changed. This used to run `go env` against every repo unconditionally, which
+// is wrong in both directions on a repo with no Go in it. Where Go is installed
+// the probe SUCCEEDS and records the ambient Go version, a string that cannot
+// move when the repo's actual runtime does and does move when someone upgrades
+// Go on the collector; where it is not, it fails and records a placeholder that
+// compares equal to every other failure. Either way a Node or Python upgrade
+// between two snapshots goes unflagged, in the one field that exists to flag it.
+//
+// So: an explicit probe wins, a repo running any Go format gets the Go probe,
+// and anything else records that nothing identified it. The last branch is the
+// point. Refusing to name a toolchain is worth more than naming the wrong one,
+// for the same reason the module parser records no update count rather than a
+// flattering zero.
+func envFingerprint(ctx context.Context, repo config.Repo, env []string) (string, []Diagnostic) {
+	switch {
+	case len(repo.Fingerprint) > 0:
+		return probeFingerprint(ctx, repo, env)
+	case repo.UsesGoToolchain():
+		return goFingerprint(ctx, repo.Path, env)
+	}
+	return EnvUnidentified, []Diagnostic{warnf(
+		"no toolchain fingerprint: this repo runs no Go-format step and configures no fingerprint command, " +
+			"so nothing identifies the runtime its numbers were measured under and an upgrade between two " +
+			"snapshots will not be flagged. Set fingerprint on the repo to fix it, for instance " +
+			`fingerprint: ["node", "--version"]`)}
+}
+
+// probeFingerprint runs the operator's own toolchain probe.
+//
+// Output is collapsed to a single space-separated line, so a probe that prints
+// several lines produces one stable fingerprint rather than one that depends on
+// how the runtime formats its version banner this release.
+//
+// A probe that runs and prints nothing is treated as a failure rather than as an
+// empty fingerprint. `command -v` style probes exit 0 with no output when they
+// find nothing, and an empty answer stored as the fingerprint would compare
+// equal to every other empty answer, which is the defect this whole function
+// exists to close.
+func probeFingerprint(ctx context.Context, repo config.Repo, env []string) (string, []Diagnostic) {
+	var buf bytes.Buffer
+	res, err := run.Command(ctx, run.Options{
+		Dir:     repo.Path,
+		Args:    repo.Fingerprint,
+		Env:     env,
+		Timeout: gitTimeout,
+		Stdout:  &buf,
+	})
+	name := filepath.Base(repo.Fingerprint[0])
+	switch {
+	case err != nil:
+		return EnvUnidentified, []Diagnostic{warnf(
+			"toolchain fingerprint unavailable: the configured probe %s could not run: %v", name, err)}
+	case res.ExitCode != 0:
+		return EnvUnidentified, []Diagnostic{warnf(
+			"toolchain fingerprint unavailable: the configured probe %s exited %d", name, res.ExitCode)}
+	}
+	out := strings.Join(strings.Fields(buf.String()), " ")
+	if out == "" {
+		return EnvUnidentified, []Diagnostic{warnf(
+			"toolchain fingerprint unavailable: the configured probe %s exited 0 but printed nothing", name)}
+	}
+	return name + "=" + out, nil
+}
+
+// goFingerprint asks the Go toolchain to identify itself.
+//
+// The failure is disclosed rather than swallowed. gitMetadata, the sibling
+// best-effort probe, has always warned when it came up empty, and this one
+// silently returned a placeholder.
+func goFingerprint(ctx context.Context, dir string, env []string) (string, []Diagnostic) {
 	var buf bytes.Buffer
 	res, err := run.Command(ctx, run.Options{
 		Dir:     dir,
@@ -263,11 +356,11 @@ func envFingerprint(ctx context.Context, dir string, env []string) (string, []Di
 	})
 	switch {
 	case err != nil:
-		return "go=unknown", []Diagnostic{warnf(
-			"toolchain fingerprint unavailable: %v. Two snapshots that both fail this compare as the same toolchain, so a workspace change between them will not be flagged", err)}
+		return EnvUnidentified, []Diagnostic{warnf(
+			"toolchain fingerprint unavailable: %v, so a workspace change between two snapshots will not be flagged", err)}
 	case res.ExitCode != 0:
-		return "go=unknown", []Diagnostic{warnf(
-			"toolchain fingerprint unavailable: go env exited %d. Two snapshots that both fail this compare as the same toolchain, so a workspace change between them will not be flagged", res.ExitCode)}
+		return EnvUnidentified, []Diagnostic{warnf(
+			"toolchain fingerprint unavailable: go env exited %d, so a workspace change between two snapshots will not be flagged", res.ExitCode)}
 	}
 	return fingerprintFrom(buf.String()), nil
 }

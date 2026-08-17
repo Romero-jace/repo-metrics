@@ -16,17 +16,38 @@ against a baseline snapshot, history over the whole series, and the markdown and
 JSON report. It has not been run against a fleet for long enough to have opinions
 about it yet, so treat it as working but young.
 
-Coverage and test counts are read from Go's own formats. Lint findings are read
-as SARIF, which golangci-lint, eslint, ruff, semgrep, clippy and CodeQL all emit,
-so that one is not Go-specific at all.
+Eight formats, three of them not tied to a language at all. SARIF carries lint
+findings from golangci-lint, eslint, ruff, semgrep, clippy and CodeQL; JUnit XML
+carries test results from pytest, vitest, jest and go-junit-report; LCOV carries
+coverage from istanbul, nyc and coverage.py. A `package-lock.json` or a
+`bun.lock` gives the dependency count. So a Python or TypeScript service records
+coverage, test counts, failures, skips, test time, lint findings and how many
+packages it pulls in.
 
-That cuts both ways, and it is worth saying plainly which way. SARIF is the only
-one of the four formats that is not Go's own, so a TypeScript or Python service
-collects lint findings, lint errors, lint suppressions and the time collection
-took, and reports null for coverage, for every test count and for every
-dependency signal. Those go through parsers that read a Go coverage profile, a
-`go test -json` stream and `go list -m -json`, and there is no second parser
-behind any of them yet.
+Two things are still Go-only, and both for the same reason: no other toolchain's
+output can express them.
+
+**`untested_packages`.** A JUnit document lists the suites that RAN. Nothing in
+it reveals a source file nobody wrote a test for, and neither pytest nor vitest
+enumerates one. A repo measured that way reports the signal as null rather than
+as zero, which is the true answer: nobody counted.
+
+**Dependency age and the outdated count.** `go list -m -json` answers all three
+dependency questions from one stream. Elsewhere only the count is recoverable:
+no JavaScript lockfile records when a version was published, and knowing whether
+a newer one exists needs a registry. Both come back null.
+
+Note what is *not* read to get that count. `npm outdated` and its siblings
+resolve through the installed tree, so on a checkout where nothing has been
+installed they return an empty result and exit 0 — a repo nobody installed and a
+repo with nothing outdated produce identical output. That is the same trap
+`GOPROXY=off` sets for the Go path. The lockfile has no such state: it either
+lists the packages or it is not a lockfile.
+
+Coverage comes in two units and they are never mixed. A Go profile counts
+statements; LCOV counts lines, and several statements on one source line collapse
+to one line there. They are separate signals, reported separately, and a repo
+normally fills exactly one of them.
 
 ## Install
 
@@ -166,28 +187,36 @@ version string is a measurement too.
 
 ## What it measures
 
-Thirteen signals. Twelve of them are whatever three configured commands turn out
-to yield, and the thirteenth is the collector timing those commands itself. You
+Fourteen signals. Thirteen of them are whatever the configured commands turn out
+to yield, and the fourteenth is the collector timing those commands itself. You
 configure the commands; you do not pick the signals.
 
 | signal | unit | from |
 |---|---|---|
-| `coverage` | percent | coverage profile |
-| `tests` | count | `go test -json` stream |
-| `test_failures` | count | same stream |
-| `test_skipped` | count | same stream |
-| `untested_packages` | count | same stream |
-| `test_time` | duration | same stream |
+| `coverage` | percent | Go coverage profile, in statements |
+| `coverage_lines` | percent | LCOV tracefile, in lines |
+| `tests` | count | `go test -json` stream, or a JUnit report |
+| `test_failures` | count | same |
+| `test_skipped` | count | same |
+| `untested_packages` | count | `go test -json` stream only |
+| `test_time` | duration | same as `tests` |
 | `lint_findings` | count | SARIF log |
 | `lint_errors` | count | same log |
 | `lint_suppressed` | count | same log |
-| `dependencies` | count | `go list -m -json` |
-| `dependency_age` | days | same stream |
-| `outdated_dependencies` | count | same stream, with `-u` |
+| `dependencies` | count | `go list -m -json`, or a lockfile |
+| `dependency_age` | days | `go list -m -json` only |
+| `outdated_dependencies` | count | `go list -m -json` only, with `-u` |
 | `collect_time` | duration | the runner's own clock |
 
 Every one of them can be null, and null always means the same thing: nothing
-measured it. Three of them are worth a word about why they are separate.
+measured it. Four of them are worth a word about why they are separate.
+
+**`coverage` and `coverage_lines` are different units and are never summed.** A
+Go profile counts statements, an LCOV tracefile counts lines, and several
+statements on one source line collapse to one line. Adding the two denominators
+together would produce a percentage that is arithmetically well formed and
+describes nothing. A polyglot repo can fill both; neither ever stands in for the
+other.
 
 **`lint_suppressed` is not part of `lint_findings`.** Counting suppressed
 findings against a repo would make it look worse for having triaged them, which
@@ -249,6 +278,19 @@ repos:
         stdout_format: go-list-modules
         timeout: 3m
 
+  - name: web-app
+    path: /path/to/web-app
+    fingerprint: ["node", "--version"]
+    signals:
+      - name: tests
+        command: ["vitest", "run", "--reporter=junit", "--outputFile=reports/junit.xml",
+                  "--coverage", "--coverage.reporter=lcov",
+                  "--coverage.reportsDirectory=reports/cov"]
+        artifacts:
+          - {path: reports/junit.xml, format: junit-xml}
+          - {path: reports/cov/lcov.info, format: lcov}
+        timeout: 20m
+
   - name: built-in-ci
     path: /srv/checkouts/built-in-ci
     signals:
@@ -261,9 +303,34 @@ repos:
 
 Each repo carries a list of signals: one entry per thing to measure. A signal
 either runs a command and reads what it left behind, or reads an artifact
-something else produced. One command can feed two parsers, which is why the
-coverage entry names both an `artifact_format` and a `stdout_format`: `go test`
-yields the profile and the test counts from a single run.
+something else produced.
+
+One command can feed several parsers, and there are two ways it does. The
+coverage entry above names both an `artifact_format` and a `stdout_format`,
+because `go test` yields the profile as a file and the test counts on stdout. A
+command that writes several *files* uses `artifacts:` instead:
+
+```yaml
+      - name: tests
+        command: ["pytest", "--junitxml=j.xml", "--cov-report=lcov:c.info"]
+        artifacts:
+          - {path: j.xml, format: junit-xml}
+          - {path: c.info, format: lcov}
+```
+
+`artifact:` with `artifact_format:` is the one-file shorthand for the same thing,
+and naming both spellings on one step is an error rather than a precedence rule.
+
+Listing both files here rather than reading the second one in a step of its own
+is not only tidier. Every artifact a step names is held to the same check — this
+run has to have written it — while a step with no command only asks whether the
+file is younger than `max_age`. Split across two steps, the second file gets the
+weaker check, and a profile left over from yesterday is accepted as today's
+measurement.
+
+Keys this tool does not read are rejected rather than ignored, at every level of
+the file. A typo that loads clean and does nothing is the same failure the tool
+exists to refuse, arriving through the config instead of through a parser.
 
 A signal is also the unit of failure. One going wrong costs its own numbers and
 nothing else, and the snapshot comes back `partial` rather than `failed`.
@@ -363,19 +430,26 @@ one such row rendered whole, so the key set is the one a consumer really gets:
 ```json
 {"name": "legacy", "status": "failed", "collected_at": "2026-08-15 23:47 UTC",
  "baseline_collected_at": null,
- "coverage": null, "tests": null, "test_failures": null, "test_skipped": null,
+ "coverage": null, "coverage_lines": null, "tests": null,
+ "test_failures": null, "test_skipped": null,
  "untested_packages": null, "test_time": null, "lint_findings": null,
  "lint_errors": null, "lint_suppressed": null, "dependencies": null,
  "outdated_dependencies": null, "dependency_age": null, "collect_time": null,
  "has_snapshot": true, "has_baseline": false, "env_changed": false,
- "git_dirty": false, "moved_by": null,
+ "env_unknown": false, "git_dirty": false, "moved_by": null,
  "error": "coverage: no artifact at /srv/legacy/coverage.out and no command configured to produce one"}
 ```
 
-Twenty-two keys, and every repo row in a report payload has all of them. `error`
-is the twenty-third and the only key on this row that is omitted rather than
+Twenty-four keys, and every repo row in a report payload has all of them. `error`
+is the twenty-fifth and the only key on this row that is omitted rather than
 nulled, since it is there when there is something to say and gone when there is
-not. A history point carries an `error` of its own on the same terms, and those
+not.
+
+`env_unknown` sits beside `env_changed` and is not redundant with it. A false
+`env_changed` reads as reassurance, and for a repo whose toolchain nothing ever
+identified it would be a reassurance nobody gave: two snapshots that both failed
+to name a toolchain carry the same placeholder and would otherwise compare as
+unchanged. The two are mutually exclusive. A history point carries an `error` of its own on the same terms, and those
 two are the only omitted keys anywhere on the wire. A repo that
 collected cleanly is the same shape with the groups filled in. The rows `repos
 --format json` returns are a different and much smaller shape, since that command
@@ -404,7 +478,7 @@ by 14, whose dependency ages were measured with no baseline to compare against,
 and whose outdated count was not measured at all, most likely because the module
 proxy was never consulted.
 
-Twelve of the thirteen groups are exactly those two keys. Coverage is the
+Thirteen of the fourteen groups are exactly those two keys. Coverage is the
 exception and carries five more, which is where the culprit ranking below
 actually lives. Walking signals still needs no per-signal knowledge, because
 `value` and `delta` are on this group too and mean what they mean everywhere
@@ -644,9 +718,10 @@ and do not let a wrapper script collapse the second into the first.
 ## How it decides what to tell you
 
 The report leads with which repos moved, and says which measurements moved them.
-Seven of the thirteen signals are allowed to nominate a repo: `coverage`,
-`tests`, `test_failures`, `untested_packages`, `lint_findings`, `lint_errors`
-and `outdated_dependencies`. The other six are collected, published and
+Eight of the fourteen signals are allowed to nominate a repo: `coverage`,
+`coverage_lines`, `tests`, `test_failures`, `untested_packages`,
+`lint_findings`, `lint_errors` and `outdated_dependencies`. The other six are
+collected, published and
 chartable, and never make a repo the headline. That is deliberate rather than an
 oversight about their importance: a signal that moves on every run, like a test
 suite's wall time on a shared machine, would make every repo a mover every week
@@ -700,10 +775,17 @@ this week.
 
 **It stores counts, not percentages.** Repo coverage is total covered statements
 over total statements, which is not the average of the per-package percentages.
-Storing a percentage column would bake that error in permanently.
+Storing a percentage column would bake that error in permanently. It is also why
+LCOV is the coverage format rather than Cobertura XML: LCOV records counts, while
+Cobertura carries per-file rates and leaves the counts to be reconstructed from
+them.
 
-**It does not trust a file path.** If it runs a command for you, the artifact has
-to be newer than the command that supposedly produced it. This is not paranoia:
+**Two units are never one number.** A Go profile counts statements and an LCOV
+tracefile counts lines. They are separate keys under separate signals, which
+makes summing them impossible rather than merely discouraged.
+
+**It does not trust a file path.** If it runs a command for you, every artifact
+the step names has to be newer than the command that supposedly produced it. This is not paranoia:
 a real repo out there has a `make coverage-all` target that is declared `.PHONY`
 with no rule, so it prints "Nothing to be done", exits 0, and writes nothing,
 while a months-old coverage profile sits at the path it would have written to.
@@ -714,6 +796,16 @@ forever, and nothing anywhere logs an error.
 dependency between a local working tree and a pinned version, which changes
 coverage for reasons that have nothing to do with your code. Snapshots carry a
 fingerprint so you do not get to diff across that boundary without being told.
+
+Which probe to run is derived from the formats a repo's steps declare, and a repo
+running none of Go's gets `fingerprint:` on the repo instead — an argv whose
+output becomes the fingerprint, like `["node", "--version"]`. A repo with
+neither records that nothing identified it, and says so, rather than answering
+with whatever `go env` happens to report on the collecting machine. That is not a
+hypothetical improvement: `go env` succeeds from any directory, so a TypeScript
+repo used to be fingerprinted with the ambient Go version — a string that cannot
+move when its actual runtime does, and does move when somebody upgrades Go on the
+collector.
 
 **A signal that cannot be trusted is not recorded.** The clearest case is the
 dependency one. Run `go list -m -u -json all` with `GOPROXY=off` and it exits 0,
@@ -740,9 +832,10 @@ indistinguishable from good news.
   and rewards writing low-value tests to clear a bar, which is the exact confusion
   this tool argues against everywhere else.
 - **No plugin system.** Formats are a closed table: a name an operator can write,
-  paired with the code that reads it. Adding lcov or JUnit XML is a new entry and
-  a new parser, not a registry, not a plugin API, and not a shared object anyone
-  has to build.
+  paired with the code that reads it. LCOV and JUnit XML were added that way, as
+  an entry and a parser each — not a registry, not a plugin API, and not a shared
+  object anyone has to build. The table is the reason a format cannot be accepted
+  by the config and then read by nothing.
 - **No flaky-test rate and no PR velocity.** The first needs per-test rows on
   every snapshot, which is a different database and its own project. The second
   is the only signal on the original list not derivable from a local checkout,

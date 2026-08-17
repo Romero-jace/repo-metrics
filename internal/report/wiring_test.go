@@ -48,6 +48,7 @@ var signalFills = []struct {
 	{delta.SigCoverage, func(r *report.RepoView) {
 		r.Coverage = &report.CoverageView{SignalView: report.SignalView{Value: signalSentinel}}
 	}},
+	{delta.SigCoverageLines, func(r *report.RepoView) { r.CoverageLines = signalGroup() }},
 	{delta.SigTests, func(r *report.RepoView) { r.Tests = signalGroup() }},
 	{delta.SigTestFailures, func(r *report.RepoView) { r.TestFailures = signalGroup() }},
 	{delta.SigTestSkipped, func(r *report.RepoView) { r.TestSkipped = signalGroup() }},
@@ -148,6 +149,11 @@ func everySignalMeasured() delta.Input {
 		Head: snap(91, 9, "go1.26.5", store.StatusOK, ""),
 		HeadMetrics: metrics(
 			cov(pkgAlpha, 80, 100),
+			// Both coverage units at once, which is a real shape: a polyglot repo
+			// runs `go test -coverprofile` beside a tracefile-producing suite. It
+			// is also the only shape that exercises both signals here, and every
+			// signal has to be filled or this fixture stops proving anything.
+			covLines("src/a.ts", 30, 60),
 			testStream(1, testCount(pkgAlpha, 9)),
 			lintRun("lint", 5, 0, 1),
 			depsRun(27, 400, 3),

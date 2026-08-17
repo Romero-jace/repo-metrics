@@ -42,24 +42,44 @@ type stepResult struct {
 	Duration time.Duration
 }
 
+// artifactState is one of a step's declared files: where it is, how to read it,
+// what it looked like before the command ran, and why it cannot be trusted.
+//
+// The last two are per artifact rather than per step, which is the point. A step
+// can name several files from one command, and each is judged on its own: a
+// stale coverage profile must not cost a test report the same run wrote.
+type artifactState struct {
+	config.Artifact
+	// before is the file as it was before the command ran, so freshness can be
+	// judged as a difference rather than against a clock.
+	before fileState
+	// unusable is why this file may not be read, or nil when it is fine.
+	unusable *Diagnostic
+}
+
 // runStep executes one configured step and parses whatever it leaves behind.
 func runStep(ctx context.Context, repo config.Repo, step config.Signal, index int, now time.Time) stepResult {
 	res := stepResult{Name: step.Name}
 
-	artifact := step.Artifact
-	if artifact != "" && !filepath.IsAbs(artifact) {
-		artifact = filepath.Join(repo.Path, artifact)
+	// One entry per file this step reads, resolved and stat'd before anything
+	// runs. Both the resolution and the before-state are per artifact: a step can
+	// name several, and each is judged on its own.
+	arts := make([]artifactState, 0, len(step.ArtifactList()))
+	for _, a := range step.ArtifactList() {
+		path := a.Path
+		if path != "" && !filepath.IsAbs(path) {
+			path = filepath.Join(repo.Path, path)
+		}
+		arts = append(arts, artifactState{
+			Artifact: config.Artifact{Path: path, Format: a.Format},
+			before:   statFile(path),
+		})
 	}
 
 	var (
 		stdoutPath string
 		runRes     *run.Result
-		// artifactUnusable is set when the artifact cannot be trusted, so it is
-		// skipped while the step's other sources still get their turn. A nil
-		// Diagnostic means the artifact is fine.
-		artifactUnusable *Diagnostic
 	)
-	before := statFile(artifact)
 
 	if step.HasCommand() {
 		var (
@@ -83,12 +103,18 @@ func runStep(ctx context.Context, repo config.Repo, step config.Signal, index in
 		}
 		res.Duration = runRes.Duration
 
-		if artifact != "" && !isFresh(before, statFile(artifact), runRes.StartedAt) {
-			// The artifact is unusable, and only the artifact. This used to
-			// abandon the whole step, which threw away a perfectly parsed
-			// go-test-json stream because a sibling parser's file was missing:
-			// the mirror of the case parseAll exists to prevent, in the one
-			// direction it did not cover. A typo in artifact: was enough.
+		for i := range arts {
+			a := &arts[i]
+			if a.Path == "" || isFresh(a.before, statFile(a.Path), runRes.StartedAt) {
+				continue
+			}
+			// This artifact is unusable, and only this one. The verdict is per
+			// artifact rather than per step for the same reason it was already per
+			// source: abandoning the step threw away a perfectly parsed
+			// go-test-json stream because a sibling parser's file was missing, and
+			// a typo in artifact: was enough. A step reading two files gets the
+			// same treatment between them, so one stale profile does not cost a
+			// test report written by the same command.
 			//
 			// The check itself stays: a stale file at that path DOES exist and
 			// WOULD parse, and reporting months-old numbers as today's is the
@@ -97,8 +123,8 @@ func runStep(ctx context.Context, repo config.Repo, step config.Signal, index in
 				"command exited %d but wrote no fresh %s at %s. "+
 					"A target that is declared .PHONY with no rule exits 0 without doing anything, "+
 					"and any stale artifact already at that path would otherwise be reported as current",
-				runRes.ExitCode, step.ArtifactFormat, artifact)
-			artifactUnusable = &d
+				runRes.ExitCode, a.Format, a.Path)
+			a.unusable = &d
 		}
 		if runRes.ExitCode != 0 && !step.NonZeroExitIsNormal() {
 			// The command is unhappy but its output is real, so the numbers
@@ -119,18 +145,29 @@ func runStep(ctx context.Context, repo config.Repo, step config.Signal, index in
 	} else {
 		// Ingest mode: something else produces the artifact on its own schedule,
 		// so age is the only freshness signal available.
-		if !before.exists {
-			return res.fail(errorf("no artifact at %s and no command configured to produce one", artifact))
-		}
-		if isStale(before, time.Duration(step.MaxAge), now) {
-			res.Degraded = true
-			res.Diagnostics = append(res.Diagnostics, degradef(
-				"artifact at %s is %s old, past the %s limit, so these numbers are stale",
-				artifact, now.Sub(before.mtime).Round(time.Minute), time.Duration(step.MaxAge)))
+		for i := range arts {
+			a := &arts[i]
+			if !a.before.exists {
+				// Per artifact rather than failing the step outright, which is what
+				// this did when a step could only name one file. With one artifact
+				// the outcome is unchanged: the failure reaches parseAll, nothing
+				// else parses, so OK stays false, the diagnostic keeps its error
+				// severity, and the step is failed exactly as before. With several
+				// it costs only its own measurements.
+				d := errorf("no artifact at %s and no command configured to produce one", a.Path)
+				a.unusable = &d
+				continue
+			}
+			if isStale(a.before, time.Duration(step.MaxAge), now) {
+				res.Degraded = true
+				res.Diagnostics = append(res.Diagnostics, degradef(
+					"artifact at %s is %s old, past the %s limit, so these numbers are stale",
+					a.Path, now.Sub(a.before.mtime).Round(time.Minute), time.Duration(step.MaxAge)))
+			}
 		}
 	}
 
-	res.parseAll(ctx, repo, step, artifact, stdoutPath, runRes, now, artifactUnusable)
+	res.parseAll(ctx, repo, step, arts, stdoutPath, runRes, now)
 
 	// The runner has measured this since the day it was written and nothing has
 	// ever read it. It goes in the step's own batch rather than being appended by
@@ -154,8 +191,7 @@ func runStep(ctx context.Context, repo config.Repo, step config.Signal, index in
 // special case for the one pairing that existed and is now the general rule.
 func (r *stepResult) parseAll(
 	ctx context.Context, repo config.Repo, step config.Signal,
-	artifact, stdoutPath string, runRes *run.Result, now time.Time,
-	artifactUnusable *Diagnostic,
+	arts []artifactState, stdoutPath string, runRes *run.Result, now time.Time,
 ) {
 	type pending struct {
 		format config.Format
@@ -173,11 +209,23 @@ func (r *stepResult) parseAll(
 	// joins the failures rather than the sources. It then gets exactly the same
 	// escalate-or-downgrade treatment as a parse error: fatal to the step only if
 	// nothing else in it worked.
-	switch {
-	case artifactUnusable != nil:
-		failures = append(failures, *artifactUnusable)
-	case step.ArtifactFormat != "":
-		sources = append(sources, pending{step.ArtifactFormat, artifact, "the " + string(step.ArtifactFormat) + " artifact"})
+	//
+	// The decision is inside the loop, which is the whole difference from the
+	// version that handled one artifact. Hoisted out, one unusable file would
+	// remove every artifact source in the step, so a stale coverage profile would
+	// silently take a test report written by the same command with it.
+	for _, a := range arts {
+		if a.unusable != nil {
+			failures = append(failures, *a.unusable)
+			continue
+		}
+		if a.Format == "" {
+			continue
+		}
+		// Named by path rather than only by format. With one artifact "the
+		// go-coverprofile artifact" identified it; with several, two sources of
+		// one step have to be told apart in a diagnostic.
+		sources = append(sources, pending{a.Format, a.Path, fmt.Sprintf("the %s artifact at %s", a.Format, a.Path)})
 	}
 	if step.StdoutFormat != "" {
 		sources = append(sources, pending{step.StdoutFormat, stdoutPath, "the " + string(step.StdoutFormat) + " output"})

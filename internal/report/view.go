@@ -152,6 +152,20 @@ type RepoView struct {
 	// denominator. Over a healthy baseline it would otherwise lead the report as
 	// the week's biggest drop.
 	Coverage *CoverageView `json:"coverage"`
+	// CoverageLines is the same question in a different unit, and a separate
+	// field rather than another shape of the one above because the two are not
+	// interchangeable. A Go profile counts statements and an LCOV tracefile
+	// counts lines; several statements on one source line collapse to one line,
+	// so the rates are not comparable and the counts must never be summed.
+	//
+	// A repo normally fills exactly one of them, and a polyglot repo can fill
+	// both. Neither ever stands in for the other, which is why there is no
+	// fallback here: a Go repo reports null line coverage, honestly.
+	//
+	// It carries no counts or culprits of its own. The per-file ranking is
+	// statement coverage's, and duplicating it here would mean two culprit lists
+	// in different units competing to explain one repo.
+	CoverageLines *SignalView `json:"coverage_lines"`
 	// The rest of the signals. Each is nil when nothing measured it, for the
 	// same reason and by the same mechanism.
 	//
@@ -189,6 +203,15 @@ type RepoView struct {
 	HasSnapshot bool `json:"has_snapshot"`
 	HasBaseline bool `json:"has_baseline"`
 	EnvChanged  bool `json:"env_changed"`
+	// EnvUnknown says at least one of the two snapshots never established what
+	// toolchain it was measured under, so env_changed above is not a "no" but a
+	// question nothing answered.
+	//
+	// A consumer reading env_changed alone would take false for reassurance. The
+	// two are mutually exclusive by construction in the delta layer, and a repo
+	// that names no toolchain sets this one on every run rather than looking
+	// permanently stable.
+	EnvUnknown bool `json:"env_unknown"`
 	// GitDirty says the head snapshot was taken over a tree with uncommitted
 	// changes, so its numbers do not correspond to any commit and cannot be
 	// reproduced from one. It changes what every measurement on the row means,
@@ -377,6 +400,8 @@ func (r RepoView) group(id delta.SignalID) *SignalView {
 			return nil
 		}
 		return &r.Coverage.SignalView
+	case delta.SigCoverageLines:
+		return r.CoverageLines
 	case delta.SigTests:
 		return r.Tests
 	case delta.SigTestFailures:
@@ -576,6 +601,18 @@ func (r RepoView) RemovedPackages() []string {
 // in the table is just noise.
 func (r RepoView) EnvWarned() bool {
 	return r.EnvChanged && r.HasBaseline && r.HasSnapshot && r.Status != string(store.StatusFailed)
+}
+
+// EnvUnknownWarned reports whether this repo's delta has to carry the
+// unidentified-toolchain warning, on the same display conditions as EnvWarned.
+//
+// It is a quieter marker than that one on purpose. A toolchain that demonstrably
+// changed makes a specific delta untrustworthy; a toolchain nobody identified
+// means the tool cannot tell, which is a standing property of how the repo is
+// configured rather than news about this week. It is still worth saying, because
+// the alternative is a reader taking a missing warning as an assurance.
+func (r RepoView) EnvUnknownWarned() bool {
+	return r.EnvUnknown && r.HasBaseline && r.HasSnapshot && r.Status != string(store.StatusFailed)
 }
 
 // DirtyWarned reports whether this repo's row has to carry the uncommitted
@@ -791,6 +828,7 @@ func buildRepo(r delta.RepoDelta) RepoView {
 		Name:        r.Repo.Name,
 		HasBaseline: r.HasBaseline,
 		EnvChanged:  r.EnvChanged,
+		EnvUnknown:  r.EnvUnknown,
 		Status:      StatusNotCollected,
 	}
 	if r.Base != nil {
@@ -834,6 +872,11 @@ func buildRepo(r delta.RepoDelta) RepoView {
 	// unmeasured rule and the has-a-baseline rule are both inside buildSignal,
 	// which means neither can be written differently for a new signal by
 	// accident.
+	// Assigned here rather than beside the statement-coverage block below,
+	// because that block returns early when nothing measured statements. A Python
+	// or TypeScript repo is exactly that case, and it is the one that has line
+	// coverage to report.
+	out.CoverageLines = buildSignal(r.Signal(delta.SigCoverageLines))
 	out.Tests = buildSignal(r.Signal(delta.SigTests))
 	out.TestFailures = buildSignal(r.Signal(delta.SigTestFailures))
 	out.TestSkipped = buildSignal(r.Signal(delta.SigTestSkipped))

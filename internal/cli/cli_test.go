@@ -1916,3 +1916,50 @@ func TestAMissingRepoPathDoesNotSuggestOverwritingTheConfig(t *testing.T) {
 		})
 	}
 }
+
+// Every format name in the starter config sits under the key it belongs to.
+//
+// The template is a Sprintf with positional verbs, and most of them are %s
+// consuming a config.Format, which is a string type. Insert an example without
+// inserting its argument at the matching index and every later format name
+// shifts one slot — sarif becomes the dependencies step's stdout_format. It
+// still compiles, and config.Load still accepts the result, because every value
+// is a valid format name and only the pairing is wrong.
+//
+// So neither the compiler nor the validator nor the existing round-trip test
+// covers this edit. This does.
+func TestInitPinsEachFormatNameToItsKey(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "repo-metrics.yaml")
+	if err := cli.Run([]string{"init", "--config", path}, io.Discard, io.Discard); err != nil {
+		t.Fatalf("init: %v", err)
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading the starter config: %v", err)
+	}
+	got := string(body)
+
+	for _, want := range []string{
+		"artifact_format: " + string(config.FormatGoCoverprofile),
+		"stdout_format: " + string(config.FormatGoTestJSON),
+		"stdout_format: " + string(config.FormatSARIF),
+		"stdout_format: " + string(config.FormatGoListModules),
+		"format: " + string(config.FormatJUnitXML),
+		"format: " + string(config.FormatLCOV),
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("the starter config does not pair %q; a verb and its argument are out of step", want)
+		}
+	}
+
+	// The control: a format name appearing under the WRONG key is what the shift
+	// produces, and it has to be detectable. go-list-modules is only ever a
+	// stdout format, so seeing it as an artifact_format means the slots moved.
+	if strings.Contains(got, "artifact_format: "+string(config.FormatGoListModules)) {
+		t.Error("go-list-modules appears as an artifact_format, which is the signature of a shifted verb")
+	}
+	if strings.Contains(got, "artifact_format: "+string(config.FormatSARIF)) {
+		t.Error("sarif appears as an artifact_format, which is the signature of a shifted verb")
+	}
+}

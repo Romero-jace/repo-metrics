@@ -34,8 +34,13 @@ func TestEveryConfiguredFormatHasAParser(t *testing.T) {
 // error rather than an operator one: config validation rejects those long
 // before collection starts. It still has to fail loudly rather than return a
 // nil parser for someone to call.
+// The sentinel is deliberately a name no format will ever take. It used to be
+// "lcov", and two config tests used "junit-xml" the same way; adding junit-xml
+// as a real format made both of those fail for a reason that had nothing to do
+// with what they were testing, which costs a debugging session every time.
+// Anything plausible enough to implement is the wrong sentinel.
 func TestParserForRejectsAnUnknownFormat(t *testing.T) {
-	if _, err := parserFor(config.Format("lcov")); err == nil {
+	if _, err := parserFor(config.Format("not-a-real-format")); err == nil {
 		t.Error("parserFor accepted a format nothing can read")
 	}
 	if _, err := parserFor(config.FormatGoCoverprofile); err != nil {

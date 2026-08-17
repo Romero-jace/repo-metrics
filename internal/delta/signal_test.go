@@ -79,6 +79,21 @@ func signalFixtures() map[delta.SignalID]signalFixture {
 			absent:          []store.Metric{testStreamMarker(0)},
 			zeroIsReachable: true,
 		},
+		delta.SigCoverageLines: {
+			// One file with lines, none of them hit. A real measurement of zero
+			// percent: the tracefile named the file and recorded no coverage on it.
+			measuredZero: []store.Metric{
+				{Key: collect.KeyCoveredLines, Scope: "src/a.ts", Value: 0},
+				{Key: collect.KeyTotalLines, Scope: "src/a.ts", Value: 12},
+			},
+			// Statement coverage present and line coverage absent, which is what
+			// every Go repo stores. The two must not stand in for each other: a
+			// repo measured in statements has no line-coverage number, and reading
+			// the statement rate here would publish one denominator's answer under
+			// the other's name.
+			absent:          coverageZero,
+			zeroIsReachable: true,
+		},
 		delta.SigTests: {
 			// The stream was parsed and the repo genuinely has no tests.
 			measuredZero:    []store.Metric{testStreamMarker(3)},
@@ -349,5 +364,105 @@ func TestTheZeroMeasurementIsUnmeasured(t *testing.T) {
 	}
 	if empty.Signal(delta.SigCoverage).Change.Meaningful() {
 		t.Error("a RepoDelta with no signal maps reports a meaningful change")
+	}
+}
+
+// A snapshot carrying only the toolchain-neutral marker must read as measured.
+//
+// This is the whole point of the marker list, and it is the half no existing
+// fixture exercises: every one of them writes pkg.without_tests, which a Go
+// stream produces and nothing else can. A JUnit document lists the suites that
+// ran and cannot say how many source files carry no tests, so a TypeScript repo
+// writes test.suites and nothing else. Without this, the four shared test
+// signals would report null for every non-Go repo and the whole extension would
+// be inert while the suite stayed green.
+//
+// The negative half matters just as much. untested_packages keeps the Go-only
+// marker on purpose: nobody counted untested files here, so the honest answer is
+// unmeasured, and a zero would be a count of nothing published as a count of none.
+func TestTheNeutralTestMarkerMeasuresWithoutTheGoOne(t *testing.T) {
+	metrics := []store.Metric{
+		{Key: collect.KeyTestSuites, Scope: "unit", Value: 12},
+		{Key: collect.KeyTestCount, Scope: "src/a.test.ts", Value: 40},
+		{Key: collect.KeyTestFailed, Scope: "src/a.test.ts", Value: 2},
+		{Key: collect.KeyTestSkipped, Scope: "src/a.test.ts", Value: 1},
+		{Key: collect.KeyTestDurationMS, Scope: "src/a.test.ts", Value: 900},
+	}
+
+	got := delta.Measure(metrics)
+
+	for _, want := range []struct {
+		id    delta.SignalID
+		value float64
+	}{
+		{delta.SigTests, 40},
+		{delta.SigTestFailures, 2},
+		{delta.SigTestSkipped, 1},
+		{delta.SigTestTime, 900},
+	} {
+		m := got[want.id]
+		v, ok := m.Value()
+		if !ok {
+			t.Errorf("%s: unmeasured, but a test result was parsed and its counts are right there", want.id)
+			continue
+		}
+		if v != want.value {
+			t.Errorf("%s: got %v, want %v", want.id, v, want.value)
+		}
+	}
+
+	if got[delta.SigUntestedPackages].IsMeasured() {
+		t.Error("untested_packages measured from a source that cannot count untested files; nobody looked, so nothing may be published")
+	}
+}
+
+// The legacy marker alone still measures, or every snapshot already in a
+// database goes blank the day this ships.
+func TestTheLegacyTestMarkerStillMeasures(t *testing.T) {
+	metrics := []store.Metric{
+		{Key: collect.KeyPkgWithoutTest, Value: 3},
+		{Key: collect.KeyTestCount, Scope: "m/a", Value: 40},
+	}
+
+	got := delta.Measure(metrics)
+
+	if v, ok := got[delta.SigTests].Value(); !ok || v != 40 {
+		t.Errorf("tests from a pre-test.suites snapshot: got %v measured=%v, want 40", v, ok)
+	}
+	if v, ok := got[delta.SigUntestedPackages].Value(); !ok || v != 3 {
+		t.Errorf("untested_packages: got %v measured=%v, want 3", v, ok)
+	}
+}
+
+// Two sides that matched on DIFFERENT markers are not comparable.
+//
+// The counts either side of that boundary were summed over different things: one
+// over whatever rows a Go stream wrote at repo scope, the other over the steps
+// that emitted the neutral marker. Subtracting them would report the change in
+// apparatus as a change in the repo, which is the same failure as a linter being
+// switched on mid-series.
+func TestASideWithoutTheNeutralMarkerIsNotComparable(t *testing.T) {
+	head := delta.Measure([]store.Metric{
+		{Key: collect.KeyTestSuites, Scope: "unit", Value: 1},
+		{Key: collect.KeyTestCount, Scope: "m/a", Value: 42},
+	})
+	base := delta.Measure([]store.Metric{
+		{Key: collect.KeyPkgWithoutTest, Value: 0},
+		{Key: collect.KeyTestCount, Scope: "m/a", Value: 40},
+	})
+
+	if delta.Compare(head[delta.SigTests], base[delta.SigTests], true).Meaningful() {
+		t.Error("a delta was published across a marker change, so a change in how tests were counted reads as tests appearing")
+	}
+
+	// The control: two sides on the same marker do compare, or the assertion
+	// above would pass on an implementation that never compares anything.
+	base2 := delta.Measure([]store.Metric{
+		{Key: collect.KeyTestSuites, Scope: "unit", Value: 1},
+		{Key: collect.KeyTestCount, Scope: "m/a", Value: 40},
+	})
+	change := delta.Compare(head[delta.SigTests], base2[delta.SigTests], true)
+	if d, ok := change.Delta(); !ok || d != 2 {
+		t.Errorf("two sides on the same marker: got %v meaningful=%v, want 2", d, ok)
 	}
 }

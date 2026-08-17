@@ -28,6 +28,8 @@ func repoAt(id int64, name string) store.Repo {
 var degradedColumns = [...]string{
 	"coverage",
 	"coverage change",
+	"line coverage",
+	"line coverage change",
 	"tests",
 	"tests change",
 	"packages without tests",
@@ -49,6 +51,7 @@ var degradedColumns = [...]string{
 // has to be a second decision rather than a consequence of the first.
 var pairedGroups = []struct{ key, column string }{
 	{"coverage", "coverage"},
+	{"coverage_lines", "line coverage"},
 	{"tests", "tests"},
 	{"untested_packages", "packages without tests"},
 	{"lint_findings", "lint findings"},
@@ -275,17 +278,26 @@ func degradedRows() []degradedRow {
 			in: delta.Input{
 				Repo: repoAt(8, repoHealthy),
 				Head: snap(81, 8, "go1.26.5", store.StatusOK, ""),
-				HeadMetrics: metrics(cov(pkgAlpha, 80, 100), testStream(1, testCount(pkgAlpha, 9)),
+				// Both coverage units, because the healthy control has to fill every
+				// group it can. A polyglot repo running a Go profile beside a
+				// tracefile-producing suite is the real shape this models, and
+				// leaving line coverage null here would make the null in every other
+				// row prove nothing.
+				HeadMetrics: metrics(cov(pkgAlpha, 80, 100), covLines("src/a.ts", 30, 60),
+					testStream(1, testCount(pkgAlpha, 9)),
 					lintRun("lint", 5, 0, 1), depsRun(27, 400, 3),
 					[]store.Metric{stepTiming("coverage", 42000)}),
 				Base: snap(80, 8, "go1.26.5", store.StatusOK, ""),
-				BaseMetrics: metrics(cov(pkgAlpha, 75, 100), testStream(1, testCount(pkgAlpha, 8)),
+				BaseMetrics: metrics(cov(pkgAlpha, 75, 100), covLines("src/a.ts", 24, 60),
+					testStream(1, testCount(pkgAlpha, 8)),
 					lintRun("lint", 5, 0, 1), depsRun(27, 400, 3),
 					[]store.Metric{stepTiming("coverage", 42000)}),
 			},
 			cells: map[string]cellSpec{
 				"coverage":                      measured("80.0%"),
 				"coverage change":               measured("+5.0 pts"),
+				"line coverage":                 measured("50.0%"),
+				"line coverage change":          measured("+10.0 pts"),
 				"tests":                         measured("9"),
 				"tests change":                  measured("+1"),
 				"packages without tests":        measured("1"),
@@ -524,6 +536,11 @@ var repoWireFields = map[string]fieldKind{
 	"has_snapshot": kindContext,
 	"has_baseline": kindContext,
 	"env_changed":  kindContext,
+	// env_unknown is env_changed's other half: it says the comparison could not
+	// be made rather than that it came back equal. Context for the same reason,
+	// and it has to be here rather than folded into env_changed, since a consumer
+	// reading only that one would take false for an assurance nobody gave.
+	"env_unknown": kindContext,
 	// git_dirty is not a number, so it cannot be a measurement, and kindInput is
 	// banned on a repo row. It is the same kind of thing env_changed is: a fact
 	// about how the measurement was taken that changes what it means.
@@ -560,6 +577,14 @@ var repoWireFields = map[string]fieldKind{
 	// point of this table: a new signal reaching the wire has to be classified
 	// by a person before it can ship, and generating these entries from the
 	// registry would be exactly the automatic agreement this guard refuses.
+	// Line coverage is a plain group, unlike statement coverage above, because it
+	// carries no counts and no culprits. That is deliberate: the per-file ranking
+	// belongs to one unit, and two culprit lists in different units competing to
+	// explain one repo would be worse than one.
+	"coverage_lines":       kindGroup,
+	"coverage_lines.value": kindMeasurement,
+	"coverage_lines.delta": kindMeasurement,
+
 	"tests":       kindGroup,
 	"tests.value": kindMeasurement,
 	"tests.delta": kindMeasurement,
@@ -865,6 +890,8 @@ func TestEveryNumberIsInsideANullableGroup(t *testing.T) {
 		"coverage.delta",
 		"coverage.total",
 		"coverage.value",
+		"coverage_lines.delta",
+		"coverage_lines.value",
 		"dependencies.delta",
 		"dependencies.value",
 		"dependency_age.delta",

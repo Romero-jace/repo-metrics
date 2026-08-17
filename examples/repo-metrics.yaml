@@ -237,26 +237,57 @@ repos:
         # for this repo.
 
   # A repo that is not written in Go. Every other entry in this file runs a Go
-  # toolchain, which makes the tool read as Go-only. It is not, but what a non-Go
-  # repo gets is narrower, and that is worth saying plainly rather than leaving
-  # someone to discover it after a week of collections.
+  # toolchain, which makes the tool read as Go-only. It is not.
   #
-  # Lint is the whole of it, because SARIF is the one format here that is not
-  # tied to a language. ruff needs no extra package for it: --output-format takes
-  # sarif, and --output-file defaults to stdout, so the document lands where
-  # stdout_format can read it. eslint, semgrep, clippy and CodeQL emit SARIF too,
-  # and this entry is the same shape with the command swapped.
+  # Three formats here are not tied to any language: SARIF for lint findings,
+  # JUnit XML for test results, and LCOV for coverage. pytest, vitest, jest and
+  # go-junit-report all write the second; istanbul, nyc and coverage.py all write
+  # the third. So this entry is the same shape as the Go ones above with the
+  # commands swapped.
   #
-  # What a repo like this records: lint_findings, lint_errors, lint_suppressed,
-  # and collect_time. What it does not record is coverage or test counts, not
-  # because they are switched off but because the only parsers for those are
-  # go-coverprofile and go-test-json, which read a Go coverage profile and a
-  # `go test -json` stream. Those signals come back empty rather than zero, which
-  # is the distinction this whole tool is built on: nothing measured is not the
-  # same as nothing found.
+  # What it still does not record is untested_packages. That is not a missing
+  # parser, it is a question a JUnit document cannot answer: the file lists the
+  # suites that RAN, and nothing in it reveals a source file nobody wrote a test
+  # for. It comes back empty rather than zero, which is the distinction this
+  # whole tool is built on.
   - name: python-service
     path: /srv/checkouts/python-service
+
+    # No step here runs a Go format, so nothing would otherwise identify the
+    # toolchain these numbers were measured under, and a runtime upgrade between
+    # two snapshots would not be flagged. The probe's output becomes the
+    # snapshot's fingerprint.
+    fingerprint: ["python3", "--version"]
+
     signals:
+      # One pytest run writes BOTH files, so both are listed here rather than
+      # split across two steps. That is not only tidier: every artifact in this
+      # list is held to the same check, which is that this run wrote it. A second
+      # step with no command would read the coverage file perfectly well and
+      # quietly swap that check for the max_age limit below, so a profile left
+      # over from yesterday would be accepted as today's measurement.
+      - name: tests
+        command:
+          - pytest
+          - --junitxml=reports/junit.xml
+          - --cov=.
+          - --cov-report=lcov:reports/coverage.lcov
+        artifacts:
+          - {path: reports/junit.xml, format: junit-xml}
+          - {path: reports/coverage.lcov, format: lcov}
+        timeout: 15m
+
+        # Two things worth knowing about the numbers this produces.
+        #
+        # pytest counts every parametrize case as its own test, where `go test`
+        # counts top-level functions and folds subtests in. So a repo's test
+        # count moves when somebody edits a fixture table, and the two languages'
+        # counts are not comparable to each other. Within one repo over time it
+        # is fine, which is what the report actually shows.
+        #
+        # And coverage here counts LINES, not statements. It is reported as its
+        # own signal for that reason, never summed with a Go profile's.
+
       - name: lint
         command: ["ruff", "check", "--output-format", "sarif"]
         stdout_format: sarif
@@ -266,6 +297,64 @@ repos:
         # from the format rather than from a setting here, so there is nothing
         # to configure for it.
         timeout: 5m
+
+  # A TypeScript repo. Same three formats, different commands.
+  - name: web-app
+    path: /srv/checkouts/web-app
+    fingerprint: ["node", "--version"]
+    signals:
+      - name: tests
+        command:
+          - vitest
+          - run
+          - --reporter=junit
+          - --outputFile=reports/junit.xml
+          - --coverage
+          - --coverage.reporter=lcov
+          - --coverage.reportsDirectory=reports/cov
+        artifacts:
+          - {path: reports/junit.xml, format: junit-xml}
+          - {path: reports/cov/lcov.info, format: lcov}
+        timeout: 20m
+
+        # Set coverage.include in the vitest config, and check that it is set.
+        # Without it, files with no tests are left out of the report entirely, so
+        # the percentage is computed only over code that already had tests and
+        # reads high for the wrong reason. This is the same trap -coverpkg=./...
+        # guards against on the Go side, one ecosystem over. Untested files are
+        # also dropped from any filtered run, so collect the whole suite.
+        #
+        # Verified against a real repo: a full 1,964-test run with the option
+        # unset wrote a ZERO-BYTE lcov.info and exited 0. repo-metrics records
+        # nothing for that rather than a coverage of zero, and says so, but the
+        # measurement is still lost.
+
+      - name: lint
+        command: ["eslint", ".", "--format", "@microsoft/sarif"]
+        stdout_format: sarif
+        timeout: 5m
+
+      # The dependency count, read from the lockfile with no command at all.
+      #
+      # Deliberately not `bun outdated` or `npm outdated`. Those resolve through
+      # the installed tree, so on a checkout where nothing has been installed they
+      # return an empty result and exit 0 — a repo nobody installed and a repo
+      # with nothing outdated produce the same output, which is the trap the Go
+      # entry above spends a paragraph on. The lockfile either lists the packages
+      # or it is not a lockfile.
+      #
+      # What this cannot record is dependency_age and outdated_dependencies. No
+      # JavaScript lockfile carries a publish time, and the update question needs
+      # a registry. Both come back null rather than approximated.
+      - name: dependencies
+        artifact: bun.lock
+        artifact_format: bun-lockfile
+
+        # Ingest mode, so max_age is the freshness limit. A lockfile is committed
+        # and changes only when somebody changes a dependency, so this wants to be
+        # generous: a repo that has not touched its dependencies in a month has a
+        # month-old lockfile and that is the healthy case, not a stale one.
+        max_age: 8760h
 
   # ${VAR} and $VAR are expanded from the environment in six places and only
   # six: the top-level database, then each repo's path and its env VALUES, then

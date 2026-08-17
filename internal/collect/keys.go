@@ -15,6 +15,23 @@ import "fmt"
 // delta.Signal and written down in CONTRIBUTING.md, because no registry entry
 // can check it for the collector.
 const (
+	// The line-coverage pair, which is a DIFFERENT unit from the statement pair
+	// below and is never summed with it.
+	//
+	// Go's coverage profile counts statements: `go tool cover` records a
+	// NumStmt per block. LCOV counts lines, and so does Cobertura. Several
+	// statements on one source line collapse to one line there, so the two
+	// denominators measure different things and a repo percentage mixing them
+	// would be arithmetically well formed and mean nothing. Keeping them in
+	// separate keys under separate signals is what makes that impossible rather
+	// than merely discouraged.
+	//
+	// KeyTotalLines is the marker of the pair, at file scope, on the same
+	// reasoning as the statement marker: a profile that instrumented nothing
+	// stores neither key, and the denominator is the tighter contract.
+	KeyCoveredLines = "coverage.line.covered"
+	KeyTotalLines   = "coverage.line.total"
+
 	KeyCoveredStmts = "coverage.stmt.covered"
 	// KeyTotalStmts is coverage's marker, at package scope. A profile carrying
 	// only its "mode: set" header stores neither key, which is exactly the case
@@ -24,6 +41,21 @@ const (
 	KeyTestFailed     = "test.failed"
 	KeyTestSkipped    = "test.skipped"
 	KeyTestDurationMS = "test.duration_ms"
+	// KeyTestSuites is the marker every test parser can emit, whatever produced
+	// the output it read. Its value is how many suites the parser saw, and like
+	// every marker it is read by presence rather than by value.
+	//
+	// It carries the STEP's name as its scope, the way the lint keys do, and for
+	// the same two reasons. A repo can genuinely run more than one test suite, so
+	// a repo-scoped row would collide on the metrics primary key the moment a
+	// second one appeared. And the scope then names the measuring apparatus, which
+	// is what lets the delta layer refuse to subtract a week measured by one
+	// suite from a week measured by two.
+	//
+	// It exists alongside KeyPkgWithoutTest rather than replacing it because the
+	// two answer different questions and only one of them is answerable outside
+	// Go. See the Markers field on delta.Signal.
+	KeyTestSuites = "test.suites"
 	// KeyPkgWithoutTest is the marker for every test signal, at repo scope. The
 	// five of them come from one parsed stream, so either the parser read the
 	// test output or it did not; there is no state where it counted the passes

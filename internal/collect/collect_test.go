@@ -94,6 +94,18 @@ func hasMetric(res collect.Result, key string) bool {
 	return false
 }
 
+// hasMetricAt asks the same question about one scope. A key written at the wrong
+// scope is present and useless: it collides with a sibling step on the metrics
+// primary key, or it hides from a presence check that looks at the other scope.
+func hasMetricAt(res collect.Result, key, scope string) bool {
+	for _, m := range res.Metrics {
+		if m.Key == key && m.Scope == scope {
+			return true
+		}
+	}
+	return false
+}
+
 // The headline case, drawn from a real repository.
 //
 // `make coverage-all` there is declared .PHONY with no rule: it prints "Nothing
@@ -287,6 +299,24 @@ func TestStdoutStreamProducesTestMetrics(t *testing.T) {
 	}
 	if got := metric(t, res, collect.KeyPkgWithoutTest, ""); got != 1 {
 		t.Errorf("packages without tests: got %v, want 1", got)
+	}
+
+	// The toolchain-neutral marker, at the STEP's scope rather than the repo's.
+	//
+	// Asserted here rather than only in the delta package because that is where
+	// this can rot silently. The signal registry names this key and the delta
+	// tests build metric rows by hand, so a parser that stopped writing it would
+	// leave every one of them green while four signals published null for every
+	// repo. That exact probe has been run on this codebase and nothing caught it.
+	//
+	// The scope is the assertion that matters. At repo scope it would collide on
+	// the metrics primary key with any second test step, and the delta layer would
+	// lose the one thing that tells it a repo changed how many suites it runs.
+	if got := metric(t, res, collect.KeyTestSuites, r.Signals[0].Name); got != 2 {
+		t.Errorf("test suites at step scope %q: got %v, want 2", r.Signals[0].Name, got)
+	}
+	if hasMetricAt(res, collect.KeyTestSuites, "") {
+		t.Error("test.suites written at repo scope, which collides with any second test step in the same repo")
 	}
 }
 

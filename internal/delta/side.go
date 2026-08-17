@@ -100,12 +100,36 @@ func (s Side) has(key string, scope MarkerScope) bool {
 	return s.present[markerKey{key, scope}]
 }
 
+// firstMarker returns the first of a signal's markers this side carries.
+//
+// First rather than any, because the answer feeds the scope fingerprint and that
+// has to be a function of the stored rows alone. Ranging a map or picking the
+// "best" match would make two identical snapshots fingerprint differently
+// between runs, which would refuse deltas at random.
+func (s Side) firstMarker(sig Signal) (Marker, bool) {
+	for _, m := range sig.Markers {
+		if s.has(m.Key, m.Scope) {
+			return m, true
+		}
+	}
+	return Marker{}, false
+}
+
+// Measured reports whether this side carries proof that anything looked at a
+// signal. It is the presence half of measure, for callers that want the question
+// without building a Measurement.
+func (s Side) Measured(sig Signal) bool {
+	_, ok := s.firstMarker(sig)
+	return ok
+}
+
 // measure reads one signal off this side, answering unmeasured when the
 // signal's marker is absent. This is the only place a Measurement is built from
 // stored metrics, so the presence rule is applied once per snapshot rather than
 // once per signal.
 func (s Side) measure(sig Signal) Measurement {
-	if !s.has(sig.Marker, sig.MarkerScope) {
+	marker, ok := s.firstMarker(sig)
+	if !ok {
 		return Unmeasured()
 	}
 	// Whether this side's number is a total or a floor. The value is published
@@ -116,7 +140,11 @@ func (s Side) measure(sig Signal) Measurement {
 		// The value carries a fingerprint of what it summed over, so Compare can
 		// refuse two sums that covered different sets. See Signal.ScopeSetMustMatch
 		// for why this is per signal rather than automatic.
-		return measuredOver(sig.Extract(s), s.scopeKey(sig.Marker)).partially(incomplete)
+		// Fingerprinted over the marker that actually matched, not over the
+		// signal's first. Two sides that matched different markers were measured
+		// by different apparatus, so their fingerprints differ and Compare refuses
+		// the delta rather than subtracting one toolchain's total from another's.
+		return measuredOver(sig.Extract(s), s.scopeKey(marker.Key)).partially(incomplete)
 	}
 	return Measured(sig.Extract(s)).partially(incomplete)
 }
@@ -141,7 +169,7 @@ func Measure(metrics []store.Metric) map[SignalID]Measurement {
 // denominator and publishing the result as a percentage.
 func CoverageCounts(metrics []store.Metric) (Coverage, bool) {
 	side := newSide(nil, metrics)
-	if !side.has(SignalByID(SigCoverage).Marker, ScopeDetail) {
+	if !side.Measured(SignalByID(SigCoverage)) {
 		return Coverage{}, false
 	}
 	return side.Coverage, true
@@ -161,6 +189,26 @@ func measureAll(s Side) map[SignalID]Measurement {
 // any signal that counts things spread over packages.
 func sumOver(key string) func(Side) float64 {
 	return func(s Side) float64 { return s.pkgSum[key] }
+}
+
+// ratioOver reads two scoped sums as a percentage.
+//
+// The division happens here, over the summed counts, rather than anywhere the
+// counts could be averaged. A repo's rate is sum(covered)/sum(total), which is
+// not the mean of its files' rates, and keeping the arithmetic in one place is
+// what stops a second implementation getting that wrong.
+//
+// A zero denominator answers zero, and nothing publishes it: the signal's marker
+// is the denominator key, so a snapshot with no instrumented files has no marker
+// row and reads as unmeasured before this is ever called.
+func ratioOver(covered, total string) func(Side) float64 {
+	return func(s Side) float64 {
+		t := s.pkgSum[total]
+		if t <= 0 {
+			return 0
+		}
+		return s.pkgSum[covered] / t * 100
+	}
 }
 
 // repoValue reads a key's single repo-scoped row. It is the extractor for

@@ -68,6 +68,22 @@ type Repo struct {
 	// step happened to be fingerprinted would decide that for every signal.
 	Env map[string]string `yaml:"env"`
 
+	// Fingerprint is an argv that prints something identifying this repo's
+	// toolchain, like ["node", "--version"]. Its trimmed stdout becomes the
+	// snapshot's fingerprint, which is what lets the report refuse to diff two
+	// snapshots taken under different runtimes.
+	//
+	// Optional, and only needed where the tool cannot work it out. A repo running
+	// any Go format is fingerprinted with `go env GOVERSION GOWORK` without being
+	// asked. A repo running none of them has no toolchain this tool can name, and
+	// records that it does not know rather than guessing: see
+	// collect.envFingerprint. This is the way to tell it.
+	//
+	// An argv slice for the same reason Signal.Command is one. There is no shell,
+	// so quoting cannot surprise anyone, and a probe that needs a pipe to produce
+	// one line is a script the repo should own rather than something to embed here.
+	Fingerprint []string `yaml:"fingerprint"`
+
 	// Signals is what to measure. One entry per command, or per artifact in
 	// ingest mode.
 	Signals []Signal `yaml:"signals"`
@@ -80,6 +96,35 @@ type Repo struct {
 	OldStdoutFormat string   `yaml:"stdout_format"`
 	OldTimeout      Duration `yaml:"timeout"`
 	OldMaxAge       Duration `yaml:"max_age"`
+
+	// Near misses for Fingerprint, read only so a typo fails loudly.
+	//
+	// goccy discards a key nothing declares, so `fingerprnt:` or `finger_print:`
+	// would load clean and leave the repo silently fingerprinted as unidentified
+	// forever. That is the same shape as the bug this whole field exists to fix,
+	// arriving through the config file instead of the collector. See
+	// misspelledFingerprintError.
+	TypoFingerprnt   []string `yaml:"fingerprnt"`
+	TypoFingerPrint  []string `yaml:"finger_print"`
+	TypoFingerprints []string `yaml:"fingerprints"`
+}
+
+// UsesGoToolchain reports whether any of this repo's steps reads a format that
+// the Go toolchain produces.
+//
+// It is what decides whether `go env` is worth asking. Derived from the formats
+// rather than configured, on the same reasoning as the -u sniff in the module
+// parser: a setting can disagree with what the repo actually runs, and the
+// formats cannot disagree with themselves.
+func (r Repo) UsesGoToolchain() bool {
+	for _, s := range r.Signals {
+		for _, f := range s.Formats() {
+			if f.Toolchain() == ToolchainGo {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Signal is one collection step: something to run, and how to read what it
@@ -107,8 +152,32 @@ type Signal struct {
 
 	// Artifact is a file the step produces or finds, relative to the repo path
 	// unless absolute. ArtifactFormat says how to read it.
+	//
+	// The one-file shorthand. A step reading several files uses Artifacts below;
+	// these two stay because most steps read one and `artifact: coverage.out` is
+	// what that should look like. Read them through ArtifactList, never directly.
 	Artifact       string `yaml:"artifact"`
 	ArtifactFormat Format `yaml:"artifact_format"`
+
+	// Artifacts is several files from one run, each with its own format.
+	//
+	// It exists because a single command routinely writes more than one:
+	// `pytest --junitxml=j.xml --cov-report=lcov:c.info` produces a test report
+	// and a coverage profile together, and so does vitest.
+	//
+	// Before this, the only way to read the second file was a second step with no
+	// command, reading whatever the first step's run had left on disk. That works,
+	// and it quietly costs the freshness check: a step with a command requires its
+	// artifact to have CHANGED during the run, while a step without one only asks
+	// whether the file is younger than max_age. So the second file was held to a
+	// 24 hour window instead of to the run that supposedly produced it, and a
+	// profile left over from yesterday was accepted as today's measurement.
+	//
+	// Mutually exclusive with the shorthand above rather than merged with it.
+	// Merging would let one step declare the same format twice by accident, which
+	// the per-signal dedup rule then rejects, on a config that named each file
+	// once.
+	Artifacts []Artifact `yaml:"artifacts"`
 
 	// StdoutFormat says how to read the command's standard output. It needs a
 	// command, since there is no stdout without one.
@@ -130,15 +199,44 @@ type Signal struct {
 	MaxAge Duration `yaml:"max_age"`
 }
 
+// Artifact is one file a step leaves behind, paired with how to read it.
+//
+// The pairing is the point. As two loose fields on Signal it was an invariant
+// somebody had to check, and the check existed: an artifact with no format made
+// a step run its command, verify the file was fresh, and then read nothing out
+// of it. As one struct it is a shape, and the invariant cannot be violated.
+type Artifact struct {
+	// Path is relative to the repo unless absolute, like the shorthand field.
+	Path string `yaml:"path"`
+	// Format says which parser reads it.
+	Format Format `yaml:"format"`
+}
+
 // HasCommand reports whether this step runs something, as opposed to reading an
 // artifact somebody else produced.
 func (s Signal) HasCommand() bool { return len(s.Command) > 0 }
 
+// ArtifactList is every file this step reads, whichever spelling declared them.
+//
+// It RETURNS the shorthand rather than copying it into Artifacts, and that is
+// load bearing rather than tidy. A copy would leave both shapes populated, so
+// Formats would report the format twice and the per-signal dedup rule would
+// reject a config that named the file once. Returning one or the other makes
+// declaring both an error to be caught rather than a state to be reconciled.
+func (s Signal) ArtifactList() []Artifact {
+	if s.Artifact != "" || s.ArtifactFormat != "" {
+		return []Artifact{{Path: s.Artifact, Format: s.ArtifactFormat}}
+	}
+	return s.Artifacts
+}
+
 // Formats lists the parsers this step declares, in a fixed order.
 func (s Signal) Formats() []Format {
 	var out []Format
-	if s.ArtifactFormat != "" {
-		out = append(out, s.ArtifactFormat)
+	for _, a := range s.ArtifactList() {
+		if a.Format != "" {
+			out = append(out, a.Format)
+		}
 	}
 	if s.StdoutFormat != "" {
 		out = append(out, s.StdoutFormat)
@@ -198,7 +296,14 @@ func (s *Signal) UnmarshalYAML(b []byte) error {
 		Timeout: Duration(DefaultTimeout),
 		MaxAge:  Duration(DefaultMaxAge),
 	}
-	if err := yaml.Unmarshal(b, &fields); err != nil {
+	// The strict option has to be repeated here, and forgetting it is invisible.
+	//
+	// This is a fresh decode with its own options, so the DisallowUnknownField
+	// passed in Load does not reach it. Without this line EVERY key inside a
+	// signals: entry escapes the unknown-key check while the rest of the file is
+	// covered, which is worse than not being strict at all: the check appears to
+	// be on and is off exactly where the most keys are.
+	if err := yaml.UnmarshalWithOptions(b, &fields, yaml.DisallowUnknownField()); err != nil {
 		return err
 	}
 	*s = Signal(fields)
@@ -238,7 +343,17 @@ func Load(path string) (*Config, error) {
 	}
 
 	cfg := Defaults()
-	if err := yaml.Unmarshal(data, cfg); err != nil {
+	// Strict, so a key this tool does not read is an error rather than silence.
+	//
+	// goccy discards an unrecognized key by default, which makes a typo the exact
+	// failure this whole project is built against: `fingerprnt:` loads clean and
+	// the repo is fingerprinted as unidentified forever, `artifcts:` loads clean
+	// and the step reads nothing. Both look like a working config.
+	//
+	// The Old* and Typo* fields on Repo are declared, so they are known keys and
+	// still produce their own better messages. This catches everything nobody
+	// thought to name in advance.
+	if err := yaml.UnmarshalWithOptions(data, cfg, yaml.DisallowUnknownField()); err != nil {
 		return nil, fmt.Errorf("config: parsing %s: %w", path, err)
 	}
 
@@ -259,9 +374,26 @@ func (c *Config) expandEnv() {
 		r := &c.Repos[i]
 		r.Path = os.ExpandEnv(r.Path)
 		expandEnvMap(r.Env)
+		// Same treatment as a step's command, and for the same reason: the probe
+		// for a toolchain installed under a version manager lives at a path that
+		// differs per machine.
+		for k := range r.Fingerprint {
+			r.Fingerprint[k] = os.ExpandEnv(r.Fingerprint[k])
+		}
 		for j := range r.Signals {
 			s := &r.Signals[j]
 			s.Artifact = os.ExpandEnv(s.Artifact)
+			// Both spellings, because this runs BEFORE validation and nothing
+			// downstream expands anything. ArtifactList is read at validate and
+			// collect time, by which point expansion is over, so a ${VAR} in an
+			// artifacts: entry that was not expanded here reaches the collector as
+			// literal text while the same variable in the shorthand works. That is
+			// one shape of a config silently doing something other than what it
+			// says, in the walk whose own test comment warns that a restructure
+			// drops it.
+			for k := range s.Artifacts {
+				s.Artifacts[k].Path = os.ExpandEnv(s.Artifacts[k].Path)
+			}
 			for k := range s.Command {
 				s.Command[k] = os.ExpandEnv(s.Command[k])
 			}
@@ -326,10 +458,44 @@ func (c *Config) validate() error {
 		}
 
 		problems = append(problems, checkEnv(label, r.Env)...)
+		problems = append(problems, checkFingerprint(label, r)...)
 		problems = append(problems, r.validateSignals(label)...)
 	}
 
 	return errors.Join(problems...)
+}
+
+// checkFingerprint validates the toolchain probe argv, and rejects the spellings
+// that would otherwise be discarded in silence.
+//
+// An empty argv element is rejected rather than dropped: exec passes it through
+// as an empty argument, and a probe that silently ran a different command than
+// the one in the file is exactly the kind of disagreement this field exists to
+// prevent.
+func checkFingerprint(label string, r Repo) []error {
+	var problems []error
+
+	for _, typo := range []struct {
+		key  string
+		argv []string
+	}{
+		{"fingerprnt", r.TypoFingerprnt},
+		{"finger_print", r.TypoFingerPrint},
+		{"fingerprints", r.TypoFingerprints},
+	} {
+		if len(typo.argv) > 0 {
+			problems = append(problems, fmt.Errorf(
+				"%s: %q is not a key this tool reads, and unknown keys are discarded without a word. Write it as fingerprint", label, typo.key))
+		}
+	}
+
+	for i, arg := range r.Fingerprint {
+		if arg == "" {
+			problems = append(problems, fmt.Errorf(
+				"%s: fingerprint[%d] is empty, which would pass an empty argument to the probe rather than being skipped", label, i))
+		}
+	}
+	return problems
 }
 
 // validateSignals checks a repo's step list, including the migration error for
@@ -382,11 +548,15 @@ func (r Repo) validateSignals(label string) []error {
 		// step name and collide with each other. Counting sources here let
 		// `artifact_format: sarif` beside `stdout_format: sarif` validate, and
 		// every collection then dropped the step.
-		seen := make(map[Format]bool, 2)
+		//
+		// The message no longer names the two sources, because there are no longer
+		// only two: a step reading several artifacts can collide with itself
+		// without stdout being involved at all.
+		seen := make(map[Format]bool, len(s.Formats()))
 		for _, f := range s.Formats() {
 			if seen[f] {
 				problems = append(problems, fmt.Errorf(
-					"%s: reads %s from both its artifact and its stdout, which would write the same metric keys twice under one signal name. Pick one source", sub, f))
+					"%s: reads %s twice, which would write the same metric keys twice under one signal name. Read it once, or split the step in two", sub, f))
 				continue
 			}
 			seen[f] = true
@@ -396,9 +566,56 @@ func (r Repo) validateSignals(label string) []error {
 
 	for _, f := range formatOrder {
 		if used[f] > 1 && !f.Repeatable() {
+			// The advice deliberately does not say "combine them into a single
+			// signal" any more. That used to be safe to suggest because a step
+			// could only read one artifact, so it read as "you cannot do this".
+			// Now it is an instruction an operator can follow, and the per-signal
+			// rule above rejects the result: two files of one format collide with
+			// each other whether they sit in one step or two.
 			problems = append(problems, fmt.Errorf(
 				"%s: %d signals read %s, and repo-metrics cannot tell whether their metric keys would collide. "+
-					"One repo normally has one of these, so combine them into a single signal", label, used[f], f))
+					"One repo normally has one of these, so read it once, or measure them in separate repos", label, used[f], f))
+		}
+	}
+
+	problems = append(problems, checkRepoScopedCollisions(label, r)...)
+	return problems
+}
+
+// checkRepoScopedCollisions rejects two steps that would write the same
+// repo-level row.
+//
+// The loop above counts usage per format, which answers whether one format
+// appears twice and nothing else. That was a complete question while every
+// repo-scoped key belonged to exactly one format. It stops being one as soon as
+// two DIFFERENT formats can measure the same thing: a `go test -json` step
+// beside a JUnit step both want to say how many packages carry no tests, the
+// metrics primary key is (snapshot, key, scope), and the per-format count sees
+// nothing wrong with it.
+//
+// Caught here rather than at collection because the collector's answer is to
+// fail the second step, every run, forever. That is loud, but it is a config
+// error being rediscovered nightly instead of once, at load, by the code that
+// already knows the shapes.
+func checkRepoScopedCollisions(label string, r Repo) []error {
+	var problems []error
+	owner := make(map[string]string)
+
+	for _, s := range r.Signals {
+		if s.Name == "" {
+			continue
+		}
+		for _, f := range s.Formats() {
+			for _, key := range f.RepoScopedKeys() {
+				if first, taken := owner[key]; taken && first != s.Name {
+					problems = append(problems, fmt.Errorf(
+						"%s: %s and %s would both record %s for the whole repo, which is one row and cannot hold two numbers. "+
+							"Keep one of them, or measure them in separate repos",
+						label, first, s.Name, key))
+					continue
+				}
+				owner[key] = s.Name
+			}
 		}
 	}
 	return problems
@@ -408,6 +625,14 @@ func (r Repo) validateSignals(label string) []error {
 func (s Signal) validate(label string) []error {
 	var problems []error
 
+	// Declaring both spellings is an error rather than a precedence rule. Either
+	// answer would be a config doing something other than what it says, and there
+	// is no reading of a file naming both under which the operator meant one.
+	if len(s.Artifacts) > 0 && (s.Artifact != "" || s.ArtifactFormat != "") {
+		problems = append(problems, fmt.Errorf(
+			"%s: names both artifacts and the single artifact/artifact_format pair. Use one or the other", label))
+	}
+
 	if s.ArtifactFormat != "" {
 		if err := checkFormat(label, "artifact_format", s.ArtifactFormat); err != nil {
 			problems = append(problems, err)
@@ -416,6 +641,38 @@ func (s Signal) validate(label string) []error {
 			problems = append(problems, fmt.Errorf("%s: artifact_format needs an artifact to read", label))
 		}
 	}
+	if s.Artifact != "" && s.ArtifactFormat == "" {
+		// Otherwise the step would run its command, check the artifact is fresh,
+		// and then read nothing out of it. The list spelling cannot reach this
+		// state at all, since a path and a format are one value there.
+		problems = append(problems, fmt.Errorf("%s: artifact needs an artifact_format saying how to read it", label))
+	}
+
+	seenPath := make(map[string]bool, len(s.Artifacts))
+	for i, a := range s.Artifacts {
+		where := fmt.Sprintf("%s: artifacts[%d]", label, i)
+		// Named separately rather than as one "incomplete entry" message, because
+		// the likeliest way to get here is writing the shorthand's key names inside
+		// the list, and the fix is to know which two words the entry wants.
+		if a.Path == "" {
+			problems = append(problems, fmt.Errorf("%s: needs a path saying which file to read", where))
+		}
+		switch a.Format {
+		case "":
+			problems = append(problems, fmt.Errorf("%s: needs a format saying how to read it", where))
+		default:
+			if err := checkFormat(where, "format", a.Format); err != nil {
+				problems = append(problems, err)
+			}
+		}
+		if a.Path != "" && seenPath[a.Path] {
+			// Two entries for one file would parse it twice and write its metrics
+			// twice, which the collector answers by dropping the whole step.
+			problems = append(problems, fmt.Errorf("%s: reads %s twice", where, a.Path))
+		}
+		seenPath[a.Path] = true
+	}
+
 	if s.StdoutFormat != "" {
 		if err := checkFormat(label, "stdout_format", s.StdoutFormat); err != nil {
 			problems = append(problems, err)
@@ -424,16 +681,11 @@ func (s Signal) validate(label string) []error {
 			problems = append(problems, fmt.Errorf("%s: stdout_format needs a command to capture stdout from", label))
 		}
 	}
-	if s.Artifact != "" && s.ArtifactFormat == "" {
-		// Otherwise the step would run its command, check the artifact is fresh,
-		// and then read nothing out of it.
-		problems = append(problems, fmt.Errorf("%s: artifact needs an artifact_format saying how to read it", label))
-	}
 	if len(s.Formats()) == 0 {
 		problems = append(problems, fmt.Errorf(
 			"%s: no artifact_format and no stdout_format, so this signal would run and record nothing", label))
 	}
-	if !s.HasCommand() && s.Artifact == "" {
+	if !s.HasCommand() && len(s.ArtifactList()) == 0 {
 		problems = append(problems, fmt.Errorf(
 			"%s: no command to run and no artifact to read", label))
 	}

@@ -4,11 +4,15 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"time"
 
 	"github.com/Romero-jace/repo-metrics/internal/collect/golang"
+	"github.com/Romero-jace/repo-metrics/internal/collect/jslock"
+	"github.com/Romero-jace/repo-metrics/internal/collect/junit"
+	"github.com/Romero-jace/repo-metrics/internal/collect/lcov"
 	"github.com/Romero-jace/repo-metrics/internal/collect/sarif"
 	"github.com/Romero-jace/repo-metrics/internal/config"
 	"github.com/Romero-jace/repo-metrics/internal/run"
@@ -64,6 +68,10 @@ var parsers = map[config.Format]parser{
 	config.FormatGoTestJSON:     parseTestJSON,
 	config.FormatSARIF:          parseSARIF,
 	config.FormatGoListModules:  parseModules,
+	config.FormatJUnitXML:       parseJUnitXML,
+	config.FormatLCOV:           parseLCOV,
+	config.FormatNPMLockfile:    parseLockfile(jslock.ParseNPM, "package-lock.json"),
+	config.FormatBunLockfile:    parseLockfile(jslock.ParseBun, "bun.lock"),
 }
 
 // parserFor returns the parser for a format. An unknown format is a programming
@@ -113,6 +121,133 @@ func parseCoverprofile(_ context.Context, src source) ([]store.Metric, []Diagnos
 	return metrics, diags, nil
 }
 
+// parseLockfile builds a parser for one JavaScript lockfile format.
+//
+// A constructor rather than two near-identical functions, because the two differ only
+// in which decoder runs and what the file is called in a diagnostic. Everything
+// that matters here — which key is written, when it is written, and what is
+// deliberately NOT written — is one decision and belongs in one place.
+func parseLockfile(
+	read func(io.Reader) (*jslock.Summary, []jslock.Diagnostic, error),
+	what string,
+) parser {
+	return func(_ context.Context, src source) ([]store.Metric, []Diagnostic, error) {
+		f, err := os.Open(src.Path)
+		if err != nil {
+			return nil, nil, fmt.Errorf("opening the %s: %w", what, err)
+		}
+		defer func() { _ = f.Close() }()
+
+		summary, lockDiags, err := read(f)
+		diags := adoptLockDiags(lockDiags)
+		if err != nil {
+			return nil, diags, fmt.Errorf("parsing the %s: %w", what, err)
+		}
+
+		// Written unconditionally because the file parsed, zero included. A
+		// project with no dependencies at all measured zero, and that is a real
+		// answer rather than an absence — the same reasoning as the Go module
+		// count, which is the marker for this signal in both cases.
+		metrics := []store.Metric{{Key: KeyDepsTotal, Value: float64(summary.Total)}}
+
+		// And nothing else. deps.age_median_days needs a publish timestamp, which
+		// no JavaScript lockfile records, and deps.outdated_direct needs a registry
+		// to have been asked. Both come back unmeasured rather than approximated
+		// from what is here, which is the same refusal the Go parser makes when the
+		// module proxy was never consulted.
+		return metrics, diags, nil
+	}
+}
+
+// adoptLockDiags converts the parser's own diagnostics into this package's, the
+// same way adoptSARIFDiags does and for the same reason.
+func adoptLockDiags(in []jslock.Diagnostic) []Diagnostic {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]Diagnostic, 0, len(in))
+	for _, d := range in {
+		severity := SeverityWarn
+		if d.Severity == jslock.SeverityError {
+			severity = SeverityError
+		}
+		out = append(out, Diagnostic{Severity: severity, Message: d.Message})
+	}
+	return out
+}
+
+// parseLCOV reads an LCOV tracefile into per-file LINE counts.
+//
+// Percentages are never stored, for the same reason parseCoverprofile does not
+// store them: a repo's rate is sum(covered)/sum(total), which is not the mean of
+// its files' rates.
+//
+// The keys are the line pair rather than the statement pair, and that is the
+// whole point of a separate parser. Reusing Go's keys would let a repo's
+// coverage number be a sum of statements and lines, two different denominators,
+// producing a percentage that is arithmetically fine and describes nothing.
+func parseLCOV(_ context.Context, src source) ([]store.Metric, []Diagnostic, error) {
+	f, err := os.Open(src.Path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("opening the coverage profile: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	profile, lcovDiags, err := lcov.Parse(f)
+	diags := adoptLCOVDiags(lcovDiags)
+	if err != nil {
+		return nil, diags, fmt.Errorf("parsing the coverage profile: %w", err)
+	}
+
+	metrics := make([]store.Metric, 0, len(profile.Files)*2)
+	var instrumented int
+	for _, file := range profile.Files {
+		if file.Total == 0 {
+			// A record naming a file and carrying no line information. Writing a
+			// zero denominator would put a file into the marker's scope set while
+			// contributing nothing, so the set changes without the number changing
+			// and next week's delta gets refused for no reason.
+			continue
+		}
+		instrumented++
+		metrics = append(metrics,
+			store.Metric{Key: KeyCoveredLines, Scope: file.Name, Value: float64(file.Covered)},
+			store.Metric{Key: KeyTotalLines, Scope: file.Name, Value: float64(file.Total)},
+		)
+	}
+
+	if instrumented == 0 {
+		// No marker rows, so line coverage reads as unmeasured downstream rather
+		// than as zero percent. This is not hypothetical: vitest 4.1.10 with
+		// @vitest/coverage-v8 4.1.4 wrote a ZERO-BYTE lcov.info for a full
+		// 1,964-test run and exited 0. A percentage from a zero denominator would
+		// have led the report as a total collapse, and the run that produced it
+		// looked entirely healthy.
+		diags = append(diags, warnf(
+			"the coverage profile instruments no files at all, which is what a coverage run writes when its "+
+				"include patterns match nothing or instrumentation never attached. Nothing is recorded, "+
+				"because a rate computed from no lines is not a measurement"))
+	}
+	return metrics, diags, nil
+}
+
+// adoptLCOVDiags converts the parser's own diagnostics into this package's, the
+// same way adoptSARIFDiags does and for the same reason.
+func adoptLCOVDiags(in []lcov.Diagnostic) []Diagnostic {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]Diagnostic, 0, len(in))
+	for _, d := range in {
+		severity := SeverityWarn
+		if d.Severity == lcov.SeverityError {
+			severity = SeverityError
+		}
+		out = append(out, Diagnostic{Severity: severity, Message: d.Message})
+	}
+	return out
+}
+
 // parseTestJSON reads a `go test -json` event stream into per-package test
 // counts, plus the repo-level count of packages carrying no tests at all.
 func parseTestJSON(_ context.Context, src source) ([]store.Metric, []Diagnostic, error) {
@@ -142,9 +277,25 @@ func parseTestJSON(_ context.Context, src source) ([]store.Metric, []Diagnostic,
 		)
 	}
 
-	// The marker, at repo scope, emitted unconditionally because the stream
-	// parsed. A repo where every package has tests measured zero, and that is a
-	// finding rather than an absence.
+	// The toolchain-neutral marker, at STEP scope, emitted unconditionally
+	// because the stream parsed. Every test parser writes this one, so the four
+	// signals that only need "did anything read a test result" do not have to ask
+	// a Go-specific question to find out.
+	metrics = append(metrics, store.Metric{
+		Key:   KeyTestSuites,
+		Scope: src.Step.Name,
+		Value: float64(len(tests.Packages)),
+	})
+
+	// The Go-specific marker, at repo scope, also unconditional. A repo where
+	// every package has tests measured zero, and that is a finding rather than an
+	// absence.
+	//
+	// It stays because it is the only proof of the one measurement no other
+	// toolchain's output can supply: how many source packages carry no tests at
+	// all. `go test -json` can say, because the toolchain prints a marker line for
+	// a package with no test files; a JUnit document lists the suites that ran and
+	// cannot know what did not.
 	metrics = append(metrics, store.Metric{
 		Key:   KeyPkgWithoutTest,
 		Value: float64(tests.PackagesWithoutTests()),
@@ -175,6 +326,108 @@ func parseTestJSON(_ context.Context, src source) ([]store.Metric, []Diagnostic,
 			tests.Malformed))
 	}
 	return metrics, diags, nil
+}
+
+// parseJUnitXML reads a test report from any runner that emits JUnit XML.
+//
+// Every row it writes is scoped, and every scope starts with the step's name.
+// That is what earns the format Repeatable: a repo running pytest and vitest as
+// two steps files them under two prefixes, so their counts sum rather than
+// overwrite each other on the metrics primary key. It also keeps this format's
+// rows away from go-test-json's repo-level ones, so a repo can run both.
+//
+// Compare what this does NOT write. There is no pkg.without_tests here and there
+// cannot be: the document lists the suites that ran, and no amount of reading it
+// reveals a source file nobody wrote a test for. That signal stays unmeasured,
+// which is the true answer.
+func parseJUnitXML(_ context.Context, src source) ([]store.Metric, []Diagnostic, error) {
+	f, err := os.Open(src.Path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("opening the test report: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+
+	report, junitDiags, err := junit.Parse(f)
+	diags := adoptJUnitDiags(junitDiags)
+	if err != nil {
+		return nil, diags, fmt.Errorf("parsing the test report: %w", err)
+	}
+
+	// A well formed report carrying no cases at all. Verified against pytest
+	// 9.1.1: a run that collects nothing exits 5 and still writes a complete
+	// document with tests="0" failures="0" errors="0" and no testcase elements,
+	// which is byte-identical in shape to a genuine measurement of a repo with no
+	// tests. Nothing in the file tells them apart.
+	//
+	// So no marker is written and no counts are, which reads downstream as
+	// unmeasured. Recording the zero would be the exact bug this tool exists to
+	// refuse, and it would arrive looking like the best news a repo ever had.
+	if report.Cases == 0 {
+		return nil, append(diags, warnf(
+			"the test report names %s and not one test case, which is what a runner writes when it collected nothing "+
+				"rather than when a repo has no tests. Nothing is recorded, because those two produce the same file%s",
+			pluralSuites(report.Suites), exitCodeClause(src))), nil
+	}
+
+	metrics := make([]store.Metric, 0, len(report.Groups)*4+1)
+	for _, g := range report.Groups {
+		scope := src.Step.Name + "/" + g.Name
+		metrics = append(metrics,
+			store.Metric{Key: KeyTestCount, Scope: scope, Value: float64(g.Total())},
+			store.Metric{Key: KeyTestFailed, Scope: scope, Value: float64(g.Failed)},
+			store.Metric{Key: KeyTestSkipped, Scope: scope, Value: float64(g.Skipped)},
+		)
+		if g.Timed {
+			// Written only where something carried a time. A group whose emitter
+			// omits the attribute has a duration nobody measured, and a zero there
+			// would be subtracted from last week's real total as an improvement.
+			metrics = append(metrics, store.Metric{
+				Key: KeyTestDurationMS, Scope: scope, Value: float64(g.Duration.Milliseconds()),
+			})
+		}
+	}
+
+	// The marker, at the step's scope, written because cases were genuinely read.
+	metrics = append(metrics, store.Metric{
+		Key:   KeyTestSuites,
+		Scope: src.Step.Name,
+		Value: float64(len(report.Groups)),
+	})
+	return metrics, diags, nil
+}
+
+// exitCodeClause names the runner's exit status when there was a run to have
+// one. In ingest mode nobody ran anything, so there is nothing to report and the
+// sentence has to still read correctly without it.
+func exitCodeClause(src source) string {
+	if src.Run == nil {
+		return ", and no command was run here whose exit status could say which"
+	}
+	return fmt.Sprintf(", and the command exited %d", src.Run.ExitCode)
+}
+
+func pluralSuites(n int) string {
+	if n == 1 {
+		return "1 suite"
+	}
+	return fmt.Sprintf("%d suites", n)
+}
+
+// adoptJUnitDiags converts the parser's own diagnostics into this package's, the
+// same way adoptSARIFDiags does and for the same reason.
+func adoptJUnitDiags(in []junit.Diagnostic) []Diagnostic {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]Diagnostic, 0, len(in))
+	for _, d := range in {
+		severity := SeverityWarn
+		if d.Severity == junit.SeverityError {
+			severity = SeverityError
+		}
+		out = append(out, Diagnostic{Severity: severity, Message: d.Message})
+	}
+	return out
 }
 
 func pluralPackages(n int) string {

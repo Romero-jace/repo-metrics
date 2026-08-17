@@ -116,6 +116,16 @@ type RepoDelta struct {
 	// EnvChanged means the two snapshots were measured under different
 	// toolchains, so the difference between them is not purely code.
 	EnvChanged bool
+	// EnvUnknown means at least one of the two snapshots never established what
+	// toolchain it was measured under, so nothing here can say whether it changed.
+	//
+	// It is deliberately separate from EnvChanged rather than folded into it. The
+	// two call for different words and, more to the point, comparing the
+	// fingerprints would answer the wrong question: two snapshots that both failed
+	// to identify a toolchain carry the same placeholder and so read as unchanged,
+	// which is an unmeasured fact published as a measurement. EnvChanged is
+	// therefore left false here, because "we know they match" is not what happened.
+	EnvUnknown bool
 	// IsMover means this repo cleared the reporting threshold on at least one
 	// signal that is allowed to nominate.
 	IsMover bool
@@ -294,8 +304,17 @@ func computeRepo(in Input, opts Options) RepoDelta {
 	basePkgs := base.Packages
 	d.BaseCoverage = base.Coverage
 
-	if in.Head != nil && in.Head.Env != in.Base.Env {
-		d.EnvChanged = true
+	// Three states, not two. Either side being unidentified means the comparison
+	// cannot be made at all, and it is checked first: a repo that names no
+	// toolchain records the same placeholder every run, so the equality test below
+	// would quietly answer "unchanged" for exactly the repos nothing is watching.
+	if in.Head != nil {
+		switch {
+		case collect.EnvIsUnidentified(in.Head.Env) || collect.EnvIsUnidentified(in.Base.Env):
+			d.EnvUnknown = true
+		case in.Head.Env != in.Base.Env:
+			d.EnvChanged = true
+		}
 	}
 
 	d.Culprits, d.Added, d.Removed = culprits(headPkgs, basePkgs, d.HeadCoverage, opts)

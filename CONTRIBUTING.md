@@ -299,10 +299,12 @@ one, for its own reason, given there.
 7. A fixture in `degraded_test.go` that renders the group filled at least once
    and null at least once, or the census reports it as never demonstrated
    nullable.
-8. The docs, which nothing checks at all. `README.md` says "Thirteen signals" in
-   prose and then lists them in a table with one row each. `CHANGELOG.md` repeats
-   the count and the names. The payload section of the README counts the keys on
-   a repo row, currently "Twenty-two keys" with `error` as "the twenty-third".
+8. The docs, which nothing checks at all. `README.md` says "Fourteen signals" in
+   prose, then again as "Eight of the fourteen" where it explains nominating, and
+   then lists them in a table with one row each. `CHANGELOG.md` repeats the count
+   and the names. The payload section of the README counts the keys on a repo
+   row, currently "Twenty-four keys" with `error` as "the twenty-fifth", and the
+   sample JSON right above it has to gain the key too.
    Every one of those is a number spelled as a word beside a registry that just
    moved, and every guard above stays green while all of them go stale. It is
    deliberately unguarded: a test asserting a word form, a numeral, a table row
@@ -396,12 +398,35 @@ exactly what this tool exists to refuse. `TestEveryConfiguredFormatHasAParser`
 pins the two lists to each other in both directions.
 
 1. `internal/config/format.go` holds the constant, an entry in `formats` with its
-   policy, and an entry in `formatOrder`.
-2. `internal/collect/parse.go` holds the parser and its entry in `parsers`.
+   policy, and an entry in `formatOrder`. All three, and nothing pins the map
+   against the slice directly: `TestEveryConfiguredFormatHasAParser` catches a
+   missing `formatOrder` entry only by count.
+2. `internal/collect/parse.go` holds the parser and its entry in `parsers`. A
+   parser reading a public format goes in its own package under
+   `internal/collect/`, with no dependency on `collect`, so it stays a parser of
+   that format rather than a piece of this tool. `sarif`, `junit` and `lcov` are
+   the precedent.
+3. `internal/collect/reposcoped_test.go` needs a row saying which repo-scoped
+   keys the format writes, even when the answer is none.
 
-The two policy flags are facts about the tools that emit a format rather than
+The four policy fields are facts about the tools that emit a format rather than
 preferences an operator holds, which is why they are here and not in the config
-file. `NonZeroExitIsNormal` is true for anything whose producers exit non-zero to
-report findings, which is every linter. `Repeatable` is true only when two steps
-in one repo can both use it without their metric keys colliding, which requires
-the parser to scope its rows by step.
+file.
+
+- `NonZeroExitIsNormal` is true for anything whose producers exit non-zero to
+  report findings, which is every linter.
+- `Repeatable` is true only when two steps in one repo can both use it without
+  their metric keys colliding, which requires the parser to scope its rows by
+  step. `sarif` and `junit-xml` qualify; `lcov` does not, because its scope names
+  a source file rather than the step that read it.
+- `RepoScopedKeys` lists what the parser writes at repo scope, so validation can
+  reject two steps that would write the same row. Per-format usage counting
+  cannot see that, because the two steps may name different formats.
+- `Toolchain` says whose output it is, which is what decides whether `go env` is
+  worth running for a repo's fingerprint. Leave it empty for a format no single
+  toolchain owns.
+
+**Pick a sentinel nothing will ever implement** when a test needs an unknown
+format name. `TestParserForRejectsAnUnknownFormat` used `lcov` and two config
+tests used `junit-xml`; all three broke for reasons unrelated to what they were
+testing on the day those became real. `not-a-real-format` is the one to copy.

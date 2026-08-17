@@ -27,11 +27,11 @@ to refuse is a number nobody measured: a package that covered none of its
 statements and a package nothing ever looked at are different answers, and
 reporting both as zero is worse than admitting the second.
 
-- **Thirteen signals**: coverage, tests, failing tests, packages without tests,
-  skipped tests, total test time, lint findings, lint errors, suppressed
-  findings, outdated dependencies, dependencies, median dependency age, and
-  collection time. Five of them earn a column in the every-repo table; the other
-  eight are still in the JSON payload.
+- **Fourteen signals**: statement coverage, line coverage, tests, failing tests,
+  packages without tests, skipped tests, total test time, lint findings, lint
+  errors, suppressed findings, outdated dependencies, dependencies, median
+  dependency age, and collection time. Six of them earn a column in the
+  every-repo table; the other eight are still in the JSON payload.
 - **Five commands, plus `version`.** `init` writes a starter config, `collect`
   runs each repo's steps and stores a snapshot, `report` says what moved, `repos`
   lists what the database holds for each configured repo, and `history` charts
@@ -40,6 +40,25 @@ reporting both as zero is worse than admitting the second.
   measurement nothing took is `null` rather than `0`, and in the markdown it is
   words rather than a figure: "not measured", "not collected", "not comparable",
   "no baseline yet". Which of those it says is itself the finding.
+- **Eight formats, three of them language-neutral.** `sarif` for lint findings,
+  `junit-xml` for test results, `lcov` for coverage, `npm-lockfile` and
+  `bun-lockfile` for dependency counts, plus `go-coverprofile`,
+  `go-test-json` and `go-list-modules`. Adding one is a table entry and a parser;
+  a step whose format validates but cannot be parsed is impossible by
+  construction, because the two lists are pinned to each other.
+- **Several artifacts from one command.** `artifacts:` is a list of path-and-format
+  pairs, so `pytest --junitxml=… --cov-report=lcov:…` is one step rather than two,
+  and every file it names is held to the same check: this run has to have written
+  it. `artifact:` with `artifact_format:` remains the one-file shorthand.
+- **A toolchain fingerprint that refuses to guess.** Snapshots record what they
+  were measured under, derived from the formats a repo declares, with
+  `fingerprint:` for a repo the tool cannot work out. A repo where nothing
+  identified it records that, rather than the ambient Go version, and the report
+  says the comparison could not be made instead of implying it came back equal.
+- **Unknown config keys are rejected.** A key this tool does not read fails the
+  load at every level of the file, including inside a `signals:` entry. A typo
+  that loads clean and does nothing is the same failure everything else here is
+  built to refuse.
 - **One binary and one file.** Two direct dependencies, `modernc.org/sqlite` and
   `github.com/goccy/go-yaml`. The SQLite driver is pure Go, so the binary builds
   and runs under `CGO_ENABLED=0`, and there is no daemon, no server and nothing
@@ -47,13 +66,31 @@ reporting both as zero is worse than admitting the second.
 
 Known limits, which are the reasons to hold off rather than reasons it is broken:
 
-- **Coverage, test results and dependency staleness are Go-only today.** Three of
-  the four formats it can read are Go toolchain output: `go-coverprofile`,
-  `go-test-json` and `go-list-modules`. Pointing it at a repo in another language
-  gets you the three lint signals and how long collecting them took.
-- **Lint findings are the exception.** They are read as SARIF, which
-  golangci-lint, eslint, ruff, semgrep and clippy all emit, so that half is not
-  language specific and one parser covers every linter.
+- **Dependency age and the outdated count are Go-only.** `go list -m -json`
+  answers all three questions from one stream. Elsewhere only the count is
+  recoverable: no JavaScript lockfile records a publish time, and knowing whether
+  a newer version exists needs a registry. `uv.lock` is the one lockfile in either
+  ecosystem that does carry publish timestamps, so Python age is reachable — and
+  deliberately not taken. It is TOML, which means a third direct dependency for a
+  signal that is charted and never leads a report, and the two-dependency property
+  above is worth more than one more number on one ecosystem.
+- **The count comes from the lockfile, never from `npm outdated`.** That command
+  resolves through the installed tree, so on a checkout where nothing has been
+  installed it returns an empty result and exits 0 — the same shape as the
+  `GOPROXY=off` trap on the Go side, where a repo nobody checked and a repo with
+  nothing outdated produce identical output.
+- **`untested_packages` is Go-only, and permanently.** It is not a missing parser:
+  a JUnit document lists the suites that ran and cannot reveal a source file
+  nobody wrote a test for. Answering it elsewhere is a different measurement.
+- **Coverage comes in two units that are never mixed.** A Go profile counts
+  statements, LCOV counts lines, and several statements on one source line
+  collapse to one line. They are separate signals under separate keys, so a repo
+  percentage summing both denominators is impossible rather than discouraged.
+- **Three of the eight formats are not tied to a language.** SARIF for lint
+  findings, JUnit XML for test results, LCOV for coverage — so pytest, vitest,
+  jest, coverage.py, istanbul, eslint and ruff are all read by one parser each,
+  and a Python or TypeScript repo records the same signals a Go one does apart
+  from the ones above.
 - **It has not been run against a fleet for long enough to have opinions about
   it.** The thresholds deciding which repos lead the report, and which signals
   are allowed to nominate one at all, are first guesses written down where they

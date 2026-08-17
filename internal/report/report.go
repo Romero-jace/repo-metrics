@@ -91,6 +91,17 @@ var funcs = template.FuncMap{
 		return false
 	},
 
+	// anyEnvUnknownWarned gates the footnote for rows whose toolchain was never
+	// identified at all, which is a different statement from one that changed.
+	"anyEnvUnknownWarned": func(repos []RepoView) bool {
+		for _, r := range repos {
+			if r.EnvUnknownWarned() {
+				return true
+			}
+		}
+		return false
+	},
+
 	// anyDirtyWarned does the same for the uncommitted changes marker. Two
 	// near-identical closures rather than one taking a predicate, because a
 	// template FuncMap cannot be handed a method value and the indirection would

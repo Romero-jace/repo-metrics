@@ -28,6 +28,9 @@ var starterConfig = fmt.Sprintf(
 	config.FormatSARIF,
 	config.FormatGoListModules,
 	config.FormatGoCoverprofile,
+	config.FormatJUnitXML,
+	config.FormatLCOV,
+	config.FormatSARIF,
 )
 
 // defaultWindowText renders the default reporting window for the config file.
@@ -49,7 +52,16 @@ func defaultWindowText() string {
 
 // starterConfigFormat is the file with its tunables left as verbs, filled in by
 // starterConfig above. The verbs are database, window, min_statements,
-// min_repo_delta, and then the five format names, in that order.
+// min_repo_delta, and then the format names, in that order.
+//
+// Adding an example here means adding BOTH a verb and its argument, at matching
+// indexes. Miss the argument and every later format name shifts one slot: sarif
+// lands as the dependencies step's stdout_format. It compiles, and the file it
+// writes still loads, because every value is a valid format name and only the
+// pairing is wrong. TestInitPinsEachFormatNameToItsKey is what catches that;
+// config.Load cannot.
+//
+// Nothing here may contain a literal percent sign for the same reason.
 //
 // The format names come from the config package rather than being typed here
 // for the same reason the tunables do: a starter config naming a format the
@@ -155,6 +167,30 @@ repos:
   #       artifact: artifacts/coverage.out
   #       artifact_format: %s
   #       max_age: 24h
+
+  # A repo that is not written in Go. Lint needs no parser of its own, because
+  # SARIF is not tied to a language, and tests and coverage are read from the
+  # formats every runner emits: JUnit XML and LCOV.
+  #
+  # Note the shape of the test step. One pytest run writes BOTH files, so both
+  # are listed under artifacts and each is held to the same check: it has to have
+  # been written by this run. Reading the second one in a separate step with no
+  # command also works, and quietly swaps that check for a 24 hour age limit, so
+  # a profile left over from yesterday is accepted as today's measurement.
+  # - name: python-service
+  #   path: /srv/checkouts/python-service
+  #   signals:
+  #     - name: tests
+  #       command: ["pytest", "--junitxml=j.xml", "--cov-report=lcov:c.info"]
+  #       artifacts:
+  #         - {path: j.xml, format: %s}
+  #         - {path: c.info, format: %s}
+  #       timeout: 10m
+  #
+  #     - name: lint
+  #       command: ["ruff", "check", "--output-format", "sarif"]
+  #       stdout_format: %s
+  #       timeout: 5m
 `
 
 func runInit(args []string, stdout, stderr io.Writer) error {

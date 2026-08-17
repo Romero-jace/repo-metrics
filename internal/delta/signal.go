@@ -131,6 +131,7 @@ type SignalID string
 // The signals this tool publishes.
 const (
 	SigCoverage         SignalID = "coverage"
+	SigCoverageLines    SignalID = "coverage_lines"
 	SigTests            SignalID = "tests"
 	SigTestFailures     SignalID = "test_failures"
 	SigTestSkipped      SignalID = "test_skipped"
@@ -213,6 +214,13 @@ const (
 	ScopeDetail
 )
 
+// Marker is a metric key paired with the scope it is written at. Its presence in
+// a snapshot is what proves something looked.
+type Marker struct {
+	Key   string
+	Scope MarkerScope
+}
+
 // Signal declares one metric the report publishes.
 //
 // Marker is a contract on collectors rather than an observation about one: a
@@ -228,11 +236,28 @@ type Signal struct {
 	// than up or down.
 	Direction Direction
 
-	// Marker is the metric key whose presence proves something looked. It is
-	// read by presence and never by value, so a package covering none of its
+	// Markers are the metric keys whose presence proves something looked. They
+	// are read by presence and never by value, so a package covering none of its
 	// statements still counts as measured.
-	Marker      string
-	MarkerScope MarkerScope
+	//
+	// A list, with any-of semantics, because one measurable thing can have more
+	// than one proof. A test count is the case that forced it: `go test -json`
+	// can say how many source packages carry no tests at all, and JUnit XML
+	// cannot, since a JUnit file lists the suites that ran and knows nothing
+	// about files that contain none. Requiring the Go-only key would have left
+	// every Python and TypeScript repo reporting null tests; swapping in a
+	// neutral key instead would have blanked the stored history of every Go repo,
+	// which no migration can recover because the neutral key is step scoped and
+	// the metrics table has no step column. Accepting either is the only option
+	// that fabricates nothing and loses nothing.
+	//
+	// Order matters where ScopeSetMustMatch is set. The first marker a side
+	// carries is the one whose rows fingerprint the scope set, so the newer and
+	// more precise key belongs first. Two sides that match on DIFFERENT markers
+	// then produce different fingerprints and Compare refuses the delta, which is
+	// the right answer: a total measured by one toolchain and a total measured by
+	// another did not cover the same ground.
+	Markers []Marker
 
 	// Extract reads the value. Presence is not its job: the marker answered
 	// that before Extract is called, so an extractor summing to zero is a
@@ -296,6 +321,26 @@ type Signal struct {
 	PartialWhen string
 }
 
+// testMarkers is the proof-of-measurement shared by every signal that comes out
+// of a parsed test result, in the order the presence check tries them.
+//
+// One slice rather than four copies, because the ordering is load bearing and
+// four literals would let one of them drift. The neutral key first: a snapshot
+// carrying both matches on it, which is what keeps a Go repo's fingerprint
+// scoped by step rather than by the repo-level legacy row.
+//
+// One transitional cost worth knowing about. The first collection after this
+// shipped carries test.suites and the one before it does not, so for those two
+// snapshots the two sides match on different markers, fingerprint differently,
+// and that week's test deltas are refused. It resolves itself on the next
+// collection, and refusing one comparison is the cheaper error: the alternative
+// was to compare a repo-scoped sum against a step-scoped one and call the
+// difference news.
+var testMarkers = []Marker{
+	{collect.KeyTestSuites, ScopeDetail},
+	{collect.KeyPkgWithoutTest, ScopeRepo},
+}
+
 // signals is the one ordered list. Everything downstream ranges this rather
 // than a map, which is what keeps rendering deterministic without sorting at
 // every call site.
@@ -304,8 +349,14 @@ type Signal struct {
 // test signals from most to least consequential.
 var signals = []Signal{
 	{
-		ID:        SigCoverage,
-		Label:     "Coverage",
+		ID: SigCoverage,
+		// Named for its unit rather than just "Coverage", now that a second
+		// coverage signal exists in a different one. Go's profile counts
+		// statements and LCOV counts lines; several statements on one source line
+		// collapse to one line, so the two rates are not comparable and a column
+		// header that did not say which is which would invite exactly that
+		// comparison.
+		Label:     "Statement coverage",
 		Unit:      UnitPercent,
 		Direction: HigherIsBetter,
 		// The total-statements key rather than the covered one. A collector
@@ -313,12 +364,31 @@ var signals = []Signal{
 		// denominator is the tighter contract: a profile with no instrumented
 		// packages stores neither, which is the header-only case this marker
 		// exists to catch.
-		Marker:      collect.KeyTotalStmts,
-		MarkerScope: ScopeDetail,
-		Extract:     func(s Side) float64 { return s.Coverage.Pct() },
-		Nominates:   true,
+		Markers:   []Marker{{collect.KeyTotalStmts, ScopeDetail}},
+		Extract:   func(s Side) float64 { return s.Coverage.Pct() },
+		Nominates: true,
 		// Filled from Options.MinRepoDelta at compute time, so the existing
 		// config field keeps working and no config file changes.
+		MinMove: 0,
+		Table:   true,
+	},
+	{
+		ID: SigCoverageLines,
+		// Named for its unit, and the statement signal above was relabeled to
+		// match. A reader seeing two coverage columns has to be able to tell what
+		// each denominator counts, because they are not the same number and one
+		// repo can legitimately report only one of them.
+		Label:     "Line coverage",
+		Unit:      UnitPercent,
+		Direction: HigherIsBetter,
+		// The denominator key, on the same reasoning as the statement marker: a
+		// tracefile that instruments no files stores neither key, which is the
+		// zero-byte lcov.info case a real vitest run produced.
+		Markers:   []Marker{{collect.KeyTotalLines, ScopeDetail}},
+		Extract:   ratioOver(collect.KeyCoveredLines, collect.KeyTotalLines),
+		Nominates: true,
+		// Filled from Options.MinRepoDelta at compute time, like the statement
+		// signal, so one config field still governs both.
 		MinMove: 0,
 		Table:   true,
 	},
@@ -327,42 +397,61 @@ var signals = []Signal{
 		Label:     "Tests",
 		Unit:      UnitCount,
 		Direction: HigherIsBetter,
-		// Five signals share this marker because they come from one parsed
-		// stream: either the collector read the test output or it did not, and
-		// there is no state where it counted the passes but not the failures.
-		// They null and fill together, and the census's null-and-filled ledger
-		// showing five groups flip at once is that fact, not a broken check.
-		Marker:      collect.KeyPkgWithoutTest,
-		MarkerScope: ScopeRepo,
-		Extract:     sumOver(collect.KeyTestCount),
+		// Four signals share this pair because they come from one parsed stream:
+		// either the collector read the test output or it did not, and there is no
+		// state where it counted the passes but not the failures. They null and
+		// fill together, and the census's null-and-filled ledger showing them flip
+		// at once is that fact, not a broken check.
+		//
+		// Two markers, newest first. test.suites is what any test parser can
+		// write; pkg.without_tests is what only a Go stream can, and it is still
+		// listed so that snapshots taken before test.suites existed keep reading
+		// as measured. Dropping it would blank the whole stored history of every
+		// repo already being collected.
+		Markers: testMarkers,
+		Extract: sumOver(collect.KeyTestCount),
 		// A package that would not build contributes no count, so this total is
 		// short by however many tests it has, which nothing knows.
 		PartialWhen: collect.KeyTestBuildFailed,
-		Nominates:   true,
-		MinMove:     1,
-		Table:       true,
+		// The marker's scope names the step that produced the count, so a repo
+		// that switched a second suite on did not gain those tests this week: its
+		// sum simply covers more. Same reasoning as the lint signals below, and
+		// the same refusal.
+		ScopeSetMustMatch: true,
+		Nominates:         true,
+		MinMove:           1,
+		Table:             true,
 	},
 	{
-		ID:          SigTestFailures,
-		Label:       "Failing tests",
-		Unit:        UnitCount,
-		Direction:   LowerIsBetter,
-		Marker:      collect.KeyPkgWithoutTest,
-		MarkerScope: ScopeRepo,
-		Extract:     sumOver(collect.KeyTestFailed),
-		PartialWhen: collect.KeyTestBuildFailed,
-		Nominates:   true,
-		MinMove:     1,
-		Table:       false,
+		ID:                SigTestFailures,
+		Label:             "Failing tests",
+		Unit:              UnitCount,
+		Direction:         LowerIsBetter,
+		Markers:           testMarkers,
+		Extract:           sumOver(collect.KeyTestFailed),
+		PartialWhen:       collect.KeyTestBuildFailed,
+		ScopeSetMustMatch: true,
+		Nominates:         true,
+		MinMove:           1,
+		Table:             false,
 	},
 	{
-		ID:          SigUntestedPackages,
-		Label:       "Packages without tests",
-		Unit:        UnitCount,
-		Direction:   LowerIsBetter,
-		Marker:      collect.KeyPkgWithoutTest,
-		MarkerScope: ScopeRepo,
-		Extract:     repoValue(collect.KeyPkgWithoutTest),
+		ID:        SigUntestedPackages,
+		Label:     "Packages without tests",
+		Unit:      UnitCount,
+		Direction: LowerIsBetter,
+		// The one test signal that keeps the Go-only marker and only that one,
+		// because it is the one measurement no other toolchain's output can
+		// supply. `go test -json` reports a package with no test files; a JUnit
+		// document lists the suites that ran and cannot know what did not, and
+		// neither pytest nor vitest enumerates source files carrying no tests.
+		//
+		// So a Python or TypeScript repo reports this as unmeasured rather than as
+		// zero, which is the true answer: nobody counted. Adding test.suites here
+		// to make the row fill would be publishing a count of nothing as a count
+		// of none.
+		Markers: []Marker{{collect.KeyPkgWithoutTest, ScopeRepo}},
+		Extract: repoValue(collect.KeyPkgWithoutTest),
 		// A package that would not build is deliberately not counted here, and
 		// nobody can say whether it belongs: it may be full of tests or have
 		// none. So this is a floor too, for the opposite reason to the others.
@@ -372,28 +461,28 @@ var signals = []Signal{
 		Table:       true,
 	},
 	{
-		ID:          SigTestSkipped,
-		Label:       "Skipped tests",
-		Unit:        UnitCount,
-		Direction:   LowerIsBetter,
-		Marker:      collect.KeyPkgWithoutTest,
-		MarkerScope: ScopeRepo,
-		Extract:     sumOver(collect.KeyTestSkipped),
-		PartialWhen: collect.KeyTestBuildFailed,
+		ID:                SigTestSkipped,
+		Label:             "Skipped tests",
+		Unit:              UnitCount,
+		Direction:         LowerIsBetter,
+		Markers:           testMarkers,
+		Extract:           sumOver(collect.KeyTestSkipped),
+		PartialWhen:       collect.KeyTestBuildFailed,
+		ScopeSetMustMatch: true,
 		// Skips move for reasons that are rarely news on their own, so this is
 		// reported and never leads.
 		Nominates: false,
 		Table:     false,
 	},
 	{
-		ID:          SigTestTime,
-		Label:       "Total test time",
-		Unit:        UnitMilliseconds,
-		Direction:   LowerIsBetter,
-		Marker:      collect.KeyPkgWithoutTest,
-		MarkerScope: ScopeRepo,
-		Extract:     sumOver(collect.KeyTestDurationMS),
-		PartialWhen: collect.KeyTestBuildFailed,
+		ID:                SigTestTime,
+		Label:             "Total test time",
+		Unit:              UnitMilliseconds,
+		Direction:         LowerIsBetter,
+		Markers:           testMarkers,
+		Extract:           sumOver(collect.KeyTestDurationMS),
+		PartialWhen:       collect.KeyTestBuildFailed,
+		ScopeSetMustMatch: true,
 		// The sum of per-package durations, which is not wall clock: go test
 		// runs packages in parallel, so this is machine work rather than time
 		// anyone waited. It also swings with load on the machine that ran it,
@@ -415,8 +504,7 @@ var signals = []Signal{
 		// Suppressed findings are deliberately NOT in this total. Counting them
 		// would make a repo look worse for having triaged its findings, which is
 		// the opposite of the incentive this tool should create.
-		Marker:            collect.KeyLintFindings,
-		MarkerScope:       ScopeDetail,
+		Markers:           []Marker{{collect.KeyLintFindings, ScopeDetail}},
 		Extract:           sumOver(collect.KeyLintFindings),
 		ScopeSetMustMatch: true,
 		Nominates:         true,
@@ -428,8 +516,7 @@ var signals = []Signal{
 		Label:             "Lint errors",
 		Unit:              UnitCount,
 		Direction:         LowerIsBetter,
-		Marker:            collect.KeyLintFindings,
-		MarkerScope:       ScopeDetail,
+		Markers:           []Marker{{collect.KeyLintFindings, ScopeDetail}},
 		Extract:           sumOver(collect.KeyLintErrors),
 		ScopeSetMustMatch: true,
 		// Nominates on its own rather than leaving it to the total, because a
@@ -444,8 +531,7 @@ var signals = []Signal{
 		Label:             "Suppressed findings",
 		Unit:              UnitCount,
 		Direction:         LowerIsBetter,
-		Marker:            collect.KeyLintFindings,
-		MarkerScope:       ScopeDetail,
+		Markers:           []Marker{{collect.KeyLintFindings, ScopeDetail}},
 		Extract:           sumOver(collect.KeyLintSuppressed),
 		ScopeSetMustMatch: true,
 		// Reported and never leading. A rising suppression count is worth
@@ -463,21 +549,19 @@ var signals = []Signal{
 		// signals, and that is the whole point: the module count is measurable
 		// offline while this one needs the proxy to have been consulted. A shared
 		// marker would claim this was measured whenever the count was.
-		Marker:      collect.KeyDepsOutdatedDirect,
-		MarkerScope: ScopeRepo,
-		Extract:     repoValue(collect.KeyDepsOutdatedDirect),
-		Nominates:   true,
-		MinMove:     1,
-		Table:       true,
+		Markers:   []Marker{{collect.KeyDepsOutdatedDirect, ScopeRepo}},
+		Extract:   repoValue(collect.KeyDepsOutdatedDirect),
+		Nominates: true,
+		MinMove:   1,
+		Table:     true,
 	},
 	{
-		ID:          SigDependencies,
-		Label:       "Dependencies",
-		Unit:        UnitCount,
-		Direction:   LowerIsBetter,
-		Marker:      collect.KeyDepsTotal,
-		MarkerScope: ScopeRepo,
-		Extract:     repoValue(collect.KeyDepsTotal),
+		ID:        SigDependencies,
+		Label:     "Dependencies",
+		Unit:      UnitCount,
+		Direction: LowerIsBetter,
+		Markers:   []Marker{{collect.KeyDepsTotal, ScopeRepo}},
+		Extract:   repoValue(collect.KeyDepsTotal),
 		// Dependency count moves for ordinary reasons and a repo that added one
 		// library has not had a bad week. It is context for the two signals
 		// around it rather than news of its own.
@@ -485,13 +569,12 @@ var signals = []Signal{
 		Table:     false,
 	},
 	{
-		ID:          SigDependencyAge,
-		Label:       "Median dependency age",
-		Unit:        UnitDays,
-		Direction:   LowerIsBetter,
-		Marker:      collect.KeyDepsAgeMedianDays,
-		MarkerScope: ScopeRepo,
-		Extract:     repoValue(collect.KeyDepsAgeMedianDays),
+		ID:        SigDependencyAge,
+		Label:     "Median dependency age",
+		Unit:      UnitDays,
+		Direction: LowerIsBetter,
+		Markers:   []Marker{{collect.KeyDepsAgeMedianDays, ScopeRepo}},
+		Extract:   repoValue(collect.KeyDepsAgeMedianDays),
 		// This one drifts upward by a day every day just by nobody touching the
 		// repo, so an absolute floor would make every repo a mover every week.
 		// The relative floor asks whether the drift outran the calendar.
@@ -512,8 +595,7 @@ var signals = []Signal{
 		// reports. That is machine work and counts parallel packages more than
 		// once; this is time somebody waited. Both are worth having and neither
 		// is derivable from the other.
-		Marker:            collect.KeySignalDurationMS,
-		MarkerScope:       ScopeDetail,
+		Markers:           []Marker{{collect.KeySignalDurationMS, ScopeDetail}},
 		Extract:           sumOver(collect.KeySignalDurationMS),
 		ScopeSetMustMatch: true,
 		// Never leads. This is the signal most sensitive to what else the machine

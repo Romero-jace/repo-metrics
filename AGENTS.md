@@ -29,7 +29,7 @@ it will look reasonable and be wrong.
 |---|---|
 | Adding or changing a reported signal | `## Adding a signal`, then `## The marker contract` and `## The other half: what the scope names`. Code: `internal/collect/keys.go`, `internal/collect/parse.go`, `internal/delta/signal.go`, `internal/report/view.go`. |
 | Adding a metric key | `## Adding a metric`. Counts, never a precomputed percentage. |
-| Adding a config format | `## Adding a format`. Both halves land together: `internal/config/format.go` and `internal/collect/parse.go`. |
+| Adding a config format | `## Adding a format`. Both halves land together: `internal/config/format.go` and `internal/collect/parse.go`, plus a parser package of its own under `internal/collect/` and a row in `reposcoped_test.go`. |
 | Getting the extractor right | `### The extractor and the marker answer different questions`, inside `## Adding a signal`. Read it even if you think you know: it is the one field the suite cannot catch you on, and getting it wrong publishes a confident zero. |
 | Changing a JSON payload | The closing paragraphs of `## Adding a signal`, after its `###` subsection. Three payloads, four censuses: `internal/report/view.go` guarded by `degraded_test.go`, `internal/report/repos.go` and `history.go` guarded by `payload_census_test.go`. |
 | Changing CLI output | No CONTRIBUTING section for this. Flag order is in the package doc at `internal/cli/root.go`; which stream carries what is in the doc comment on `Run` in the same file, and at length under `## Streams and exit codes` in the README. Format and section names are single lists in `internal/report/format.go` and `section.go`. Markdown lives in `internal/report/report.md.tmpl` and `history.md.tmpl`. |

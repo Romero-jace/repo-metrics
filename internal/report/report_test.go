@@ -55,6 +55,16 @@ func cov(pkg string, covered, total int) []store.Metric {
 	}
 }
 
+// covLines is the other coverage unit: what an LCOV tracefile stores, scoped by
+// source file rather than by package. Deliberately a separate helper from cov,
+// because the two are never mixed into one repo's rate.
+func covLines(file string, covered, total int) []store.Metric {
+	return []store.Metric{
+		{Key: collect.KeyCoveredLines, Scope: file, Value: float64(covered)},
+		{Key: collect.KeyTotalLines, Scope: file, Value: float64(total)},
+	}
+}
+
 func testCount(pkg string, n int) store.Metric {
 	return store.Metric{Key: collect.KeyTestCount, Scope: pkg, Value: float64(n)}
 }

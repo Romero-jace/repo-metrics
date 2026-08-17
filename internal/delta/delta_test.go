@@ -255,6 +255,53 @@ func TestEnvironmentChangeIsFlagged(t *testing.T) {
 	if !got.EnvChanged {
 		t.Error("a toolchain change between snapshots was not flagged")
 	}
+	if got.EnvUnknown {
+		t.Error("two identified toolchains were reported as unidentified, which would hide a real change behind a vaguer warning")
+	}
+}
+
+// Two snapshots that both failed to identify a toolchain must not read as having
+// been taken under the same one.
+//
+// This is the bug the unidentified sentinel exists for, and it is the shape this
+// whole tool is built against: the placeholder is a string like any other, so
+// comparing it answered "unchanged" for exactly the repos where nothing was
+// watching. Every non-Go repo recorded that placeholder on every run, so the
+// toolchain warning could never fire for the repos most likely to have their
+// runtime upgraded under them.
+func TestTwoUnidentifiedToolchainsAreNotReportedAsUnchanged(t *testing.T) {
+	for _, env := range []string{"unidentified", "go=unknown", ""} {
+		got := one(t, delta.Input{
+			Repo: store.Repo{Name: "svc"},
+			Head: snap(env), HeadMetrics: cov("m/a", 500, 1000),
+			Base: snap(env), BaseMetrics: cov("m/a", 900, 1000),
+		}, opts())
+
+		if !got.EnvUnknown {
+			t.Errorf("env %q: two snapshots that established no toolchain were not flagged as unidentified", env)
+		}
+		// Not merely "also true". EnvChanged asserts the two were demonstrably
+		// different, which nothing here established either, and a report saying so
+		// would be as wrong as one saying nothing.
+		if got.EnvChanged {
+			t.Errorf("env %q: reported as a toolchain CHANGE, which nothing measured", env)
+		}
+	}
+
+	// The control: one identified side and one not is still unidentified, because
+	// the comparison needs both. Without it, a check that only looked at the head
+	// would pass everything above.
+	half := one(t, delta.Input{
+		Repo: store.Repo{Name: "svc"},
+		Head: snap("go=go1.26.5;gowork=off"), HeadMetrics: cov("m/a", 500, 1000),
+		Base: snap("unidentified"), BaseMetrics: cov("m/a", 900, 1000),
+	}, opts())
+	if !half.EnvUnknown {
+		t.Error("a baseline that established no toolchain was compared against an identified head as though the pair were comparable")
+	}
+	if half.EnvChanged {
+		t.Error("an unidentified baseline was reported as a toolchain change; the two strings differ but nothing about the toolchains does")
+	}
 }
 
 func TestCulpritsAreCappedAndSorted(t *testing.T) {

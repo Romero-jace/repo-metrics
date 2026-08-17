@@ -833,6 +833,42 @@ func TestCleanLintRunStoresAMeasuredZero(t *testing.T) {
 	}
 }
 
+// The suppression count is the one thing a clean lint run does NOT record, and
+// this is the pair to the test above rather than a contradiction of it.
+//
+// A SARIF suppressions array is the only way a document can report a finding that
+// was raised and then silenced, and almost no linter writes one: golangci-lint
+// drops a //nolint finding before it reaches the log, and so do ruff for # noqa,
+// rubocop for # rubocop:disable and clippy for #[allow]. So a document with no
+// suppressions is the same bytes whether the repo suppresses nothing or the
+// linter has no way to say — and a stored zero would have published the first
+// answer for a repo full of //nolint comments.
+//
+// The findings row is still written at zero in the same run, which is what makes
+// this a distinction rather than a blanket refusal: "the linter ran and found
+// nothing" is a real measurement, and "the linter cannot tell you about
+// suppressions" is not.
+func TestACleanLintRunRecordsNoSuppressionCountAtAll(t *testing.T) {
+	dir := repoDir(t)
+	r := config.Repo{Name: "svc", Path: dir, Signals: []config.Signal{
+		lintStep("lint", writeFile(t, dir, "clean.sarif", cleanSARIF)),
+	}}
+
+	res := collectOnce(t, r)
+	if res.Snapshot.Status != store.StatusOK {
+		t.Fatalf("Status: got %q, want ok. Diagnostics:\n%s", res.Snapshot.Status, diagText(res))
+	}
+	if hasMetric(res, collect.KeyLintSuppressed) {
+		t.Errorf("a lint run with no suppressions stored %s anyway, at %v. Nothing in the document measured it, so the row is a fabrication and downstream it reads as a repo that suppresses nothing",
+			collect.KeyLintSuppressed, metric(t, res, collect.KeyLintSuppressed, "lint"))
+	}
+	// The control. Without this the test above would pass on a parser that had
+	// stopped reading SARIF at all.
+	if !hasMetric(res, collect.KeyLintFindings) {
+		t.Error("the findings row is missing too, so this test is not exercising the distinction it names")
+	}
+}
+
 // golangci-lint exits 1 whenever it finds anything, and so do eslint, ruff and
 // clippy. Treating that as degradation would mark every snapshot partial forever
 // on any repo that has a single outstanding nit, and the status field would stop

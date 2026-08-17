@@ -456,14 +456,38 @@ func parseSARIF(_ context.Context, src source) ([]store.Metric, []Diagnostic, er
 		return nil, diags, fmt.Errorf("parsing the analysis log: %w", err)
 	}
 
-	// Emitted unconditionally, including all-zero, because a linter that ran and
-	// found nothing is the good news this tool should be able to report. Without
-	// the row it is indistinguishable from a repo nobody lints.
+	// The two finding counts are emitted unconditionally, including all-zero,
+	// because a linter that ran and found nothing is the good news this tool
+	// should be able to report. Without the row it is indistinguishable from a
+	// repo nobody lints.
 	scope := src.Step.Name
 	metrics := []store.Metric{
 		{Key: KeyLintFindings, Scope: scope, Value: float64(summary.Active())},
 		{Key: KeyLintErrors, Scope: scope, Value: float64(summary.Levels[sarif.LevelError])},
-		{Key: KeyLintSuppressed, Scope: scope, Value: float64(summary.Suppressed)},
+	}
+
+	// The suppression count is NOT, and this is the one place in this parser where
+	// zero is not a measurement.
+	//
+	// A SARIF suppressions array is the only thing a document can carry to say a
+	// finding was reported-but-silenced, and almost no linter writes one:
+	// golangci-lint drops a //nolint finding before it ever reaches the log, and
+	// so do ruff for # noqa, rubocop for # rubocop:disable, detekt for @Suppress,
+	// SwiftLint for // swiftlint:disable and clippy for #[allow]. Only ESLint via
+	// @microsoft/eslint-formatter-sarif and Roslyn emit the array at all.
+	//
+	// So writing a zero here published "this repo suppresses nothing" for a repo
+	// with a hundred //nolint comments, from a document that simply cannot express
+	// the question. Nothing measured it, and the row is left out instead.
+	//
+	// What that costs, stated plainly: a repo that genuinely deletes its last
+	// suppression reads as unmeasured rather than as zero, so the improvement
+	// cannot be reported. That is not a compromise so much as the honest answer —
+	// a document with no suppressions array is the same bytes whether the repo
+	// cleaned up or the linter never had anything to say, and the whole discipline
+	// here is that those two do not get one number between them.
+	if summary.Suppressed > 0 {
+		metrics = append(metrics, store.Metric{Key: KeyLintSuppressed, Scope: scope, Value: float64(summary.Suppressed)})
 	}
 
 	if len(summary.Drivers) == 0 {

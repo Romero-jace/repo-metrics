@@ -79,6 +79,15 @@ Known limits, which are the reasons to hold off rather than reasons it is broken
   installed it returns an empty result and exits 0 — the same shape as the
   `GOPROXY=off` trap on the Go side, where a repo nobody checked and a repo with
   nothing outdated produce identical output.
+- **`lint_suppressed` is unmeasured unless the linter reports suppressions.** A
+  SARIF `suppressions` array is the only way a document can say a finding was
+  raised and then silenced, and almost nothing writes one: `//nolint`, `# noqa`,
+  `# rubocop:disable`, `@Suppress` and `#[allow]` all delete the finding instead.
+  Only ESLint via `@microsoft/eslint-formatter-sarif` and Roslyn emit it. So no row
+  is stored rather than a zero, which is the one count here where zero is never a
+  measurement — and it costs the ability to report a repo clearing its last
+  suppression, because that is the same document as a linter that never had
+  anything to say.
 - **`untested_packages` is Go-only, and permanently.** It is not a missing parser:
   a JUnit document lists the suites that ran and cannot reveal a source file
   nobody wrote a test for. Answering it elsewhere is a different measurement.

@@ -541,11 +541,22 @@ var signals = []Signal{
 		Table:     false,
 	},
 	{
-		ID:                SigLintSuppressed,
-		Label:             "Suppressed findings",
-		Unit:              UnitCount,
-		Direction:         LowerIsBetter,
-		Markers:           []Marker{{collect.KeyLintFindings, ScopeDetail}},
+		ID:        SigLintSuppressed,
+		Label:     "Suppressed findings",
+		Unit:      UnitCount,
+		Direction: LowerIsBetter,
+		// Its own marker, for exactly the reason the outdated-dependency signal
+		// below has its own: a shared one would claim this was measured whenever
+		// the finding count was. It shared KeyLintFindings, so every lint run
+		// anywhere reported this as measured, and since the parser wrote the row
+		// unconditionally the answer was zero — for a repo full of //nolint
+		// comments, from a linter whose SARIF cannot express suppression at all.
+		//
+		// Almost no emitter writes a suppressions array (see parseSARIF), so this
+		// signal is unmeasured on most repos now, and that is the correct answer
+		// rather than a gap. It is a non-table signal, so the effect is a null in
+		// the JSON payload rather than a column of "not measured".
+		Markers:           []Marker{{collect.KeyLintSuppressed, ScopeDetail}},
 		Extract:           sumOver(collect.KeyLintSuppressed),
 		ScopeSetMustMatch: true,
 		// Reported and never leading. A rising suppression count is worth

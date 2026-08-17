@@ -49,11 +49,11 @@ type signalFixture struct {
 // with the reason each one is exempt, in the same idiom as the wire census's
 // pinned measurement list in report/degraded_test.go.
 //
-// It is empty on purpose. Every registered signal has a measured zero a real
-// collector produces, including coverage, so nothing here should opt out of the
-// measured-zero half of TestEverySignalDistinguishesZeroFromUnmeasured. The
-// field's doc comment above says why coverage is not the exception it looks
-// like; that sentence used to claim the opposite and was wrong.
+// It held nothing for a long time, and the single entry it holds now is the kind
+// of case it was built for: an exemption that is a property of the FORMAT, not of
+// the quantity. Every other registered signal has a measured zero a real
+// collector produces, including coverage, whose fixture comment above says why it
+// is not the exception it looks like.
 //
 // The reason it exists at all: zeroIsReachable wraps that entire assertion and
 // has no else branch, so flipping one fixture's bool deleted the check for that
@@ -62,7 +62,15 @@ type signalFixture struct {
 // most important measured zero in the table, and build, vet, the full test run
 // and golangci-lint all stayed green. Opting a signal out now has to be a diff
 // against this map with a written reason, which a reviewer sees.
-var zeroUnreachable = map[delta.SignalID]string{}
+var zeroUnreachable = map[delta.SignalID]string{
+	delta.SigLintSuppressed: "A SARIF suppressions array is the only way a document can report a finding that " +
+		"was raised and then silenced, and almost no linter writes one: golangci-lint drops a //nolint finding " +
+		"before it reaches the log, and so do ruff for # noqa, rubocop for # rubocop:disable, detekt for " +
+		"@Suppress and clippy for #[allow]. A document with no suppressions is therefore the same bytes whether " +
+		"the repo suppresses nothing or the linter cannot say, so parseSARIF stores no row and the zero is never " +
+		"a measurement. This is the one exemption here that comes from what the format can express rather than " +
+		"from what the number counts.",
+}
 
 // The fixture table. A signal missing from here fails the test below, which is
 // the mechanism that stops a new signal shipping without anyone deciding what
@@ -150,11 +158,24 @@ func signalFixtures() map[delta.SignalID]signalFixture {
 			zeroIsReachable: true,
 		},
 		delta.SigLintSuppressed: {
-			// Nothing suppressed, which is the state a rising count is measured
-			// against.
-			measuredZero:    lintRunMarker("lint", 4, 1, 0),
-			absent:          cov("m/a", 5, 10),
-			zeroIsReachable: true,
+			// A lint run that suppressed nothing, which is what the overwhelming
+			// majority of real SARIF documents describe.
+			measuredZero: lintRunMarker("lint", 4, 1, 0),
+			absent:       cov("m/a", 5, 10),
+			// Opted out, and the one signal here where the opt-out is a property of
+			// the FORMAT rather than of the thing being counted. A SARIF
+			// suppressions array is the only way a document can report a silenced
+			// finding, and almost no linter writes one: //nolint, # noqa and
+			// #[allow] all delete the finding instead. So a document carrying no
+			// suppressions cannot distinguish "this repo suppresses nothing" from
+			// "this linter has no way to tell you", and the parser stores no row.
+			//
+			// It was true, on a fixture that hand-wrote the zero row the parser
+			// wrote unconditionally. That made this entry a witness FOR the bug: the
+			// census asked whether a measured zero was reachable, the fixture
+			// supplied one by construction, and the answer came back yes for a
+			// signal whose zero was never a measurement.
+			zeroIsReachable: false,
 		},
 		delta.SigDependencies: {
 			// A repo that vendors nothing. Rare in Go and entirely real.
@@ -202,16 +223,25 @@ func signalFixtures() map[delta.SignalID]signalFixture {
 	}
 }
 
-// lintRunMarker is what the SARIF parser stores for one lint step: all three
-// keys together, scoped by the step's name, written even when every count is
-// zero. Scoped rather than repo-level because a polyglot repo runs two linters
-// as two steps and they have to sum rather than collide.
+// lintRunMarker is what the SARIF parser stores for one lint step, scoped by the
+// step's name. Scoped rather than repo-level because a polyglot repo runs two
+// linters as two steps and they have to sum rather than collide.
+//
+// The two finding counts are written even at zero. The suppression count is not,
+// and passing zero here omits the row exactly as the parser does — see parseSARIF
+// for why a zero there would be a fabrication rather than a measurement. This
+// helper used to write all three unconditionally, which made it a fixture for a
+// row no collector produces, and the census below then asserted that a measured
+// zero was reachable for a signal where it is not.
 func lintRunMarker(step string, findings, errs, suppressed int) []store.Metric {
-	return []store.Metric{
+	out := []store.Metric{
 		{Key: collect.KeyLintFindings, Scope: step, Value: float64(findings)},
 		{Key: collect.KeyLintErrors, Scope: step, Value: float64(errs)},
-		{Key: collect.KeyLintSuppressed, Scope: step, Value: float64(suppressed)},
 	}
+	if suppressed > 0 {
+		out = append(out, store.Metric{Key: collect.KeyLintSuppressed, Scope: step, Value: float64(suppressed)})
+	}
+	return out
 }
 
 // TestEverySignalDistinguishesZeroFromUnmeasured is the reason the signal layer

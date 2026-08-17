@@ -202,7 +202,7 @@ configure the commands; you do not pick the signals.
 | `test_time` | duration | same as `tests` |
 | `lint_findings` | count | SARIF log |
 | `lint_errors` | count | same log |
-| `lint_suppressed` | count | same log |
+| `lint_suppressed` | count | same log, only if it carries `suppressions` |
 | `dependencies` | count | `go list -m -json`, or a lockfile |
 | `dependency_age` | days | `go list -m -json` only |
 | `outdated_dependencies` | count | `go list -m -json` only, with `-u` |
@@ -222,6 +222,22 @@ other.
 findings against a repo would make it look worse for having triaged them, which
 is the opposite of the incentive this tool should create. It is tracked on its
 own because a rising suppression count is its own finding.
+
+**And it is unmeasured on most repos, deliberately.** A SARIF `suppressions`
+array is the only way a document can report a finding that was raised and then
+silenced, and almost no linter writes one: golangci-lint drops a `//nolint`
+finding before it reaches the log, and so do ruff for `# noqa`, rubocop for
+`# rubocop:disable`, detekt for `@Suppress` and clippy for `#[allow]`. Only ESLint
+via `@microsoft/eslint-formatter-sarif` and Roslyn emit the array at all.
+
+So a document carrying no suppressions is the same bytes whether the repo
+suppresses nothing or the linter cannot say, and nothing is recorded rather than a
+zero. That is the one count in this tool where zero is never stored: `lint_findings`
+of 0 is a real measurement of a clean run, and `lint_suppressed` of 0 is not a
+measurement of anything. What it costs is real and worth stating — a repo that
+deletes its last suppression reads as unmeasured rather than as zero, so that
+improvement cannot be reported. There is no version of this that reports the
+improvement without also fabricating the zero.
 
 **`outdated_dependencies` is direct dependencies only.** Bumping an indirect
 module is a consequence of bumping the direct one that pulls it in, so a headline

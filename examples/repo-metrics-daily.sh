@@ -42,7 +42,8 @@
 # ${VAR} in `database:` exits 5 and reports a lock nobody holds. Both collected
 # nothing, and neither said anything true about why. Both came out of reading this
 # file for a machine that is not the author's rather than out of use, which is the
-# tell: on macOS sqlite3 ships with the OS, so the first one cannot happen here.
+# tell: sqlite3 ships in /usr/bin on macOS, so the first one never surfaced while
+# this was being written.
 #
 # 1 and 2 are split because collect's own exit code cannot tell them apart, which
 # was verified against the binary rather than assumed: ANY repo whose snapshot
@@ -164,8 +165,8 @@ if [ -z "${RM_DB:-}" ]; then
 	RM_DB=$(sed -n 's/^database:[[:space:]]*//p' "$CONFIG" | head -1 | tr -d '"'"'")
 
 	# What sed cannot do is expand, and the tool whose config it is reading does.
-	# Load runs expandEnv before validate, and `database` is one of the six fields
-	# os.ExpandEnv is run over. The starter config beside this file documents that
+	# Load runs expandEnv before validate, and `database` is the first field it
+	# runs os.ExpandEnv over. The starter config beside this file documents that
 	# and offers ${VAR} there as the way to keep a machine-specific layout out of a
 	# committed file — so a config that followed its own documentation is the case
 	# that breaks here, not an exotic one.

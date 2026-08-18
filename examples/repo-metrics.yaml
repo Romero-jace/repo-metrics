@@ -393,11 +393,18 @@ repos:
         # month-old lockfile and that is the healthy case, not a stale one.
         max_age: 8760h
 
-  # ${VAR} and $VAR are expanded from the environment in six places and only
-  # six: the top-level database, then each repo's path and its env VALUES, then
-  # each signal's artifact, command entries, and env VALUES. Both env blocks
+  # ${VAR} and $VAR are expanded from the environment in eight places and only
+  # eight: the top-level database; then each repo's path, its env VALUES, and its
+  # fingerprint argv; then each signal's artifact, each entry in the longhand
+  # artifacts list, its command entries, and its env VALUES. Both env blocks
   # expand, the repo-level one above and the per-signal one. That is enough to
   # keep the machine-specific parts of a checkout layout out of the file.
+  #
+  # The fingerprint and the longhand artifacts list are easy to forget and are
+  # exactly where you want this: a probe for a toolchain installed under a
+  # version manager lives at a per-machine path, and a config that expanded the
+  # artifact shorthand but not the list form would do something other than what
+  # it says depending on which spelling you reached for.
   #
   # Nothing else is expanded. A ${VAR} in a name or in an env KEY is kept as
   # literal text, and one in a format, timeout, or max_age makes the config fail

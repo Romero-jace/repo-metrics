@@ -103,6 +103,26 @@ min_repo_delta: %v
 repos:
   # This entry points at the current directory so the file works as written.
   # Point it somewhere you actually care about and give it a better name.
+  #
+  # "Works as written" assumes the current directory is a Go module, because the
+  # two live signals below are ` + "`go test`" + ` and ` + "`go list`" + `. Run this config anywhere
+  # else and it still loads, collect still exits 0, and what you get is a PARTIAL
+  # snapshot carrying nothing you can use: the coverage step runs, finds no
+  # instrumented packages and records none, the dependency step cannot find a
+  # go.mod and records nothing, and the whole thing arrives as a wall of warnings
+  # rather than as an error. Measured, not assumed. That is a starter config
+  # written for the language the tool itself is written in, not a statement about
+  # which languages can be measured — SARIF, JUnit XML and LCOV are not tied to
+  # any language, and the Python and TypeScript entries in
+  # examples/repo-metrics.yaml are the ones to copy. A non-Go repo also needs a
+  # fingerprint: line, which a Go repo gets for free.
+  #
+  # One more thing this entry does that you may not want kept: -coverprofile
+  # writes coverage.out into the repo being measured. Anything you leave in a
+  # measured tree and do not gitignore shows up from the second run onward as an
+  # uncommitted change, which sets git_dirty and earns every later snapshot a
+  # warning saying its numbers belong to no commit. Gitignore it, or give both
+  # the flag and artifact: an absolute path outside the tree.
   - name: this-repo
     path: .
     # env reaches every signal below, and is also the environment the toolchain

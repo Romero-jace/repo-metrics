@@ -274,6 +274,19 @@ repos:
   # suites that RAN, and nothing in it reveals a source file nobody wrote a test
   # for. It comes back empty rather than zero, which is the distinction this
   # whole tool is built on.
+  #
+  # Note where the artifacts in this entry and the next one land. A relative
+  # artifact path is resolved against the repo being measured, so reports/ is a
+  # directory created INSIDE that checkout, run after run. If the repo does not
+  # gitignore it, the second collection onward sets git_dirty and every snapshot
+  # from then on carries a warning saying its numbers belong to no commit and
+  # nobody can reproduce them from one — which is true of a genuinely dirty tree
+  # and false here, so the warning stops meaning anything precisely when you
+  # would want it to. Two ways out, and the choice is yours: gitignore the
+  # directory in each measured repo, or give every artifact an absolute path
+  # under a collection directory of your own and keep the checkouts untouched.
+  # The second is what a scheduled fleet wants, because it holds whether or not
+  # somebody remembered to edit a .gitignore in a repo you do not own.
   - name: python-service
     path: /srv/checkouts/python-service
 

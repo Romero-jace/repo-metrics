@@ -49,6 +49,18 @@ statements; LCOV counts lines, and several statements on one source line collaps
 to one line there. They are separate signals, reported separately, and a repo
 normally fills exactly one of them.
 
+One thing to know before you trust a report rather than merely read it: the
+thresholds that decide which repos lead it, and which signals are allowed to
+nominate one at all, are first guesses. They are written down where they can be
+argued with — `min_statements` and `min_repo_delta` in the config, and a
+per-signal floor in the code — but they have not been calibrated against a real
+fleet over real time, because no fleet has run long enough yet to calibrate them.
+What that means in practice is that the "what moved" section is a starting
+proposal about what deserves attention, not a settled one. The per-repo table
+under it is unfiltered, and the history command is unfiltered, so nothing is
+hidden from you by a threshold you disagree with. "How it decides what to tell
+you" below has the reasoning behind each cutoff.
+
 ## Install
 
 This repository is private, so build it from a checkout:
@@ -100,12 +112,34 @@ repo-metrics collect              # one pass over all of them, then exits
 repo-metrics report               # markdown to stdout
 ```
 
-`init` writes a config that already works: the first repo entry points at the
-current directory, so you can run the rest immediately and see real output before
-editing anything. Every repo `path:` is checked when the config loads, so a file
-full of `/path/to/your-repo` placeholders is a load error rather than a mystery
-later. An `artifact:` path is not checked then, because the file it names is
-usually something a later command produces.
+`init` writes a config that already works **if you run it inside a Go module**:
+the first repo entry points at the current directory, and its two live signals
+are `go test` and `go list`, so you can run the rest immediately and see real
+output before editing anything. Run it anywhere else and it still loads, and
+`collect` still exits 0 — what you get is a *partial* snapshot with nothing in it
+worth reading: the coverage step finds no instrumented packages and records none,
+the dependency step cannot find a `go.mod` and records nothing, and the result
+arrives as a wall of warnings rather than as a clean failure. That is not the
+tool declining to measure your language; it is a
+starter config written for the language the tool is written in. Every
+language-neutral format named under [Status](#status) is reachable from a config
+you write yourself, and the Python and TypeScript entries in
+[`examples/repo-metrics.yaml`](examples/repo-metrics.yaml) are the ones to copy —
+note in particular their `fingerprint:` lines, which a non-Go repo needs and a Go
+repo gets for free.
+
+Two smaller things worth knowing before the first run. Every repo `path:` is
+checked when the config loads, so a file full of `/path/to/your-repo`
+placeholders is a load error rather than a mystery later; an `artifact:` path is
+not checked then, because the file it names is usually something a later command
+produces. And every artifact written to a relative path lands inside the repo
+being measured — the generated coverage entry writes `coverage.out` there, and
+the examples write into `reports/`. Whatever you do not gitignore will show up as
+an uncommitted change from the second run onward, which sets the `git_dirty` flag
+and earns every future snapshot a warning saying its numbers belong to no commit.
+The alternative is to point the command's output flag and the matching
+`artifact:` at an absolute path outside the tree, which costs one line and makes
+the dirty-tree warning mean something again.
 
 The report needs two snapshots to compare, and the second one has to be far
 enough back. The baseline is the newest snapshot at or before your window, which
@@ -163,6 +197,19 @@ same words. Under the table, a Collection problems section prints the error
 behind each run that reported one, matched to the rows by timestamp, so a row
 like that one is never a dead end. A repo that has only ever collected cleanly
 does not grow the heading at all.
+
+Two more phrases show up in a change column rather than a value, and they are
+about the comparison rather than about the measurement. `no baseline yet` means
+the signal was measured today and there is no earlier snapshot far enough back to
+compare it against — the usual cause is simply that you started collecting less
+than a window ago, and it clears itself once history catches up rather than
+indicating anything wrong. `not comparable` is stronger: two snapshots exist, and
+something about them makes the difference meaningless, most often that the set of
+steps producing the signal changed between them, or that the environment
+fingerprint moved. A signal newly switched on did not make the repo worse, and a
+number measured under a different toolchain is not a delta, so in both cases the
+tool declines to subtract rather than publishing an artifact of your own config
+change.
 
 There is also `repo-metrics version`, which does no work and takes no flags.
 Built from a clean checkout of this repository, which carries no tag yet, it
@@ -374,20 +421,29 @@ way `1h30m` does and `3d1w` is an error rather than a guess.
 ## Running it on a schedule
 
 There is no daemon. `collect` does one pass and exits, so cron or launchd owns
-the cadence and you can always just run it by hand:
+the cadence and you can always just run it by hand.
 
-```
-0 6 * * *  repo-metrics collect ; repo-metrics report --out /srv/report.md
-```
+What you should not do is put the two commands in the crontab directly. This
+file used to recommend exactly that — `collect ; report`, with `;` rather than
+`&&` on the grounds that one unreachable repo should not veto the whole report.
+That reasoning was right and its price was fatal: chaining with `;` makes the
+job's status `report`'s alone, and **`report` exits 0 unconditionally**. It exits
+0 against a database with nothing in it, having rendered a report with nothing in
+it. So the scheduled job could not fail, and a collection that stopped working
+would go on looking healthy indefinitely — which is the precise failure this
+tool exists to catch, reproduced in its own recommended deployment.
 
-That is a `;` and not an `&&` on purpose. `collect` keeps going when a repo
-fails, so one unreachable repo does not cost you the other nine, and then exits 1
-to say that one of them did fail. Chained with `&&`, that exit code would let a
-single bad repo cancel the report you actually wanted. "Streams and exit codes"
-below has the rest of what the exit status means.
+Use [`examples/repo-metrics-daily.sh`](examples/repo-metrics-daily.sh) instead.
+It resolves that rather than reverting it: it decides the exit code from what the
+database actually stored, runs the report regardless, and then exits with the
+code it decided — `1` nothing stored, `2` a repo failed, `3` the database is
+corrupt, `4` the data is stale, `5` a run was already in progress. It also backs
+the database up before each run, because snapshots cannot be re-collected: they
+measured a working tree at a commit that has since moved on.
 
-[`examples/`](examples/) has a ready-made launchd agent for macOS and the
-equivalent crontab line for Linux.
+[`examples/`](examples/) wraps that script in a ready-made launchd agent for
+macOS and a crontab line for Linux, and [`examples/README.md`](examples/README.md)
+has the full reasoning, the prerequisites, and what each exit code means.
 
 ## Asking it narrower questions
 
@@ -745,6 +801,11 @@ exits 0. Read the exit code for whether it worked and stderr for what it noticed
 and do not let a wrapper script collapse the second into the first.
 
 ## How it decides what to tell you
+
+Everything in this section is a first guess. The cutoffs below have reasoning
+behind them and no calibration under them: no fleet has yet run long enough to
+tell anyone whether they are the right numbers, and they were chosen to be easy
+to argue with rather than to be defended. Read them as the current proposal.
 
 The report leads with which repos moved, and says which measurements moved them.
 Eight of the fourteen signals are allowed to nominate a repo: `coverage`,

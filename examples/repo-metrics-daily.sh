@@ -30,6 +30,19 @@
 #   4  the newest snapshot is older than RM_MAX_AGE_HOURS — a collection has not
 #      been landing, which is the failure the report itself never raises
 #   5  another run holds the lock
+#   6  sqlite3 is not on PATH, so the backup and both checks cannot run at all
+#   7  the database path in the config is not literal text — it carries a variable
+#      reference or a trailing comment, which this wrapper reads as written and
+#      the tool does not
+#
+# 6 and 7 exist because the alternative was not a failure, it was a confident
+# wrong answer. Without 6, a host with no sqlite3 exits 3 and reports a corrupt
+# database while pointing at an empty backup directory; the database is fine.
+# Without 7, a config that takes the starter config up on its offer to write
+# ${VAR} in `database:` exits 5 and reports a lock nobody holds. Both collected
+# nothing, and neither said anything true about why. Both came out of reading this
+# file for a machine that is not the author's rather than out of use, which is the
+# tell: on macOS sqlite3 ships with the OS, so the first one cannot happen here.
 #
 # 1 and 2 are split because collect's own exit code cannot tell them apart, which
 # was verified against the binary rather than assumed: ANY repo whose snapshot
@@ -67,6 +80,18 @@
 #     end of the collect mode if you want that; deliberately not wired in here,
 #     since it means choosing a third-party service.
 #
+# Requires, and neither of these is optional:
+#
+#   repo-metrics       the binary, on PATH or named in RM_BIN
+#   sqlite3            the command line shell, for the backup and both checks
+#
+# sqlite3 is the one that catches people out. It ships with macOS in /usr/bin, so
+# the launchd example beside this file already has it and it never came up while
+# this was being written; a slim Linux image very often carries the library
+# without the CLI, and the package to install is sqlite3 on Debian and Ubuntu,
+# sqlite on RHEL and Alpine. The preflight below turns a missing one into exit 6
+# at the top of the run instead of a wrong answer later.
+#
 # Environment, all optional:
 #
 #   RM_BIN             path to the binary (default: repo-metrics, found on PATH)
@@ -102,6 +127,34 @@ RM_BIN="${RM_BIN:-repo-metrics}"
 RM_BACKUP_KEEP="${RM_BACKUP_KEEP:-14}"
 RM_MAX_AGE_HOURS="${RM_MAX_AGE_HOURS:-48}"
 
+# ---------------------------------------------------------------------------
+# sqlite3, before anything else touches the database. Every operational fact this
+# wrapper reports is read out with it — the backup, the integrity check, the
+# freshness check, and the counts that decide the exit code — so a missing one is
+# not a degraded run, it is a run that cannot tell you anything.
+#
+# Checking for it here rather than letting it fail where it is used is the whole
+# point, because where it is used it fails as something else entirely.
+# check_integrity runs sqlite3 with `|| echo "check failed to run"`, so a shell
+# that cannot find the binary lands a non-"ok" string in exactly the place a
+# corrupt file would, and the run exits 3 announcing DATABASE INTEGRITY CHECK
+# FAILED and directing whoever reads it to a backup directory that is empty —
+# empty because the backup needed sqlite3 too and was skipped a few lines
+# earlier. Nothing is wrong with the database. The operator is now looking for a
+# restore they do not need, from backups that were never written.
+#
+# It never came up in development because sqlite3 ships with macOS in /usr/bin,
+# which is the platform the launchd example beside this file targets. A slim
+# Linux image is where it bites.
+# ---------------------------------------------------------------------------
+if ! command -v sqlite3 >/dev/null 2>&1; then
+	echo "sqlite3 is not on PATH, and this wrapper needs it for the backup and both checks." >&2
+	echo "Install it (sqlite3 on Debian and Ubuntu, sqlite on RHEL and Alpine) and run this again." >&2
+	echo "If it is installed but a scheduler cannot see it, add its directory to the PATH in the job" >&2
+	echo "definition: cron and launchd both start jobs with a minimal PATH, not the one your shell has." >&2
+	exit 6
+fi
+
 # The database path comes from the config unless it was given explicitly. The
 # config's top level is flat and unknown keys are rejected at load, so the key is
 # spelled exactly `database` and appears once at column zero — which is what makes
@@ -109,6 +162,39 @@ RM_MAX_AGE_HOURS="${RM_MAX_AGE_HOURS:-48}"
 # Anything more nested than this should be passed in RM_DB instead.
 if [ -z "${RM_DB:-}" ]; then
 	RM_DB=$(sed -n 's/^database:[[:space:]]*//p' "$CONFIG" | head -1 | tr -d '"'"'")
+
+	# What sed cannot do is expand, and the tool whose config it is reading does.
+	# Load runs expandEnv before validate, and `database` is one of the six fields
+	# os.ExpandEnv is run over. The starter config beside this file documents that
+	# and offers ${VAR} there as the way to keep a machine-specific layout out of a
+	# committed file — so a config that followed its own documentation is the case
+	# that breaks here, not an exotic one.
+	#
+	# What it broke as is the reason this is a guard rather than a note. RM_DB kept
+	# the dollar sign as text, DB_DIR became a directory that cannot exist, mkdir
+	# of the lock inside it failed, the missing PID file read back as a lock left
+	# by a dead process, and the run exited 5 saying another run was in progress —
+	# a lock nobody holds, under a directory nobody has, having collected nothing.
+	# Every part of that sentence was invented here.
+	#
+	# A trailing `# comment` is the same bug from the other side: the sed keeps
+	# everything after the colon, so the comment travels into the path, while the
+	# YAML parser the tool uses drops it. Neither case is worth reimplementing
+	# expansion in shell for. The tool already expands, and RM_DB already exists to
+	# hand this script the resolved answer.
+	case "$RM_DB" in
+	*'$'* | *'#'*)
+		echo "the database: value in $CONFIG is not a literal path: $RM_DB" >&2
+		echo 'This wrapper reads that key with sed and uses it exactly as written, while repo-metrics' >&2
+		# The unexpanded ${VAR} and $VAR are the message here, which is the whole
+		# reason this line is in single quotes.
+		# shellcheck disable=SC2016
+		echo 'expands ${VAR} and $VAR in it and drops trailing comments. The two would disagree, and' >&2
+		echo 'every path derived here — the backup directory and the lock among them — would be wrong.' >&2
+		echo "Either set RM_DB to the already-expanded path, or write a literal one in database:." >&2
+		exit 7
+		;;
+	esac
 fi
 if [ -z "$RM_DB" ]; then
 	echo "could not read a database path from $CONFIG, and RM_DB is not set" >&2

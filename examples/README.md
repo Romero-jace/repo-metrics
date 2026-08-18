@@ -92,7 +92,11 @@ report. That reasoning was right, and its price was that the job's status became
 The wrapper resolves that rather than reverting it: it decides the exit code from
 what the database stored, runs the report regardless, then exits with the code it
 decided. Codes are `1` nothing stored, `2` a repo failed, `3` the database is
-corrupt, `4` the data is stale, `5` a run was already in progress.
+corrupt, `4` the data is stale, `5` a run was already in progress. Two more come
+from the preflight rather than from the data: `6` sqlite3 is not on PATH, and `7`
+the `database:` value in the config is not literal text. Both exist because the
+alternative was not a failure but a confident wrong answer — see the exit-code
+table at the top of the script for what each one used to be misreported as.
 
 It also does two things the tool deliberately does not do itself:
 

@@ -437,7 +437,9 @@ Use [`examples/repo-metrics-daily.sh`](examples/repo-metrics-daily.sh) instead.
 It resolves that rather than reverting it: it decides the exit code from what the
 database actually stored, runs the report regardless, and then exits with the
 code it decided — `1` nothing stored, `2` a repo failed, `3` the database is
-corrupt, `4` the data is stale, `5` a run was already in progress. It also backs
+corrupt, `4` the data is stale, `5` a run was already in progress, and `6` and
+`7` for the two things it checks before it starts: sqlite3 on PATH, and a
+`database:` value it can read literally. It also backs
 the database up before each run, because snapshots cannot be re-collected: they
 measured a working tree at a commit that has since moved on.
 

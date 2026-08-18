@@ -195,8 +195,7 @@ tool declines to subtract rather than publishing an artifact of your own config
 change.
 
 There is also `repo-metrics version`, which does no work and takes no flags.
-Built from a clean checkout of this repository, which carries no tag yet, it
-says:
+Built from a clean checkout sitting on a commit with no tag on it, it says:
 
 ```
 repo-metrics v0.0.0-20260816181544-8eba617e536d
@@ -204,8 +203,9 @@ built with go1.26.5 for darwin/amd64
 ```
 
 That first line is the pseudo-version the toolchain derives when there is no tag
-to use, so it reads as the commit's date and hash. Installed from a tag it is
-the tag, `repo-metrics v0.1.0` and nothing else.
+to use, so it reads as the commit's date and hash. Installed from a tag, or
+built from a checkout sitting on one, it is the tag: `repo-metrics v0.1.0` and
+nothing else.
 
 Nothing has to be bumped to keep that honest. The Go toolchain stamps the
 version and the commit into every binary it builds, so this reads that back

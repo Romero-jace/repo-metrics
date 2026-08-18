@@ -60,8 +60,8 @@ func TestNoBaselineYetIsOnlySaidWhenThereIsNoBaseline(t *testing.T) {
 // anything is missing. It is the same silent wrong answer as showing a
 // never-collected repo at 0.0% coverage.
 //
-// Found by running the tool against real repos, not by a unit test: go-tool
-// reported "Tests 0" while carrying 71 test files.
+// Found by running the tool against real repos, not by a unit test: one of
+// them, a Go CLI, reported "Tests 0" while carrying 71 test files.
 func TestUnmeasuredTestsAreNotRenderedAsZero(t *testing.T) {
 	rep := delta.Compute([]delta.Input{
 		{

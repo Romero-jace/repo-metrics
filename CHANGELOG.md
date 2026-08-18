@@ -14,8 +14,8 @@ disagree with it. A build from an untagged commit still reports a `v0.0.0-`
 pseudo-version naming the commit it came from, which is the same mechanism
 telling the truth about a checkout that is not a release.
 
-First release. The repository is private and shared by invitation, so the
-audience is whoever has been given access rather than anybody who finds it.
+First release, and the repository is public, so the audience is anybody who
+finds it rather than a list of people who were handed a checkout.
 Nobody has run a previous version, so there is nothing to list as changed or
 fixed. What follows is what the tool does and what it deliberately does not do.
 

@@ -3,10 +3,11 @@
 Thanks for looking. This is a small tool and the bar for a change is just that it
 passes the gate and fits the style below.
 
-The repository is private and shared by invitation, so "the pull request" below
-often means a commit message instead. Where it says to paste command output into
-one, paste it into whichever you are writing. The point is the output, not the
-venue.
+The repository is public and CI runs on every pull request, so "the pull
+request" below means one. It can still mean a commit message, since some
+changes land as a direct commit to main. Where it says to paste command output
+into one, paste it into whichever you are writing. The point is the output, not
+the venue.
 
 ## Build and run the gate
 

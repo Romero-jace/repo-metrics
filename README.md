@@ -63,41 +63,24 @@ you" below has the reasoning behind each cutoff.
 
 ## Install
 
-This repository is private, so build it from a checkout:
+```sh
+go install github.com/Romero-jace/repo-metrics/cmd/repo-metrics@v0.1.0
+```
+
+That is the whole install, and v0.1.0 is the current release.
+
+Build from a checkout instead if you are going to change anything:
 
 ```sh
-git clone git@github.com:Romero-jace/repo-metrics.git
+git clone https://github.com/Romero-jace/repo-metrics.git
 cd repo-metrics
 make build     # ./bin/repo-metrics
 ```
 
-That is the whole install. The binary is self-contained and CGO-free, so you can
-also build once and copy `./bin/repo-metrics` onto the PATH of any machine with
-the same OS and architecture, without giving that machine access to this
-repository at all.
-
-`go install` works too, but not out of the box: the module proxy and the checksum
-database cannot read a private repository, so both have to be told to skip it,
-and git has to be able to authenticate.
-
-```sh
-go env GOPRIVATE                                  # check before you set it
-go env -w GOPRIVATE=github.com/Romero-jace/*      # see the warning below first
-git config --global url."git@github.com:Romero-jace/".insteadOf "https://github.com/Romero-jace/"
-go install github.com/Romero-jace/repo-metrics/cmd/repo-metrics@latest
-```
-
-`GOPRIVATE` is one comma-separated list and `go env -w` replaces all of it, so if
-you already have private modules from somewhere else that command silently cuts
-them off. Read the existing value first and write the union:
-
-```sh
-go env -w GOPRIVATE=github.com/someone-else/*,github.com/Romero-jace/*
-```
-
-Without it you get a checksum-database error that reads like the module is
-corrupt rather than unreachable, which is a misleading enough failure to be worth
-naming here.
+The binary is self-contained and CGO-free either way, so you can also build once
+and copy `./bin/repo-metrics` onto the PATH of any machine with the same OS and
+architecture. That machine then needs no Go toolchain and no system SQLite of
+its own.
 
 Two dependencies, both load-bearing: `modernc.org/sqlite`, which is a pure-Go
 SQLite so there is no CGO and no system library to install, and

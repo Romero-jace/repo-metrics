@@ -14,8 +14,8 @@ import (
 //
 // The hand-built fixtures in coverprofile_test.go pin the cases someone thought
 // of. This file generates the ones nobody did, because the failure worth
-// guarding here is not a crash, it is a plausible number: a real profile from
-// go-library was 84,336 lines describing 4,024 distinct statements, and
+// guarding here is not a crash, it is a plausible number: a profile from a
+// real Go library was 84,336 lines describing 4,024 distinct statements, and
 // getting the merge wrong reported 1.4% where the truth was 28.7%.
 //
 // A fixed seed table rather than testing.F on purpose. A fuzz corpus in CI is a

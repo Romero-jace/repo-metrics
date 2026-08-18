@@ -62,8 +62,8 @@ func TestLCOVWritesLineKeysNotStatementKeys(t *testing.T) {
 //
 // The fixture is empty because that is what a real run produced: vitest 4.1.10
 // with @vitest/coverage-v8 4.1.4 wrote a zero-byte lcov.info for a full
-// 1,964-test run of web-app and exited 0. The artifact was fresh, the
-// command succeeded, and the coverage step had done nothing.
+// 1,964-test run of a real TypeScript PWA and exited 0. The artifact was
+// fresh, the command succeeded, and the coverage step had done nothing.
 //
 // Recording a zero here would have published a total collapse in coverage as the
 // largest single movement the report could show, off a run that looked healthy

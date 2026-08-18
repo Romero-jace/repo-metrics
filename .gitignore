@@ -19,3 +19,25 @@ go.work.sum
 # commit. Nothing here legitimately ends in .out.
 *.out
 /reports/
+
+# What the tool leaves in this repo root when it is pointed at itself.
+#
+# That is the documented path rather than a hypothetical: `repo-metrics init`
+# writes its config into the current directory, and the starter config's first
+# repo entry points at that same directory on purpose, so a fresh checkout can
+# run `collect` and `report` and see real output before editing anything.
+# `report` writes to stdout, so `report.md` is wherever someone sent it. Both
+# hold one operator's local setup — the repos they happen to have checked out,
+# what their last run said — and neither is source.
+#
+# Untracked is not good enough here, because this repo is one of the repos being
+# measured. Collection reads `git status --porcelain`, which counts untracked
+# files, so either one left in the root sets git_dirty on every snapshot of this
+# repo and earns each one the report warning that its numbers belong to no
+# commit. The tool would be reporting on a mess it made itself.
+#
+# Anchored, because the basenames are not unique in this tree.
+# `examples/repo-metrics.yaml` is the tracked polyglot config the README sends
+# people to copy, and an unanchored pattern would ignore that too.
+/repo-metrics.yaml
+/report.md

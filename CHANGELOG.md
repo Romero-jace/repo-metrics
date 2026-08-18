@@ -6,12 +6,13 @@ rather than replaying the commits in it.
 
 ## v0.1.0
 
-Not tagged yet. `repo-metrics version` reads the stamp the Go toolchain writes
-into the binary rather than a constant kept in the source, so until the tag
-exists a build from this checkout reports a `v0.0.0-` pseudo-version naming the
-commit it came from. Once `v0.1.0` is tagged the same command reports
-`repo-metrics v0.1.0` with nothing to bump anywhere, and the release date is the
-only thing left to add here.
+Tagged 2026-08-18. `repo-metrics version` reads the stamp the Go toolchain
+writes into the binary rather than a constant kept in the source, so tagging was
+the whole release: a build from the tag reports `repo-metrics v0.1.0` with
+nothing to bump anywhere and no version literal left in the tree that could
+disagree with it. A build from an untagged commit still reports a `v0.0.0-`
+pseudo-version naming the commit it came from, which is the same mechanism
+telling the truth about a checkout that is not a release.
 
 First release. The repository is private and shared by invitation, so the
 audience is whoever has been given access rather than anybody who finds it.

@@ -52,10 +52,11 @@ import (
 // test into a tautology: it would then assert only that the parser still agrees
 // with itself.
 //
-// -count=1 matters. The test reads its input from a path named in the
-// environment, and the test cache has been observed serving a pass from an
-// earlier run against different inputs, reporting the old numbers without ever
-// opening the new files.
+// -count=1 matters, for the reason the coverprofile cross-check next door
+// records: it too reads its input from a path named in the environment, and the
+// test cache was observed there serving a pass from an earlier run against a
+// different artifact, reporting the old numbers without ever opening the new
+// file. This test has the same shape and so inherits the same hazard.
 func TestAgainstRealLockfiles(t *testing.T) {
 	manifest := os.Getenv("REPO_METRICS_TEST_LOCKFILE_CASES")
 	if manifest == "" {
@@ -103,7 +104,12 @@ func TestAgainstRealLockfiles(t *testing.T) {
 			if err != nil {
 				t.Fatalf("Parse: %v", err)
 			}
-			t.Logf("%s: got %d, want %d (%s)", path, got.Total, tc.Total, tc.Why)
+			// Logged on every case, pass or fail, so a -v run shows which files
+			// were actually opened and what they were compared against. The
+			// reason for the number is deliberately left to the failure message
+			// below: printing it here too would put the same sentence in the
+			// output twice on a mismatch, which reads as two findings.
+			t.Logf("%s: got %d, want %d", path, got.Total, tc.Total)
 			if got.Total != tc.Total {
 				t.Errorf("Total: got %d, want %d (%s)", got.Total, tc.Total, tc.Why)
 			}
@@ -143,9 +149,11 @@ func loadLockfileCases(t *testing.T, manifest string) []lockfileCase {
 	var cases []lockfileCase
 	dec := json.NewDecoder(f)
 	// An unknown field is an operator error of exactly the same kind as a
-	// mistyped path, and it fails the same way: "paths" instead of "path"
-	// decodes cleanly into an empty Path, which then opens the manifest's own
-	// directory and reports a confusing parse error instead of a typo.
+	// mistyped path, and encoding/json will not report it otherwise: "paths"
+	// instead of "path" decodes without complaint and leaves the case pointing
+	// at nothing. The empty-path check below would still catch that one, but it
+	// can only say the case has no path, which sends the operator looking at the
+	// value they typed correctly rather than at the key they did not.
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&cases); err != nil {
 		t.Fatalf("reading the lockfile case manifest %s: %v", manifest, err)

@@ -131,9 +131,9 @@ Gone:
 {{- if .ShowProblems }}
 ## Collection problems
 {{ if .Problems }}
-These repos did not report clean. Whatever numbers they did produce are worth a second look, and the ones that produced none say so in the table above.
+These repos did not report clean. Each row says which of the two it is: a run that measured under protest still produced real numbers, and one that did not collect produced none.
 {{ range .Problems }}
-- **{{ .Name }}** ({{ .Status }}){{ if .Error }}: {{ .Error }}{{ end }}
+- **{{ .Name }}** ({{ .Status }}, {{ .Verdict }}){{ if .Error }}: {{ .Error }}{{ end }}
 {{- end }}
 {{ else }}
 Nothing failed to collect.

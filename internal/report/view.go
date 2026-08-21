@@ -110,6 +110,32 @@ type ScopeView struct {
 // did not happen.
 func (s ScopeView) Narrowed() bool { return s.Repo != nil }
 
+// Verdict is what a problems row is, in the two words a reader needs.
+//
+// The section's membership is unchanged: it still lists every repo whose newest
+// collection was not clean, because that is what --section problems has always
+// promised and narrowing it would be a wire change wearing the shape of a
+// wording one. What changes is that the two findings inside it are no longer
+// spelled the same.
+//
+// "measured under protest" is a red suite or a stale artifact: the numbers on
+// this row are real and the command was unhappy. "did not collect" is a step
+// that produced nothing, which is the row to actually go and fix. A snapshot
+// from before v0.2.0 recorded neither, and says so rather than being sorted into
+// whichever is more likely.
+func (r RepoView) Verdict() string {
+	switch {
+	case r.Status == string(store.StatusFailed):
+		return "did not collect"
+	case r.Degraded == nil:
+		return "collected before this was recorded"
+	case *r.Degraded:
+		return "measured under protest"
+	default:
+		return "did not collect everything"
+	}
+}
+
 // AgainstNamed reports whether the caller chose the baseline. The template
 // branches on it so the header cannot describe a window that was not used, which
 // it did until --against existed and there was only one way to pick a baseline.
@@ -256,6 +282,18 @@ type RepoView struct {
 	// output surface at all, so a measurement taken over a dirty tree reached
 	// every consumer indistinguishable from one taken over a clean one.
 	GitDirty bool `json:"git_dirty"`
+	// Degraded says this run produced usable numbers with a caveat: a command
+	// that exited non-zero, or an artifact past its freshness limit. It is what
+	// separates a repo whose suite is red, and whose coverage figures are real,
+	// from one whose step collected nothing at all. Both are partial, so without
+	// it the problems section lists them side by side forever and stops meaning
+	// "do not trust this row".
+	//
+	// Three-state, and the third state is the honest one: null on every snapshot
+	// written before v0.2.0, because nothing recorded this then. Reading those as
+	// false would say their runs were clean, which is a claim nobody made. Not a
+	// number, so it is context beside the booleans above rather than a group.
+	Degraded *bool `json:"degraded"`
 	// MovedBy names the signals that made this repo lead the report. With one
 	// signal it was obvious; with several, "this repo moved" is not an answer
 	// unless it also says which measurement moved. It carries no numbers, so it
@@ -936,6 +974,9 @@ func buildRepo(r delta.RepoDelta) RepoView {
 		// derived from one. A run that failed over a dirty tree still failed
 		// over a dirty tree.
 		out.GitDirty = r.Head.GitDirty
+		// Same reasoning, and the same placement: a run that failed after one
+		// step had already reported findings was still degraded.
+		out.Degraded = r.Head.Degraded
 	}
 
 	// A repo nobody has ever collected is not a measurement at zero, so it gets

@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -203,7 +204,11 @@ type reportRepo struct {
 	Tests       *reportTests    `json:"tests"`
 	HasSnapshot bool            `json:"has_snapshot"`
 	HasBaseline bool            `json:"has_baseline"`
-	Error       string          `json:"error"`
+	// Degraded is three-state, so a pointer: null is a snapshot from before
+	// anything recorded whether its run was clean, and decoding that into false
+	// would assert something nobody checked.
+	Degraded *bool  `json:"degraded"`
+	Error    string `json:"error"`
 }
 
 // reportDoc holds the three sections as pointers to slices rather than slices.
@@ -2038,6 +2043,431 @@ func TestEverySubcommandThatOpensADatabaseTakesTheFlag(t *testing.T) {
 			}
 			if !strings.Contains(stderr, "-database") {
 				t.Errorf("%s does not offer --database:\n%s", cmd, stderr)
+			}
+		})
+	}
+}
+
+// initInto runs init in a fresh directory holding the named marker files, and
+// hands back the directory, the config path, and what init said on stderr.
+func initInto(t *testing.T, markers ...string) (dir, path, stderr string) {
+	t.Helper()
+	dir = t.TempDir()
+	for _, name := range markers {
+		// Empty files, because the probe stats these rather than reading them.
+		writeFile(t, filepath.Join(dir, name), "")
+	}
+	path = filepath.Join(dir, "repo-metrics.yaml")
+	_, stderr, err := runCLI(t, "init", "--config", path)
+	if err != nil {
+		t.Fatalf("init into a directory holding %v: %v (stderr: %s)", markers, err, stderr)
+	}
+	return dir, path, stderr
+}
+
+// liveRepo loads a generated config and returns the one live repo entry.
+//
+// Loading it is half the assertion. A starter the tool cannot load is worse
+// than no starter, since the first thing a new user would see is a validation
+// error from a file this program just wrote. The count is the other half: a
+// directory carrying two ecosystems' markers still gets ONE live entry, because
+// two would point at the same directory under two names and every report from
+// then on would count that checkout twice.
+func liveRepo(t *testing.T, path string) config.Repo {
+	t.Helper()
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("the config init wrote does not load: %v", err)
+	}
+	if len(cfg.Repos) != 1 {
+		t.Fatalf("want exactly one live repo entry, got %d", len(cfg.Repos))
+	}
+	return cfg.Repos[0]
+}
+
+// signalByName finds one collection step by the name an operator reads, rather
+// than by position, so reordering a starter's steps fails cleanly here instead
+// of asserting against the wrong one.
+func signalByName(t *testing.T, repo config.Repo, name string) config.Signal {
+	t.Helper()
+	for _, s := range repo.Signals {
+		if s.Name == name {
+			return s
+		}
+	}
+	names := make([]string, 0, len(repo.Signals))
+	for _, s := range repo.Signals {
+		names = append(names, s.Name)
+	}
+	t.Fatalf("repo %s has no %q step, only %v", repo.Name, name, names)
+	return config.Signal{}
+}
+
+// liveTools names the program each live step invokes, which is the shortest
+// unambiguous statement of which starter was written.
+func liveTools(repo config.Repo) []string {
+	var tools []string
+	for _, s := range repo.Signals {
+		if s.HasCommand() {
+			tools = append(tools, s.Command[0])
+		}
+	}
+	return tools
+}
+
+// init writes the starter for the workspace it is writing into, rather than the
+// Go one every time.
+//
+// The Go starter's two live steps run the Go toolchain. A Python or TypeScript
+// repo handed it gets a config that loads, collects, exits 0 and records
+// nothing usable: the coverage step finds no instrumented packages and the
+// dependency step finds no go.mod, so what arrives is a partial snapshot and a
+// wall of warnings. That is a working config that measures nothing, which is
+// the failure this tool is organized against, reached through the file the tool
+// itself wrote.
+func TestInitWritesTheStarterForTheWorkspaceItProbes(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		markers   []string
+		ecosystem string
+		evidence  string
+		// runs is a program only this starter's live steps invoke.
+		runs string
+		// absent is another starter's test program. Without it the assertion
+		// passes on everything the three starters share, and the Go fallback
+		// would satisfy every case in this table.
+		absent string
+	}{
+		{"go.mod", []string{"go.mod"}, "Go", "go.mod", "go", "pytest"},
+		{"pyproject.toml", []string{"pyproject.toml"}, "Python", "pyproject.toml", "pytest", "vitest"},
+		{"setup.cfg", []string{"setup.cfg"}, "Python", "setup.cfg", "pytest", "vitest"},
+		{"package.json", []string{"package.json"}, "TypeScript", "package.json", "vitest", "pytest"},
+		{"bun.lock", []string{"bun.lock"}, "TypeScript", "bun.lock", "vitest", "pytest"},
+		// Precedence, and the reason for it. A directory carrying all three
+		// markers gets one starter rather than a live entry per ecosystem.
+		{"all three", []string{"go.mod", "pyproject.toml", "package.json"}, "Go", "go.mod", "go", "pytest"},
+		{"python before typescript", []string{"pyproject.toml", "package.json"}, "Python", "pyproject.toml", "pytest", "vitest"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, path, stderr := initInto(t, tc.markers...)
+			repo := liveRepo(t, path)
+
+			tools := liveTools(repo)
+			if !slices.Contains(tools, tc.runs) {
+				t.Errorf("the live steps run %v, want the %s starter, which runs %s", tools, tc.ecosystem, tc.runs)
+			}
+			if slices.Contains(tools, tc.absent) {
+				t.Errorf("the live steps run %v, which is another ecosystem's starter", tools)
+			}
+
+			// Saying which and why is the point: a starter chosen silently is
+			// one nobody knows to correct.
+			for _, want := range []string{"detected", tc.ecosystem, tc.evidence, dir} {
+				if !strings.Contains(stderr, want) {
+					t.Errorf("init said %q, which does not name %q", stderr, want)
+				}
+			}
+
+			// Both collection modes stay visible in the file someone is about
+			// to edit, whichever starter it is, even though only one of them
+			// can be live.
+			body, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("reading back: %v", err)
+			}
+			if !strings.Contains(string(body), "command:") {
+				t.Error("want a command-mode example")
+			}
+			if !strings.Contains(string(body), "max_age") {
+				t.Error("want an ingest-mode example with a max_age")
+			}
+		})
+	}
+}
+
+// A directory that identified itself as nothing gets the Go starter and is told
+// so, naming every marker that was looked for.
+//
+// The alternative is what this used to do: write the Go starter in silence, so
+// the first evidence that it was a guess is a collection that exits 0 having
+// measured nothing.
+func TestInitSaysWhenNothingIdentifiedTheWorkspace(t *testing.T) {
+	dir, path, stderr := initInto(t)
+
+	if tools := liveTools(liveRepo(t, path)); !slices.Contains(tools, "go") {
+		t.Errorf("the fallback's live steps run %v, want the Go starter", tools)
+	}
+	for _, want := range []string{"go.mod", "pyproject.toml", "setup.cfg", "package.json", "bun.lock", dir} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("init said %q, which does not name the marker %q it looked for", stderr, want)
+		}
+	}
+	// The control. This sentence and the detection sentence are alternatives,
+	// so a run that printed both would mean the Go starter reports a detection
+	// it did not make, and the word would stop meaning anything.
+	if strings.Contains(stderr, "detected") {
+		t.Errorf("init reported a detection for a directory carrying no marker: %q", stderr)
+	}
+}
+
+// Every format name in every starter sits under the key it belongs to.
+//
+// The templates are Sprintf calls with positional verbs, and most of them are
+// %s consuming a config.Format, which is a string type. Insert an example
+// without inserting its argument at the matching index and every later format
+// name shifts one slot: sarif lands as another step's stdout_format. It still
+// compiles, and config.Load still accepts the result, because every value is a
+// valid format name and only the pairing is wrong.
+//
+// TestInitPinsEachFormatNameToItsKey covers the Go starter by reading the text,
+// which is what a commented-out example needs. This reads the LOADED config
+// instead, so a format under the wrong key is a different field of a different
+// step rather than a string somewhere else in the file.
+func TestEveryStarterPinsEachFormatNameToItsKey(t *testing.T) {
+	t.Run("go", func(t *testing.T) {
+		_, path, _ := initInto(t, "go.mod")
+		repo := liveRepo(t, path)
+
+		cov := signalByName(t, repo, "coverage")
+		if cov.ArtifactFormat != config.FormatGoCoverprofile {
+			t.Errorf("coverage artifact_format is %q, want %q", cov.ArtifactFormat, config.FormatGoCoverprofile)
+		}
+		if cov.StdoutFormat != config.FormatGoTestJSON {
+			t.Errorf("coverage stdout_format is %q, want %q", cov.StdoutFormat, config.FormatGoTestJSON)
+		}
+
+		deps := signalByName(t, repo, "dependencies")
+		if deps.StdoutFormat != config.FormatGoListModules {
+			t.Errorf("dependencies stdout_format is %q, want %q", deps.StdoutFormat, config.FormatGoListModules)
+		}
+		if arts := deps.ArtifactList(); len(arts) != 0 {
+			t.Errorf("the dependencies step reads %v, but its whole answer comes from stdout", arts)
+		}
+	})
+
+	t.Run("python", func(t *testing.T) {
+		_, path, _ := initInto(t, "pyproject.toml")
+		repo := liveRepo(t, path)
+		assertOneRunWritesBothReports(t, repo)
+
+		if lint := signalByName(t, repo, "lint"); lint.StdoutFormat != config.FormatSARIF {
+			t.Errorf("lint stdout_format is %q, want %q", lint.StdoutFormat, config.FormatSARIF)
+		}
+	})
+
+	t.Run("typescript", func(t *testing.T) {
+		_, path, _ := initInto(t, "package.json")
+		repo := liveRepo(t, path)
+		assertOneRunWritesBothReports(t, repo)
+
+		if lint := signalByName(t, repo, "lint"); lint.StdoutFormat != config.FormatSARIF {
+			t.Errorf("lint stdout_format is %q, want %q", lint.StdoutFormat, config.FormatSARIF)
+		}
+
+		deps := signalByName(t, repo, "dependencies")
+		if deps.HasCommand() {
+			t.Errorf("the lockfile step runs %v; bun outdated and npm outdated answer a checkout nobody installed exactly as they answer a current one, which is why this reads the file", deps.Command)
+		}
+		if deps.ArtifactFormat != config.FormatNPMLockfile {
+			t.Errorf("dependencies artifact_format is %q, want %q", deps.ArtifactFormat, config.FormatNPMLockfile)
+		}
+	})
+}
+
+// assertOneRunWritesBothReports pins the two artifacts one test run produces.
+// A test report and a coverage profile are separate measurements out of a
+// single command, which is what the artifacts longhand exists for: listed there
+// rather than split across two steps, each is held to the check that this run
+// wrote it instead of to a 24 hour age limit.
+func assertOneRunWritesBothReports(t *testing.T, repo config.Repo) {
+	t.Helper()
+	tests := signalByName(t, repo, "tests")
+	if tests.StdoutFormat != "" {
+		t.Errorf("the tests step names a stdout_format %q, but both of its measurements come from files", tests.StdoutFormat)
+	}
+	arts := tests.ArtifactList()
+	if len(arts) != 2 {
+		t.Fatalf("want a test report and a coverage profile from one run, got %d artifacts: %v", len(arts), arts)
+	}
+	if arts[0].Format != config.FormatJUnitXML {
+		t.Errorf("the first artifact is %q, want %q", arts[0].Format, config.FormatJUnitXML)
+	}
+	if arts[1].Format != config.FormatLCOV {
+		t.Errorf("the second artifact is %q, want %q", arts[1].Format, config.FormatLCOV)
+	}
+}
+
+// Every artifact a generated step writes lands outside the repo being measured,
+// and the flag that writes it names the same path.
+//
+// Both halves matter and nothing else checks either. A relative artifact path
+// resolves against the measured repo, so it creates a file inside that
+// checkout: unless somebody gitignores it, the second collection onward finds
+// an uncommitted change, which sets git_dirty and earns every later snapshot a
+// warning saying its numbers belong to no commit. And nothing in this codebase
+// couples a command's output flag to the artifact beside it, so pointing them
+// at two paths runs the whole suite and then reads a file that run did not
+// write.
+//
+// The expectation is keyed by FORMAT rather than by position, because swapping
+// the two PATHS is the mistake config.Load cannot see: every format stays under
+// its own key, and an assertion asking only whether each path appears somewhere
+// in the argv passes, since after a swap both of them still do.
+func TestEveryStarterWritesItsArtifactsOutsideTheMeasuredRepo(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		markers []string
+		// flags maps an artifact's format to the exact command-line element
+		// that has to name it.
+		flags map[config.Format]func(path string) string
+	}{
+		{"go", []string{"go.mod"}, map[config.Format]func(string) string{
+			config.FormatGoCoverprofile: func(p string) string { return "-coverprofile=" + p },
+		}},
+		{"python", []string{"pyproject.toml"}, map[config.Format]func(string) string{
+			config.FormatJUnitXML: func(p string) string { return "--junitxml=" + p },
+			config.FormatLCOV:     func(p string) string { return "--cov-report=lcov:" + p },
+		}},
+		{"typescript", []string{"package.json"}, map[config.Format]func(string) string{
+			config.FormatJUnitXML: func(p string) string { return "--outputFile=" + p },
+			// The one artifact whose path is not the flag's value: vitest is
+			// handed a directory and writes lcov.info inside it.
+			config.FormatLCOV: func(p string) string {
+				return "--coverage.reportsDirectory=" + filepath.Dir(p)
+			},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, path, _ := initInto(t, tc.markers...)
+			repo := liveRepo(t, path)
+
+			measured, err := filepath.Abs(repo.Path)
+			if err != nil {
+				t.Fatalf("resolving the measured repo path %q: %v", repo.Path, err)
+			}
+
+			checked := 0
+			for _, s := range repo.Signals {
+				// A step with no command writes nothing, so it has nothing to
+				// keep out of the checkout. The lockfile the TypeScript starter
+				// reads is a committed file and belongs exactly where it is.
+				if !s.HasCommand() {
+					continue
+				}
+				for _, a := range s.ArtifactList() {
+					if !filepath.IsAbs(a.Path) {
+						t.Errorf("step %s writes %s, which resolves inside the repo being measured", s.Name, a.Path)
+						continue
+					}
+					if strings.HasPrefix(a.Path, measured+string(os.PathSeparator)) {
+						t.Errorf("step %s writes %s, which is inside the measured repo at %s", s.Name, a.Path, measured)
+					}
+					want, ok := tc.flags[a.Format]
+					if !ok {
+						t.Errorf("step %s writes a %s artifact this test has no expected flag for", s.Name, a.Format)
+						continue
+					}
+					if !slices.Contains(s.Command, want(a.Path)) {
+						t.Errorf("step %s reads %s, but nothing in its command says %q: %v",
+							s.Name, a.Path, want(a.Path), s.Command)
+					}
+					checked++
+				}
+			}
+			// Without this the whole table passes on a starter whose live steps
+			// stopped writing artifacts at all.
+			if checked == 0 {
+				t.Error("no artifact was checked, so this case asserted nothing")
+			}
+		})
+	}
+}
+
+// A starter running no Go format carries a fingerprint, and the Go one is
+// allowed to omit it.
+//
+// The snapshot's toolchain fingerprint is what lets the report refuse to diff
+// two snapshots taken under different runtimes. A repo running a Go format is
+// fingerprinted with go env without being asked, and a repo running none of
+// them records that nothing identified it, forever, unless the config says what
+// to ask instead. Without this line a non-Go starter is worse than the Go one
+// it replaced, because it measures a real repo and cannot say what it measured
+// it under.
+func TestEveryNonGoStarterCarriesAFingerprint(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		markers []string
+	}{
+		{"python", []string{"pyproject.toml"}},
+		{"typescript", []string{"package.json"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, path, _ := initInto(t, tc.markers...)
+			repo := liveRepo(t, path)
+			if repo.UsesGoToolchain() {
+				t.Fatal("this starter declares a Go format, so go env identifies it and this test is asserting the wrong thing")
+			}
+			if len(repo.Fingerprint) == 0 {
+				t.Error("no fingerprint, so every snapshot from this config records an unidentified toolchain and a runtime upgrade never shows up as one")
+			}
+		})
+	}
+
+	// The control, and the reason the Go starter is allowed to omit one.
+	t.Run("go", func(t *testing.T) {
+		_, path, _ := initInto(t, "go.mod")
+		if repo := liveRepo(t, path); !repo.UsesGoToolchain() {
+			t.Error("the Go starter declares no Go format, so nothing fingerprints it either and it needs a fingerprint line too")
+		}
+	})
+}
+
+// The TypeScript starter reads the lockfile that is actually there, paired with
+// the format that parses it.
+//
+// The pairing is the part worth pinning. npm-lockfile finds nothing in a
+// bun.lock, and hedging by declaring one step of each is not available: both
+// formats write deps.total at repo scope, so config.Load rejects a repo naming
+// both rather than letting two steps collide on the metrics primary key.
+func TestTheTypeScriptStarterReadsTheLockfileThatIsThere(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		markers []string
+		want    config.Artifact
+	}{
+		{"bun", []string{"package.json", "bun.lock"}, config.Artifact{Path: "bun.lock", Format: config.FormatBunLockfile}},
+		// npm is what writes a lockfile for a package.json whose owner chose no
+		// package manager, so it is the fallback rather than a detection.
+		{"npm", []string{"package.json"}, config.Artifact{Path: "package-lock.json", Format: config.FormatNPMLockfile}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, path, _ := initInto(t, tc.markers...)
+			deps := signalByName(t, liveRepo(t, path), "dependencies")
+			got := deps.ArtifactList()
+			if len(got) != 1 {
+				t.Fatalf("want one lockfile to read, got %v", got)
+			}
+			if got[0] != tc.want {
+				t.Errorf("the dependencies step reads %+v, want %+v", got[0], tc.want)
+			}
+		})
+	}
+}
+
+// The house style says no em dashes anywhere a user reads, and a generated
+// config is read more closely than most of this tool's output, since it is the
+// file someone edits. TestUsageHasNoEmDash covers the usage text; nothing
+// covered this, and there are now three starters' worth of prose.
+func TestNoStarterHasAnEmDash(t *testing.T) {
+	for _, marker := range []string{"go.mod", "pyproject.toml", "package.json"} {
+		t.Run(marker, func(t *testing.T) {
+			_, path, _ := initInto(t, marker)
+			body, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("reading back: %v", err)
+			}
+			if strings.Contains(string(body), "—") {
+				t.Error("the starter written for this workspace contains an em dash")
 			}
 		})
 	}

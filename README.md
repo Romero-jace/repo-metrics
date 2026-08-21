@@ -524,14 +524,22 @@ one such row rendered whole, so the key set is the one a consumer really gets:
  "lint_errors": null, "lint_suppressed": null, "dependencies": null,
  "outdated_dependencies": null, "dependency_age": null, "collect_time": null,
  "has_snapshot": true, "has_baseline": false, "env_changed": false,
- "env_unknown": false, "git_dirty": false, "moved_by": null,
+ "env_unknown": false, "git_dirty": false, "degraded": null, "moved_by": null,
  "error": "coverage: no artifact at /srv/legacy/coverage.out and no command configured to produce one"}
 ```
 
-Twenty-four keys, and every repo row in a report payload has all of them. `error`
-is the twenty-fifth and the only key on this row that is omitted rather than
+Twenty-five keys, and every repo row in a report payload has all of them. `error`
+is the twenty-sixth and the only key on this row that is omitted rather than
 nulled, since it is there when there is something to say and gone when there is
 not.
+
+`degraded` is the one with three states rather than two. True says this run
+produced real numbers under protest, from a command that exited non-zero or an
+artifact past its freshness limit; false says it collected cleanly; null says
+nothing recorded either way, which is every snapshot written before v0.2.0. It is
+what stops a repo with a known-failing suite reading the same as one whose
+package would not build, since both make a snapshot partial. `report --section
+problems` lists both and now says which each is.
 
 `env_unknown` sits beside `env_changed` and is not redundant with it. A false
 `env_changed` reads as reassurance, and for a repo whose toolchain nothing ever

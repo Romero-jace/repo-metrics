@@ -147,11 +147,11 @@ func (s *Store) InsertSnapshot(ctx context.Context, snap Snapshot, metrics []Met
 
 	res, err := tx.ExecContext(ctx, `
 		INSERT INTO snapshots
-			(repo_id, collected_at, git_sha, git_branch, git_dirty, env, status, error, duration_ms)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			(repo_id, collected_at, git_sha, git_branch, git_dirty, env, status, error, duration_ms, degraded)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		snap.RepoID, formatTime(snap.CollectedAt), snap.GitSHA, snap.GitBranch,
 		boolToInt(snap.GitDirty), snap.Env, string(snap.Status), snap.Error,
-		snap.Duration.Milliseconds(),
+		snap.Duration.Milliseconds(), nullableBool(snap.Degraded),
 	)
 	if err != nil {
 		return 0, fmt.Errorf("store: inserting snapshot: %w", err)
@@ -188,7 +188,7 @@ func (s *Store) InsertSnapshot(ctx context.Context, snap Snapshot, metrics []Met
 // caller has to tell those two apart.
 func (s *Store) LatestSnapshot(ctx context.Context, repoID int64) (*Snapshot, error) {
 	return s.querySnapshot(ctx, `
-		SELECT id, repo_id, collected_at, git_sha, git_branch, git_dirty, env, status, error, duration_ms
+		SELECT id, repo_id, collected_at, git_sha, git_branch, git_dirty, env, status, error, duration_ms, degraded
 		FROM snapshots
 		WHERE repo_id = ? AND status != ?
 		ORDER BY collected_at DESC
@@ -209,7 +209,7 @@ func (s *Store) LatestSnapshotAny(ctx context.Context, repoID int64) (*Snapshot,
 	// without it SQLite is free to return either, so the same database would
 	// report a repo as failed or as ok depending on the query plan.
 	return s.querySnapshot(ctx, `
-		SELECT id, repo_id, collected_at, git_sha, git_branch, git_dirty, env, status, error, duration_ms
+		SELECT id, repo_id, collected_at, git_sha, git_branch, git_dirty, env, status, error, duration_ms, degraded
 		FROM snapshots
 		WHERE repo_id = ?
 		ORDER BY collected_at DESC, id DESC
@@ -229,7 +229,7 @@ func (s *Store) LatestSnapshotAny(ctx context.Context, repoID int64) (*Snapshot,
 // one that stored nothing is owed that sentence rather than "no such snapshot".
 func (s *Store) SnapshotByID(ctx context.Context, repoID, id int64) (*Snapshot, error) {
 	return s.querySnapshot(ctx, `
-		SELECT id, repo_id, collected_at, git_sha, git_branch, git_dirty, env, status, error, duration_ms
+		SELECT id, repo_id, collected_at, git_sha, git_branch, git_dirty, env, status, error, duration_ms, degraded
 		FROM snapshots
 		WHERE repo_id = ? AND id = ?`,
 		repoID, id)
@@ -252,7 +252,7 @@ func (s *Store) SnapshotsByGitSHAPrefix(ctx context.Context, repoID int64, prefi
 		return nil, nil
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, repo_id, collected_at, git_sha, git_branch, git_dirty, env, status, error, duration_ms
+		SELECT id, repo_id, collected_at, git_sha, git_branch, git_dirty, env, status, error, duration_ms, degraded
 		FROM snapshots
 		WHERE repo_id = ? AND substr(git_sha, 1, ?) = ?
 		ORDER BY collected_at DESC, id DESC`,
@@ -281,7 +281,7 @@ func (s *Store) SnapshotsByGitSHAPrefix(ctx context.Context, repoID int64, prefi
 // boundary is inclusive, and failed snapshots are skipped.
 func (s *Store) SnapshotAtOrBefore(ctx context.Context, repoID int64, cutoff time.Time) (*Snapshot, error) {
 	return s.querySnapshot(ctx, `
-		SELECT id, repo_id, collected_at, git_sha, git_branch, git_dirty, env, status, error, duration_ms
+		SELECT id, repo_id, collected_at, git_sha, git_branch, git_dirty, env, status, error, duration_ms, degraded
 		FROM snapshots
 		WHERE repo_id = ? AND status != ? AND collected_at <= ?
 		ORDER BY collected_at DESC
@@ -328,10 +328,14 @@ func scanSnapshot(row rowScanner) (*Snapshot, error) {
 		dirty     int
 		status    string
 		ms        int64
+		// Nullable, so it cannot be scanned into a bool. A snapshot written
+		// before the column existed carries NULL, and reading that as false
+		// would say its run was clean when nobody recorded whether it was.
+		degraded sql.NullInt64
 	)
 	if err := row.Scan(
 		&snap.ID, &snap.RepoID, &collected, &snap.GitSHA, &snap.GitBranch,
-		&dirty, &snap.Env, &status, &snap.Error, &ms,
+		&dirty, &snap.Env, &status, &snap.Error, &ms, &degraded,
 	); err != nil {
 		return nil, err
 	}
@@ -343,7 +347,20 @@ func scanSnapshot(row rowScanner) (*Snapshot, error) {
 	snap.GitDirty = dirty != 0
 	snap.Status = Status(status)
 	snap.Duration = time.Duration(ms) * time.Millisecond
+	if degraded.Valid {
+		value := degraded.Int64 != 0
+		snap.Degraded = &value
+	}
 	return &snap, nil
+}
+
+// nullableBool renders an optional bool for a nullable INTEGER column, so an
+// unrecorded value stores as NULL rather than as a confident 0.
+func nullableBool(v *bool) any {
+	if v == nil {
+		return nil
+	}
+	return boolToInt(*v)
 }
 
 // MetricsFor returns a snapshot's metrics ordered by (key, scope). The ordering
@@ -434,7 +451,7 @@ func (s *Store) SnapshotSeries(ctx context.Context, repoID int64, from, to time.
 	lo, hi := formatTime(from), formatTime(to)
 
 	snapRows, err := s.db.QueryContext(ctx, `
-		SELECT id, repo_id, collected_at, git_sha, git_branch, git_dirty, env, status, error, duration_ms
+		SELECT id, repo_id, collected_at, git_sha, git_branch, git_dirty, env, status, error, duration_ms, degraded
 		FROM snapshots
 		WHERE repo_id = ? AND collected_at >= ? AND collected_at <= ?
 		ORDER BY collected_at, id`, repoID, lo, hi)

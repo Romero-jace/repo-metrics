@@ -545,6 +545,10 @@ var repoWireFields = map[string]fieldKind{
 	// banned on a repo row. It is the same kind of thing env_changed is: a fact
 	// about how the measurement was taken that changes what it means.
 	"git_dirty": kindContext,
+	// Three-state and not a number, so context rather than a group: its null
+	// means nothing recorded whether the run was degraded, which is every
+	// snapshot written before the column existed.
+	"degraded": kindContext,
 
 	// MovedBy names which signals made this repo lead the report. It carries no
 	// numbers, only signal names, which is why it is context rather than a

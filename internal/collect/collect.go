@@ -164,6 +164,14 @@ func (r Result) finish(started time.Time, degraded bool) Result {
 		r.Snapshot.Status = store.StatusOK
 	}
 
+	// Recorded on every snapshot this binary writes, including false, because
+	// the absent case has to keep meaning "written before anything was
+	// checking". A run that collected nothing is left unrecorded: it has no
+	// numbers to have taken under protest, so neither answer is true of it.
+	if len(r.Collected) > 0 {
+		r.Snapshot.Degraded = &degraded
+	}
+
 	r.Snapshot.Duration = time.Since(started)
 	r.Snapshot.Error = snapshotReason(r.Diagnostics)
 	return r

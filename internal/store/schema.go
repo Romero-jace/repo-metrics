@@ -13,7 +13,7 @@ import (
 //
 // Bump this whenever migrations.sql changes shape, and append the matching entry
 // to migrationSteps below.
-const schemaVersion = 1
+const schemaVersion = 2
 
 // ErrSchemaTooNew reports a database written by a newer repo-metrics.
 //
@@ -64,7 +64,76 @@ type migrationStep struct {
 	apply   func(ctx context.Context, tx *sql.Tx) error
 }
 
-var migrationSteps []migrationStep
+var migrationSteps = []migrationStep{
+	// Version 2 separates "the command was unhappy and its numbers are real"
+	// from "this step collected nothing". Both used to land as a partial
+	// snapshot, so a repo with a known-failing suite sat in the problems section
+	// forever beside a package that would not build, and the section stopped
+	// meaning "do not trust this row".
+	//
+	// Deliberately nullable, with no default. A snapshot written before this
+	// column existed did not record whether its run was degraded, and storing 0
+	// for it would claim its numbers were taken cleanly, which is the
+	// absent-published-as-a-measurement bug this whole codebase is arranged
+	// against. NULL says nobody recorded it, which is true.
+	//
+	// The counter-argument is real and was weighed: PartialWhen reads an absent
+	// metric row as zero on the grounds that nothing was checking then, and that
+	// reasoning transfers word for word. What settles it is that the honest
+	// answer costs nothing here. Membership of the problems section is decided
+	// by status alone, so a three-state column cannot make one pre-migration row
+	// harder to read; it only refines how a row already listed is described.
+	// The existence check is not belt and braces. A stored version of 0 means
+	// either a brand-new file or one written before the version guard existed,
+	// and those need the same treatment everywhere else in this function because
+	// every statement in migrations.sql is IF NOT EXISTS. ALTER TABLE has no
+	// such spelling, so a database that already carries the column and has had
+	// its stamp reset fails the open outright with "duplicate column name". A
+	// failed open is a hard stop for whoever is running this, and the whole
+	// point of applying the schema on every open is that it is safe to.
+	{version: 2, apply: func(ctx context.Context, tx *sql.Tx) error {
+		has, err := columnExists(ctx, tx, "snapshots", "degraded")
+		if err != nil || has {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, `ALTER TABLE snapshots ADD COLUMN degraded INTEGER`)
+		return err
+	}},
+}
+
+// columnExists reports whether a table already has a column, so an ADD COLUMN
+// step can be as re-runnable as the IF NOT EXISTS statements around it.
+func columnExists(ctx context.Context, tx *sql.Tx, table, column string) (bool, error) {
+	// PRAGMA table_info takes no bound parameters, so the table name is
+	// interpolated. Both callers pass a compile-time constant, never anything
+	// from outside.
+	rows, err := tx.QueryContext(ctx, fmt.Sprintf("PRAGMA table_info(%s)", table))
+	if err != nil {
+		return false, fmt.Errorf("store: reading %s columns: %w", table, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var (
+			cid        int
+			name       string
+			typ        string
+			notNull    int
+			defaultVal sql.NullString
+			pk         int
+		)
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultVal, &pk); err != nil {
+			return false, fmt.Errorf("store: reading %s columns: %w", table, err)
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("store: reading %s columns: %w", table, err)
+	}
+	return false, nil
+}
 
 // applySchema brings the database at path up to schemaVersion, or refuses.
 //

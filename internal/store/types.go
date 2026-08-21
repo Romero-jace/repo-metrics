@@ -49,6 +49,21 @@ type Snapshot struct {
 	Env    string
 	Status Status
 	Error  string
+	// Degraded says this run produced usable numbers with a caveat: a command
+	// that exited non-zero, or an artifact past its freshness limit. The numbers
+	// are real and are kept; what the flag records is that they were taken under
+	// protest.
+	//
+	// It is what separates "the suite is red and these are its real coverage
+	// figures" from "this step collected nothing". Both make the snapshot
+	// partial, so without it a repo with a known-failing suite sits in the
+	// problems section forever beside a package that would not build, and the
+	// section stops meaning "do not trust this row".
+	//
+	// A pointer because it is genuinely absent on every snapshot written before
+	// the column existed. Reading those as false would claim their runs were
+	// clean, which is a measurement nobody took.
+	Degraded *bool
 	// Duration is the whole collection's wall time, and it too is written and
 	// never read by an output surface, deliberately. The report publishes the
 	// collect_time signal instead, which is summed from the per-step timing

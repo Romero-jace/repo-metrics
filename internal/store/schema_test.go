@@ -28,7 +28,7 @@ func rawOpen(path string) (*sql.DB, error) {
 // wantStampedVersion is store.schemaVersion, which is unexported. Bumping the
 // constant is supposed to break this, because a bump without a migration step is
 // the mistake worth catching.
-const wantStampedVersion = 1
+const wantStampedVersion = 2
 
 // userVersion reads the stamp straight off the file, which is the only thing
 // that proves the stamp was actually written rather than inferred.

@@ -227,7 +227,8 @@ staleness across a pile of repos, and say what got worse this week.
 
 usage:
   repo-metrics init    [--config FILE] [--force]
-  repo-metrics collect [--config FILE] [--database FILE] [--repo NAME]
+  repo-metrics collect [--config FILE] [--database FILE] [--repo NAME]...
+                       [--signal NAME]... [--jobs N]
   repo-metrics report  [--config FILE] [--database FILE] [--window 7d | --against REF]
                        [--out FILE] [--format `+formatSyntax+`] [--repo NAME] [--section NAME]
   repo-metrics repos   [--config FILE] [--database FILE] [--format `+formatSyntax+`]
@@ -250,7 +251,28 @@ collect flags:
                   snapshot lands and nothing else. It is what a scratch
                   collection wants: a floor to measure once, taken without
                   writing into the history a schedule is keeping.
-  --repo NAME     collect just this one repo instead of all of them
+  --repo NAME     collect just this repo instead of all of them. Repeat it to
+                  name several: --repo api --repo worker. Every name is checked
+                  before anything is collected, so a typo fails the run instead
+                  of half measuring the fleet.
+  --signal NAME   collect only this step, by the name its config gives it.
+                  Repeatable. Use it to re-measure coverage without waiting for
+                  a module listing that takes minutes.
+
+                  It costs something that is not obvious and cannot be undone.
+                  The snapshot this writes comes back ok rather than partial,
+                  because nothing failed, so it is a legitimate baseline
+                  forever and every signal you skipped reads as unmeasured in
+                  later reports. Snapshots cannot be re-collected: they measured
+                  a working tree at a commit that has since moved on. The run
+                  says so on stderr.
+  --jobs N        collect up to N repos at once. Default 1.
+
+                  Above 1 each repo's output is held and printed as a block when
+                  that repo lands, in completion order, because interleaved
+                  lines shred the table. At 1 nothing is buffered and the output
+                  is what it has always been, which is why the default is not
+                  the machine's core count.
 
   Each repo runs the signals its config lists, and a signal is the unit of
   failure: one going wrong costs its own measurements and nothing else, and the

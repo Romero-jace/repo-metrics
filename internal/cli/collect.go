@@ -16,9 +16,21 @@ func runCollect(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	set := newFlagSet("collect", stderr)
 	configPath := set.String("config", defaultConfigPath, "config file to read")
 	dbPath := set.String("database", "", "database to write instead of the one the config names")
-	only := set.String("repo", "", "collect just this one repo, by name")
+	var only nameList
+	set.Var(&only, "repo", "collect just this repo, by name. Repeat for several")
+	var steps nameList
+	set.Var(&steps, "signal", "collect only this step, by the name its config gives it. Repeat for several")
+	// Default one rather than the core count, so the output contract and the
+	// order repos are reported in do not change for anyone who did not ask.
+	jobs := set.Int("jobs", 1, "how many repos to collect at once")
 	proceed, err := parseFlags(set, args, stderr)
 	if !proceed || err != nil {
+		return err
+	}
+
+	if *jobs < 1 {
+		err := fmt.Errorf("--jobs %d is not a number of repos to collect at once", *jobs)
+		_, _ = fmt.Fprintf(stderr, "%v\n", err)
 		return err
 	}
 
@@ -27,8 +39,13 @@ func runCollect(ctx context.Context, args []string, stdout, stderr io.Writer) er
 		return err
 	}
 
-	repos, err := selectRepos(cfg.Repos, *only)
+	repos, err := selectRepos(cfg.Repos, only)
 	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "%v\n", err)
+		return err
+	}
+
+	if repos, err = narrowSignals(repos, steps, stderr); err != nil {
 		_, _ = fmt.Fprintf(stderr, "%v\n", err)
 		return err
 	}
@@ -39,29 +56,20 @@ func runCollect(ctx context.Context, args []string, stdout, stderr io.Writer) er
 	}
 	defer func() { _ = st.Close() }()
 
-	var failed []string
-	for i, repo := range repos {
-		// Cancellation is checked between repos rather than mid-repo so that
-		// whatever is already collected gets written. Everything downstream of
-		// here takes ctx too, so a signal during a long test run still lands.
-		if err := ctx.Err(); err != nil {
-			_, _ = fmt.Fprintf(stderr, "stopping early, collection was canceled after %d of %d repos\n", i, len(repos))
-			return err
-		}
-		// Announced before the work, because collectOne's line only lands after
-		// that repo's signals have all run and been stored. A cold three-repo
-		// run was 78 seconds of silence, and one signal may take ten minutes, so
-		// on nine repos there was nothing to tell working from hung, and nothing
-		// saying which repo it was on.
-		//
-		// Unconditional: there is no terminal detection in this codebase and
-		// this must not be what introduces it, so a cron log gets the same lines
-		// a terminal does. The leading word is not the repo name, so this line
-		// cannot be mistaken for the completion line's row in the table below.
-		printStarting(stdout, repo.Name, i+1, len(repos))
-		if err := collectOne(ctx, st, repo, stdout, stderr); err != nil {
-			failed = append(failed, repo.Name)
-		}
+	// Cancellation is checked per repo rather than mid-repo so that whatever is
+	// already collected gets written. Everything downstream takes ctx too, so a
+	// signal during a long test run still lands inside the subprocess.
+	//
+	// Each repo is announced before its work, because the completion line only
+	// lands after every signal has run and been stored. A cold three-repo run
+	// was 78 seconds of silence, and one signal may take ten minutes, so on nine
+	// repos there was nothing to tell working from hung. Announcing is
+	// unconditional: there is no terminal detection in this codebase and this
+	// must not be what introduces it, so a cron log gets the same lines a
+	// terminal does.
+	failed, err := collectPool(ctx, st, repos, *jobs, stdout, stderr)
+	if err != nil {
+		return err
 	}
 
 	if len(failed) > 0 {
@@ -166,19 +174,48 @@ func repoNames(repos []config.Repo) []string {
 // answer, so the agent concludes nothing regressed. The message lists what is
 // configured, because "no repo named x" on its own does not tell you whether
 // you misspelled the repo or pointed at the wrong config.
-func selectRepos(repos []config.Repo, only string) ([]config.Repo, error) {
-	if only == "" {
+// It takes a list rather than one name because collect's --repo repeats: a fleet
+// re-measure is usually two or three repos rather than one or all of them, and
+// forking a process per repo was what people did instead. report's flag stays
+// single-valued and passes a list of one, so both subcommands still go through
+// this and cannot drift on what an unknown name does.
+//
+// Every name is checked before any is accepted, so `--repo api --repo wroker`
+// fails naming the typo rather than half-collecting.
+func selectRepos(repos []config.Repo, only nameList) ([]config.Repo, error) {
+	if len(only) == 0 {
 		return repos, nil
 	}
 	names := make([]string, 0, len(repos))
+	byName := make(map[string]config.Repo, len(repos))
 	for _, r := range repos {
-		if r.Name == only {
-			return []config.Repo{r}, nil
-		}
 		names = append(names, r.Name)
+		byName[r.Name] = r
 	}
-	if len(names) == 0 {
-		return nil, fmt.Errorf("no repo named %q: the config has no repos at all", only)
+
+	var unknown []string
+	for _, want := range only {
+		if _, ok := byName[want]; !ok {
+			unknown = append(unknown, want)
+		}
 	}
-	return nil, fmt.Errorf("no repo named %q in the config, which has %s", only, strings.Join(names, ", "))
+	if len(unknown) > 0 {
+		if len(names) == 0 {
+			return nil, fmt.Errorf("no repo named %s: the config has no repos at all",
+				strings.Join(unknown, ", "))
+		}
+		return nil, fmt.Errorf("no repo named %s in the config, which has %s",
+			strings.Join(unknown, ", "), strings.Join(names, ", "))
+	}
+
+	// Config order, not flag order, so two runs naming the same repos in a
+	// different order collect them in the same order and their progress output
+	// can be compared.
+	out := make([]config.Repo, 0, len(only))
+	for _, r := range repos {
+		if only.has(r.Name) {
+			out = append(out, r)
+		}
+	}
+	return out, nil
 }

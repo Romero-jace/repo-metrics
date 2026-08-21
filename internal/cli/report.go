@@ -63,7 +63,7 @@ func runReport(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	// Narrowed before the database is opened, so a --repo run never loads
 	// snapshots and metrics for repos it is about to throw away, and a typo
 	// fails before anything has been read at all.
-	repos, err := selectRepos(cfg.Repos, *only)
+	repos, err := selectRepos(cfg.Repos, oneName(*only))
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "%v\n", err)
 		return err

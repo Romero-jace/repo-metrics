@@ -57,7 +57,7 @@ func runHistory(ctx context.Context, args []string, stdout, stderr io.Writer) er
 		return err
 	}
 
-	repos, err := selectRepos(cfg.Repos, *only)
+	repos, err := selectRepos(cfg.Repos, oneName(*only))
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "%v\n", err)
 		return err

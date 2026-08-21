@@ -115,13 +115,7 @@ func collectOne(ctx context.Context, st *store.Store, repo config.Repo, stdout, 
 // the list makes someone open the diagnostics to find out which measurement is
 // missing.
 func progressSummary(res collect.Result) string {
-	var parts []string
-	// Only when there is a denominator. Coverage of zero statements is not zero
-	// percent, and this line is the first place anyone would read it as one.
-	if covered, total := coverageTotals(res.Metrics); total > 0 {
-		parts = append(parts, fmt.Sprintf("%.1f%% of %d statements",
-			float64(covered)/float64(total)*100, total))
-	}
+	parts := coverageSummaries(res.Metrics)
 	if len(res.Collected) > 0 {
 		parts = append(parts, "collected "+strings.Join(res.Collected, ", "))
 	}

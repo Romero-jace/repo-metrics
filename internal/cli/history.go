@@ -2,8 +2,10 @@ package cli
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 
@@ -100,6 +102,10 @@ func runHistory(ctx context.Context, args []string, stdout, stderr io.Writer) er
 		return err
 	}
 
+	// Which coverage signal to chart is decided here rather than at the flag,
+	// because the answer is in the series and not in the arguments.
+	sig = chartedSignal(sig, flagWasGiven(set, "signal"), series, stderr)
+
 	view := report.BuildHistory(now, from, lookback.Hours()/24,
 		repos[0].Name, len(cfg.Repos), sig, series, last)
 
@@ -145,4 +151,91 @@ func historySeries(
 	// it is the answer, and the empty series plus a nil last-collected is how
 	// the report says so.
 	return nil, nil, nil
+}
+
+// flagWasGiven reports whether a flag was actually passed, as opposed to
+// carrying its default.
+//
+// flag.FlagSet.Visit walks only the flags that were set, which is the whole
+// difference between "the default" and "the default, typed out". Nothing else in
+// this package needs to tell those apart; charting does, because one of them may
+// be overridden and the other must not be.
+func flagWasGiven(set *flag.FlagSet, name string) bool {
+	given := false
+	set.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			given = true
+		}
+	})
+	return given
+}
+
+// measuredCoverageSignals reports which coverage units this series recorded, in
+// the order the registry lists them.
+//
+// Any point rather than the newest, because the question is what this repo
+// records rather than what its last run managed. A series ending in a failed
+// collection still answers it.
+func measuredCoverageSignals(series []store.SnapshotMetrics) []delta.SignalID {
+	seen := make(map[delta.SignalID]bool, len(delta.CoverageSignals()))
+	for _, point := range series {
+		measured := delta.Measure(point.Metrics)
+		for _, id := range delta.CoverageSignals() {
+			if _, ok := measured[id].Value(); ok {
+				seen[id] = true
+			}
+		}
+	}
+	out := make([]delta.SignalID, 0, len(seen))
+	for _, id := range delta.CoverageSignals() {
+		if seen[id] {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// chartedSignal picks the coverage unit to chart, and says so when that differs
+// from what was asked for.
+//
+// history has always defaulted to statement coverage, which is the Go unit. A
+// repo measured through an LCOV tracefile therefore answered with a run of null
+// measurements on snapshots that had collected perfectly well, and the operator
+// had to already know to ask for coverage_lines. Reported from a mixed fleet,
+// where it was read as a collection that had not worked: the tool was right and
+// unreadable, which for an agent is the same thing as being wrong.
+//
+// An explicitly named signal is never overridden. Answering a different question
+// than the one asked is the failure this whole tool argues against, so an
+// explicit --signal coverage on a repo that records lines still charts the empty
+// series, and says on stderr what the repo does record.
+//
+// Both messages go to stderr. --format json is pure JSON on stdout and nothing
+// else, and a hint that broke that would be a worse bug than the one it explains.
+func chartedSignal(
+	want delta.Signal, given bool, series []store.SnapshotMetrics, stderr io.Writer,
+) delta.Signal {
+	// Only coverage is ambiguous this way. A repo that records no tests is not
+	// being invited to chart its lint findings instead.
+	if !slices.Contains(delta.CoverageSignals(), want.ID) {
+		return want
+	}
+	measured := measuredCoverageSignals(series)
+	// Nothing recorded either unit, so there is no better answer to offer and an
+	// empty series is itself the finding.
+	if len(measured) == 0 || slices.Contains(measured, want.ID) {
+		return want
+	}
+
+	other := delta.SignalByID(measured[0])
+	if given {
+		_, _ = fmt.Fprintf(stderr,
+			"%s is not recorded for this repo, so every point below is unmeasured. It records %s\n",
+			want.ID, other.ID)
+		return want
+	}
+	_, _ = fmt.Fprintf(stderr,
+		"charting %s rather than %s, which this repo has never recorded. Pass --signal to choose\n",
+		other.ID, want.ID)
+	return other
 }

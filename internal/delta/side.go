@@ -191,6 +191,23 @@ func Measure(metrics []store.Metric) map[SignalID]Measurement {
 // profile legitimately fills both.
 func CoverageSignals() []SignalID { return []SignalID{SigCoverage, SigCoverageLines} }
 
+// CoverageCountNoun names what a coverage signal's counts count, for prose that
+// has to say "80.0% of 2000 statements" rather than "80.0% of 2000".
+//
+// Deliberately not the signal's Unit, which is percent for both of them: this
+// names the denominator rather than the value, and the denominators are what
+// differ. Empty for a signal that is not a rate over counts, so a caller that
+// asks about the wrong one gets nothing to print rather than a plausible word.
+func CoverageCountNoun(id SignalID) string {
+	switch id {
+	case SigCoverage:
+		return "statements"
+	case SigCoverageLines:
+		return "lines"
+	}
+	return ""
+}
+
 // CoverageCountsFor returns one snapshot's counts for a coverage signal, and
 // whether anything measured them.
 //

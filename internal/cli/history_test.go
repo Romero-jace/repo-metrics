@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/Romero-jace/repo-metrics/internal/collect"
+	"github.com/Romero-jace/repo-metrics/internal/config"
 	"github.com/Romero-jace/repo-metrics/internal/store"
 )
 
@@ -44,6 +45,11 @@ type pointDoc struct {
 
 type pointMeasurement struct {
 	Value float64 `json:"value"`
+	// Nullable for the twelve signals that are not a rate over counts. Plain
+	// ints would decode a test count back into a denominator of zero, which is
+	// the shape this suite exists to refuse.
+	Covered *int `json:"covered"`
+	Total   *int `json:"total"`
 }
 
 func decodeHistory(t *testing.T, out string) historyDoc {
@@ -375,5 +381,177 @@ func TestHistoryRejectsWhatItCannotChart(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// sampleJUnit is two passing tests, which is what a JUnit report contributes
+// that a tracefile cannot: a count signal, so this fixture carries a measurement
+// that is not a rate over counts.
+const sampleJUnit = `<?xml version="1.0" encoding="utf-8"?>
+<testsuites>
+  <testsuite name="pkg" tests="2" failures="0" skipped="0" time="0.5">
+    <testcase classname="pkg" name="test_a" time="0.2"/>
+    <testcase classname="pkg" name="test_b" time="0.3"/>
+  </testsuite>
+</testsuites>
+`
+
+// lcovHistoryConfig is a repo measured through an LCOV tracefile and a JUnit
+// report and no Go profile at all, which is the shape a Python or TypeScript
+// service has. One step naming both files, the way the pytest example does.
+func lcovHistoryConfig(t *testing.T) (cfgPath string) {
+	t.Helper()
+	dir := t.TempDir()
+	repo := repoDir(t, dir, "webapp", "")
+	writeFile(t, filepath.Join(repo, "coverage.lcov"), sampleLCOV)
+	writeFile(t, filepath.Join(repo, "junit.xml"), sampleJUnit)
+	entry := fmt.Sprintf(
+		"  - name: webapp\n    path: %q\n    signals:\n      - name: tests\n"+
+			"        artifacts:\n          - {path: junit.xml, format: %s}\n"+
+			"          - {path: coverage.lcov, format: %s}\n",
+		repo, config.FormatJUnitXML, config.FormatLCOV)
+	cfgPath = writeConfig(t, dir, fmt.Sprintf("database: %q\nrepos:\n%s",
+		filepath.Join(dir, "metrics.db"), entry))
+	if _, stderr, err := runCLI(t, "collect", "--config", cfgPath); err != nil {
+		t.Fatalf("collect: %v (stderr: %s)", err, stderr)
+	}
+	return cfgPath
+}
+
+// history charts the coverage unit the repo actually recorded.
+//
+// The default was statement coverage, which is Go's, so a repo measured through
+// LCOV answered with a run of null measurements on snapshots that had collected
+// perfectly well. Reported from a mixed fleet, where it was read as a collection
+// that had not worked: right and unreadable, which for an agent is the same as
+// wrong.
+func TestHistoryChartsTheCoverageUnitTheRepoRecorded(t *testing.T) {
+	cfgPath := lcovHistoryConfig(t)
+
+	stdout, stderr, err := runCLI(t, "history", "--config", cfgPath, "--repo", "webapp", "--format", "json")
+	if err != nil {
+		t.Fatalf("history: %v (stderr: %s)", err, stderr)
+	}
+	doc := decodeHistory(t, stdout)
+
+	if doc.Signal.ID != "coverage_lines" {
+		t.Errorf("signal.id = %q, want coverage_lines for a repo that records only lines", doc.Signal.ID)
+	}
+	if len(*doc.Points) != 1 {
+		t.Fatalf("got %d points, want 1", len(*doc.Points))
+	}
+	point := (*doc.Points)[0]
+	if point.Measurement == nil {
+		t.Fatal("measurement is null on an ok snapshot that measured 75 percent, which is the failure this test exists for")
+	}
+	if point.Measurement.Value != 75 {
+		t.Errorf("measurement.value = %v, want 75", point.Measurement.Value)
+	}
+	// The denominator, which setting a coverage floor needs and which used to
+	// mean a second command to recover.
+	if point.Measurement.Covered == nil || point.Measurement.Total == nil {
+		t.Fatalf("measurement carries no counts: %+v", point.Measurement)
+	}
+	if *point.Measurement.Covered != 3 || *point.Measurement.Total != 4 {
+		t.Errorf("measurement counts = %d/%d, want 3/4", *point.Measurement.Covered, *point.Measurement.Total)
+	}
+
+	// Said out loud, and on stderr rather than stdout, since --format json is
+	// pure JSON on stdout and nothing else.
+	if !strings.Contains(stderr, "coverage_lines") {
+		t.Errorf("nothing on stderr says the charted signal was not the default: %q", stderr)
+	}
+}
+
+// An explicitly named signal is never overridden.
+//
+// This is the control for the test above, and it is the more important half.
+// Answering a different question than the one asked is the failure this whole
+// tool argues against, so --signal coverage on a repo that records lines has to
+// chart the empty series and say what the repo does record.
+func TestHistoryNeverOverridesAnExplicitSignal(t *testing.T) {
+	cfgPath := lcovHistoryConfig(t)
+
+	stdout, stderr, err := runCLI(t, "history", "--config", cfgPath, "--repo", "webapp",
+		"--signal", "coverage", "--format", "json")
+	if err != nil {
+		t.Fatalf("history: %v (stderr: %s)", err, stderr)
+	}
+	doc := decodeHistory(t, stdout)
+
+	if doc.Signal.ID != "coverage" {
+		t.Errorf("signal.id = %q, want the coverage that was asked for. An explicit flag that gets swapped answers a question nobody asked", doc.Signal.ID)
+	}
+	if len(*doc.Points) != 1 {
+		t.Fatalf("got %d points, want 1", len(*doc.Points))
+	}
+	if m := (*doc.Points)[0].Measurement; m != nil {
+		t.Errorf("measurement = %+v, want null: nothing measured statements in this repo", m)
+	}
+	if !strings.Contains(stderr, "coverage_lines") {
+		t.Errorf("stderr does not say what this repo does record, so the empty series is a dead end: %q", stderr)
+	}
+}
+
+// A count signal carries no denominator, and must not borrow one.
+//
+// The snapshot this charts stores line counts too, from the tracefile the same
+// step read, so a build that attached whatever counts it found to whatever
+// signal was asked for would publish 3 of 4 as the denominator of a test count.
+// That is the fabricated number this payload shape exists to refuse, one signal
+// over from where it usually appears.
+func TestHistoryPublishesNoDenominatorForACountSignal(t *testing.T) {
+	cfgPath := lcovHistoryConfig(t)
+
+	stdout, stderr, err := runCLI(t, "history", "--config", cfgPath, "--repo", "webapp",
+		"--signal", "tests", "--format", "json")
+	if err != nil {
+		t.Fatalf("history: %v (stderr: %s)", err, stderr)
+	}
+	doc := decodeHistory(t, stdout)
+	if len(*doc.Points) != 1 {
+		t.Fatalf("got %d points, want 1", len(*doc.Points))
+	}
+	m := (*doc.Points)[0].Measurement
+	if m == nil {
+		t.Fatal("the JUnit report in this fixture counts two tests, so this point should carry them")
+	}
+	if m.Value != 2 {
+		t.Errorf("measurement.value = %v, want the 2 tests the report lists", m.Value)
+	}
+	if m.Covered != nil || m.Total != nil {
+		t.Errorf("tests published counts %v/%v. A test count has no numerator, and lending it the line counts stored beside it is a number nobody measured",
+			m.Covered, m.Total)
+	}
+}
+
+// The collect progress line names the unit it measured, and never sums the two.
+func TestCollectProgressLineNamesTheCoverageUnit(t *testing.T) {
+	dir := t.TempDir()
+	lines := repoDir(t, dir, "webapp", "")
+	writeFile(t, filepath.Join(lines, "coverage.lcov"), sampleLCOV)
+	stmts := repoDir(t, dir, "service", sampleProfile)
+	cfgPath := writeConfig(t, dir, fmt.Sprintf("database: %q\nrepos:\n%s%s",
+		filepath.Join(dir, "metrics.db"),
+		ingestLCOVEntry("webapp", lines, "coverage.lcov"),
+		ingestRepoEntry("service", stmts, "coverage.out")))
+
+	stdout, stderr, err := runCLI(t, "collect", "--config", cfgPath)
+	if err != nil {
+		t.Fatalf("collect: %v (stderr: %s)", err, stderr)
+	}
+
+	// Bound to each repo's own row. A substring search over the whole output
+	// cannot fail when one repo's figure lands on another repo's line.
+	if row := rowFor(t, stdout, "webapp"); !strings.Contains(row, "75.0% of 4 lines") {
+		t.Errorf("webapp progress line does not report its line coverage: %q", row)
+	}
+	if row := rowFor(t, stdout, "service"); !strings.Contains(row, "60.0% of 5 statements") {
+		t.Errorf("service progress line does not report its statement coverage: %q", row)
+	}
+	// The word matters as much as the figure: two units on one line with no
+	// nouns would read as one measurement taken twice.
+	if row := rowFor(t, stdout, "webapp"); strings.Contains(row, "statements") {
+		t.Errorf("webapp is described in statements, which nothing measured there: %q", row)
 	}
 }

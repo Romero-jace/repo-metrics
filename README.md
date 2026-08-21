@@ -167,6 +167,15 @@ what span, and nothing at all about the shape in between:
 repo-metrics history --repo api --signal coverage --since 90d
 ```
 
+`--signal` defaults to whichever coverage unit the repo actually recorded, and
+says on stderr when that is not the statement coverage a Go repo would have. So
+`history --repo webapp` charts a Python or TypeScript service without your having
+to know that its number is called `coverage_lines`. Naming a signal explicitly is
+never overridden: `--signal coverage` on a repo that records lines charts the
+empty series it asked for, and says on stderr what the repo does record. A tool
+that quietly answered a different question would be the failure this one argues
+against everywhere else.
+
 A run that failed stays in the series rather than being filtered out, because a
 gap in collection is the finding. Dropping those points draws a straight line
 through the week nobody was looking, and drawing them at zero turns a crashed

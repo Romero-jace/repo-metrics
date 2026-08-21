@@ -24,7 +24,6 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/Romero-jace/repo-metrics/internal/collect"
 	"github.com/Romero-jace/repo-metrics/internal/config"
 	"github.com/Romero-jace/repo-metrics/internal/delta"
 	"github.com/Romero-jace/repo-metrics/internal/report"
@@ -168,25 +167,37 @@ func openStore(path string, stderr io.Writer) (*store.Store, error) {
 	return st, nil
 }
 
-// coverageTotals sums statement counts across a snapshot's packages.
+// coverageSummaries renders one clause per coverage unit a snapshot measured.
 //
-// The sum has to happen before the division: a repo's coverage is total covered
-// over total statements, not the mean of the per-package rates, so a big package
-// counts for more than a small one. Repo-level metrics carry an empty scope and
-// are not coverage at all, hence the skip.
-func coverageTotals(metrics []store.Metric) (covered, total int) {
-	for _, m := range metrics {
-		if m.Scope == "" {
+// A clause each rather than one number, because the two units are never summed:
+// a Go profile counts statements and an LCOV tracefile counts lines, and several
+// statements on one source line collapse to one line there. A repo normally
+// fills exactly one of them, so this is usually a single clause. A Go service
+// emitting a tracefile beside its profile gets both, and neither stands in for
+// the other.
+//
+// Until this it could only say statements, so a repo measured through LCOV
+// finished with a progress line that named the step and carried no figure at
+// all. On a mixed fleet that reads as a collection which did not work, which is
+// the opposite of what it had just done.
+//
+// Read through delta rather than by summing metric keys here, so the presence
+// rule is applied once and the sum still happens before the division: a repo's
+// coverage is total covered over total, never the mean of the per-scope rates.
+func coverageSummaries(metrics []store.Metric) []string {
+	var out []string
+	for _, id := range delta.CoverageSignals() {
+		counts, measured := delta.CoverageCountsFor(metrics, id)
+		// Only when there is a denominator. Coverage of zero statements is not
+		// zero percent, and this line is the first place anyone would read it as
+		// one.
+		if !measured || counts.Total == 0 {
 			continue
 		}
-		switch m.Key {
-		case collect.KeyCoveredStmts:
-			covered += int(m.Value)
-		case collect.KeyTotalStmts:
-			total += int(m.Value)
-		}
+		out = append(out, fmt.Sprintf("%.1f%% of %d %s",
+			counts.Pct(), counts.Total, delta.CoverageCountNoun(id)))
 	}
-	return covered, total
+	return out
 }
 
 func printUsage(w io.Writer) {
@@ -286,7 +297,12 @@ history flags:
                   of nine repos at once, so this is an error rather than a
                   silent pick.
   --signal NAME   which measurement to chart. One of: `+signals+`.
-                  Default is coverage.
+                  Defaults to whichever coverage unit the repo actually
+                  recorded: statement coverage from a Go profile, or
+                  coverage_lines from an LCOV tracefile. It says on stderr when
+                  it picks the second. Naming one explicitly is never
+                  overridden, so --signal coverage on a repo that records lines
+                  charts the empty series and says what it does record.
   --since DUR     how far back to look, like 90d or 26w. Default is 90d, which
                   is deliberately not the report's window: that one is the
                   offset to a baseline, and a week of history is not a trend.

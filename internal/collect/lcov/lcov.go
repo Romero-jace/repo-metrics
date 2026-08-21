@@ -87,6 +87,11 @@ func Parse(r io.Reader) (*Summary, []Diagnostic, error) {
 		cur       *record
 		anyRecord bool
 		line      int
+		// xmlTag names the document when the input turns out to be XML, so the
+		// rejection below can say which XML rather than only that this is not a
+		// tracefile. Looked for only until the first real record, so a genuine
+		// tracefile pays for it once at the top of the file and never again.
+		xmlTag string
 	)
 
 	for sc.Scan() {
@@ -94,6 +99,9 @@ func Parse(r io.Reader) (*Summary, []Diagnostic, error) {
 		text := strings.TrimSpace(sc.Text())
 		if text == "" {
 			continue
+		}
+		if !anyRecord && xmlTag == "" {
+			xmlTag = firstXMLTag(text)
 		}
 
 		key, value, found := strings.Cut(text, ":")
@@ -182,11 +190,76 @@ func Parse(r io.Reader) (*Summary, []Diagnostic, error) {
 	// format was pointed at this parser, and reporting zero covered lines for it
 	// would be measuring the wrong file.
 	if !anyRecord && line > 0 {
-		return nil, nil, fmt.Errorf("lcov: no LCOV records in %d lines, so this is not a tracefile", line)
+		return nil, nil, notATracefile(line, xmlTag)
 	}
 
 	sort.Slice(files, func(i, j int) bool { return files[i].Name < files[j].Name })
 	return &Summary{Files: files}, diags, nil
+}
+
+// notATracefile explains bytes carrying no LCOV record, and names the mistake
+// when it can recognize it.
+//
+// Handing this parser a coverage tool's XML is the common way to land here, and
+// it is one flag word away from correct: pytest-cov writes Cobertura for
+// --cov-report=xml and LCOV only for --cov-report=lcov. "This is not a
+// tracefile" is true and leaves an operator to work the rest out from a
+// filename, which is a step this tool can take for them.
+func notATracefile(lines int, xmlTag string) error {
+	switch xmlTag {
+	case "coverage":
+		return fmt.Errorf("lcov: no LCOV records in %d lines. This looks like Cobertura XML, "+
+			"which is what --cov-report=xml writes. Ask the coverage tool for LCOV instead, "+
+			"as in --cov-report=lcov for coverage.py or --coverage.reporter=lcov for vitest", lines)
+	case "testsuite", "testsuites":
+		return fmt.Errorf("lcov: no LCOV records in %d lines. This looks like JUnit XML, which "+
+			"carries test results rather than coverage. Read it with the junit-xml format and "+
+			"point lcov at the coverage tracefile", lines)
+	case "":
+		return fmt.Errorf("lcov: no LCOV records in %d lines, so this is not a tracefile", lines)
+	default:
+		return fmt.Errorf("lcov: no LCOV records in %d lines, so this is not a tracefile. "+
+			"It is XML rooted at <%s>, and LCOV is line oriented text", lines, xmlTag)
+	}
+}
+
+// firstXMLTag returns the name of the first XML element opened in text, or "".
+//
+// It scans past processing instructions and doctypes rather than stopping at
+// them, and it does so within a line as well as across lines, because neither
+// identifies the document and a minified report puts the whole prolog and the
+// root element on one line. A Cobertura file and a JUnit file open with the same
+// <?xml, and telling them apart is the whole point of looking.
+//
+// A tracefile line reaches the first byte check and leaves, and this is only
+// consulted at all when the input turned out to carry no records, so a stray
+// angle bracket in a function name can affect nothing but the wording of a
+// rejection that was already happening.
+func firstXMLTag(text string) string {
+	for {
+		open := strings.IndexByte(text, '<')
+		if open < 0 {
+			return ""
+		}
+		rest := text[open+1:]
+		if rest == "" {
+			return ""
+		}
+		if c := rest[0]; (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+			// Bounded because the name reaches a user-facing message, and the
+			// line scanner admits a megabyte.
+			const maxTag = 40
+			if len(rest) > maxTag {
+				rest = rest[:maxTag]
+			}
+			end := strings.IndexAny(rest, " \t/>")
+			if end < 0 {
+				return ""
+			}
+			return strings.ToLower(rest[:end])
+		}
+		text = rest
+	}
 }
 
 // Totals sums the files into one covered-over-total pair. The sum is taken over

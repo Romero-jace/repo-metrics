@@ -250,11 +250,32 @@ func TestCoveredIsClampedToTotal(t *testing.T) {
 	}
 }
 
-// Something that is not a tracefile must fail rather than measure zero.
+// Something that is not a tracefile must fail rather than measure zero, and the
+// error names the mistake whenever the bytes reveal which one it was.
+//
+// A bare "not a tracefile" is true and stops there. The two cases below that get
+// their own wording are each one word away from correct: --cov-report=xml writes
+// Cobertura where --cov-report=lcov was wanted, and a repo listing both a JUnit
+// report and a tracefile can have the two paths swapped. Working either out from
+// a filename is a step this parser can take for the operator.
 func TestNonTracefilesAreFatal(t *testing.T) {
-	for _, tc := range []struct{ name, body string }{
-		{"xml", `<?xml version="1.0"?><coverage lines-valid="10" lines-covered="5"/>`},
-		{"prose", "Coverage report\n  90% of lines covered\n"},
+	for _, tc := range []struct{ name, body, want string }{
+		// The prolog and the root element on one line, which is what a minified
+		// report looks like and what this test carried before it could tell the
+		// XML dialects apart.
+		{"cobertura on one line", `<?xml version="1.0"?><coverage lines-valid="10" lines-covered="5"/>`, "Cobertura"},
+		{"cobertura behind a doctype", `<?xml version="1.0" ?>
+<!DOCTYPE coverage SYSTEM 'http://cobertura.sourceforge.net/xml/coverage-04.dtd'>
+<coverage line-rate="0.5" lines-covered="5" lines-valid="10">
+</coverage>
+`, "--cov-report=lcov"},
+		{"junit swapped in by mistake", `<?xml version="1.0"?>
+<testsuites>
+  <testsuite name="pkg" tests="3" failures="0"/>
+</testsuites>
+`, "junit-xml"},
+		{"xml that is neither", "<manifest>\n  <thing/>\n</manifest>\n", "<manifest>"},
+		{"prose", "Coverage report\n  90% of lines covered\n", "not a tracefile"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got, _, err := lcov.Parse(strings.NewReader(tc.body))
@@ -264,9 +285,22 @@ func TestNonTracefilesAreFatal(t *testing.T) {
 			if got != nil {
 				t.Error("Parse returned both an error and a summary; a caller could publish those counts")
 			}
-			if !strings.Contains(err.Error(), "not a tracefile") {
-				t.Errorf("error %q does not say what is wrong", err)
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("error %q does not mention %q, so it does not say what is wrong", err, tc.want)
 			}
 		})
 	}
+
+	// The control. Every case above would still pass if the dialect sniffing
+	// simply fired on everything, including on a tracefile that parses, and then
+	// a real LCOV file would be rejected with advice about pytest.
+	t.Run("a real tracefile is not accused of being xml", func(t *testing.T) {
+		got, _, err := lcov.Parse(strings.NewReader("SF:pkg/thing.go\nDA:1,1\nDA:2,0\nend_of_record\n"))
+		if err != nil {
+			t.Fatalf("Parse rejected a tracefile: %v", err)
+		}
+		if len(got.Files) != 1 {
+			t.Fatalf("Files: got %d, want 1", len(got.Files))
+		}
+	})
 }

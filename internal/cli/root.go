@@ -228,8 +228,8 @@ staleness across a pile of repos, and say what got worse this week.
 usage:
   repo-metrics init    [--config FILE] [--force]
   repo-metrics collect [--config FILE] [--database FILE] [--repo NAME]
-  repo-metrics report  [--config FILE] [--database FILE] [--window 7d] [--out FILE]
-                       [--format `+formatSyntax+`] [--repo NAME] [--section NAME]
+  repo-metrics report  [--config FILE] [--database FILE] [--window 7d | --against REF]
+                       [--out FILE] [--format `+formatSyntax+`] [--repo NAME] [--section NAME]
   repo-metrics repos   [--config FILE] [--database FILE] [--format `+formatSyntax+`]
   repo-metrics history --repo NAME [--config FILE] [--database FILE] [--signal NAME]
                        [--since 90d] [--format `+formatSyntax+`]
@@ -266,6 +266,15 @@ report flags:
   --database FILE database to read instead of the one the config names
   --window DUR    how far back the baseline sits, like 7d or 36h.
                   Defaults to the window in the config, which itself defaults to 7d.
+  --against REF   compare against one named snapshot instead of whichever one a
+                  window back. REF is a commit sha, abbreviated to at least 7
+                  characters, or a snapshot id. Needs --repo, since a snapshot
+                  belongs to one repo, and cannot be combined with --window,
+                  which is an instruction for picking the thing this already
+                  picked. It is what makes the movers and culprits sections
+                  usable as a measuring stick rather than only as a weekly cron:
+                  with it you get a delta and the packages behind it from two
+                  snapshots and no history at all.
   --out FILE      write the report here instead of to stdout
   --format FMT    `+formatChoice+` (default `+string(report.FormatMarkdown)+`)
   --repo NAME     report on just this one repo instead of all of them. A name

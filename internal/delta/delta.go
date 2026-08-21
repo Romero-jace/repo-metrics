@@ -238,6 +238,17 @@ type Options struct {
 	// points, to be a mover.
 	MinRepoDelta float64
 	MaxCulprits  int
+	// BaselineRef is what the caller named the baseline as, empty when the
+	// window picked it. It is carried onto the Report so the rendering can say
+	// which of the two happened, and it turns off the staleness rule below.
+	//
+	// That rule exists to stop a quarter of accumulated drift outranking the
+	// repos that really moved this week, and it reads a large gap as evidence
+	// that nobody was watching. A baseline somebody named is not evidence of
+	// that: comparing a worktree against a release tag from three months ago is
+	// the question, not a symptom. Left on, it would silence movers and culprits
+	// for exactly the comparison this option exists to make.
+	BaselineRef string
 }
 
 // Report is the whole computed result, shared by every output format so the
@@ -245,6 +256,11 @@ type Options struct {
 type Report struct {
 	GeneratedAt time.Time
 	Window      time.Duration
+	// BaselineRef is what the caller named the baseline as, empty when it was
+	// picked by the window. The rendering says which happened, because "compared
+	// against seven days ago" and "compared against the commit you named" are
+	// different claims about the same two numbers.
+	BaselineRef string
 	Repos       []RepoDelta
 }
 
@@ -276,7 +292,12 @@ func Compute(inputs []Input, opts Options, now time.Time) Report {
 		opts.MaxCulprits = DefaultMaxCulprits
 	}
 
-	rep := Report{GeneratedAt: now, Window: opts.Window, Repos: make([]RepoDelta, 0, len(inputs))}
+	rep := Report{
+		GeneratedAt: now,
+		Window:      opts.Window,
+		BaselineRef: opts.BaselineRef,
+		Repos:       make([]RepoDelta, 0, len(inputs)),
+	}
 	for _, in := range inputs {
 		rep.Repos = append(rep.Repos, computeRepo(in, opts))
 	}
@@ -328,7 +349,11 @@ func computeRepo(in Input, opts Options) RepoDelta {
 		// What it must not become is a rule that refuses the comparison. A
 		// two-month-old baseline is still the best answer available, and saying
 		// so plainly beats saying nothing.
-		if opts.Window > 0 && d.BaselineAge > 3*opts.Window {
+		//
+		// A named baseline is exempt. The whole rule infers "nobody was
+		// watching" from a large gap, and that inference is wrong the moment
+		// somebody chose the far end on purpose.
+		if opts.BaselineRef == "" && opts.Window > 0 && d.BaselineAge > 3*opts.Window {
 			d.BaselineStale = true
 		}
 	}

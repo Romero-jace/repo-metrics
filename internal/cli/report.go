@@ -23,6 +23,8 @@ func runReport(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	format := set.String("format", string(report.FormatMarkdown),
 		"which format to render: "+report.FormatChoice())
 	only := set.String("repo", "", "report on just this one repo, by name")
+	against := set.String("against", "",
+		"compare against this snapshot instead of one a window back, by commit sha or snapshot id")
 	sectionFlag := set.String("section", string(report.SectionAll),
 		"which part of the report to render, one of: "+strings.Join(report.Sections(), ", "))
 	proceed, err := parseFlags(set, args, stderr)
@@ -67,6 +69,25 @@ func runReport(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		return err
 	}
 
+	// Rejected as a pair rather than resolved by precedence, the same way the
+	// config refuses a step naming both artifact and artifacts. A window is an
+	// instruction for picking a baseline, and --against is a baseline already
+	// picked, so honoring one and ignoring the other would answer a question
+	// nobody asked while looking like it had honored both.
+	if *against != "" && *windowFlag != "" {
+		err := fmt.Errorf("--against and --window cannot be used together: --window says how to pick a baseline and --against is one already chosen")
+		_, _ = fmt.Fprintf(stderr, "%v\n", err)
+		return err
+	}
+	// A commit sha belongs to one repo, and a snapshot id names one repo's
+	// series, so there is no fleet-wide reading of --against. Required rather
+	// than silently applied to whichever repo happens to carry the sha.
+	if *against != "" && *only == "" {
+		err := fmt.Errorf("--against needs --repo NAME: a snapshot belongs to one repo, so there is no fleet-wide comparison against it")
+		_, _ = fmt.Fprintf(stderr, "%v\n", err)
+		return err
+	}
+
 	window := time.Duration(cfg.Window)
 	if *windowFlag != "" {
 		if window, err = parseWindow(*windowFlag); err != nil {
@@ -81,7 +102,7 @@ func runReport(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	}
 	defer func() { _ = st.Close() }()
 
-	inputs, err := reportInputs(ctx, st, repos, window, stderr)
+	inputs, err := reportInputs(ctx, st, repos, window, *against, stderr)
 	if err != nil {
 		return err
 	}
@@ -90,6 +111,11 @@ func runReport(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		Window:        window,
 		MinStatements: cfg.MinStatements,
 		MinRepoDelta:  cfg.MinRepoDelta,
+		// A named baseline turns off the staleness rule, which would otherwise
+		// read the gap to a three month old tag as evidence that nobody was
+		// watching and refuse to nominate the repo, silencing movers and
+		// culprits for exactly the comparison --against exists to make.
+		BaselineRef: *against,
 		// MaxCulprits stays zero so Compute applies its own default.
 	}, time.Now())
 
@@ -127,6 +153,7 @@ func reportInputs(
 	st *store.Store,
 	repos []config.Repo,
 	window time.Duration,
+	against string,
 	stderr io.Writer,
 ) ([]delta.Input, error) {
 	known, err := st.Repos(ctx)
@@ -180,13 +207,28 @@ func reportInputs(
 			return nil, err
 		}
 
-		// The baseline is measured back from the head snapshot, not from now.
-		// Measuring from now would make a repo that has not been collected in
-		// ten days compare against nothing at all.
-		base, err := st.SnapshotAtOrBefore(ctx, repo.ID, head.CollectedAt.Add(-window))
-		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "%s: %v\n", repo.Name, err)
-			return nil, err
+		// The baseline is either the one the caller named or the newest usable
+		// snapshot a window back. Everything downstream is indifferent to which:
+		// delta.Compute takes the pair and never asks how the far end was
+		// chosen, which is why --against needed no change in that package.
+		var base *store.Snapshot
+		if against != "" {
+			if base, err = resolveAgainst(ctx, st, repo, against); err != nil {
+				_, _ = fmt.Fprintf(stderr, "%v\n", err)
+				return nil, err
+			}
+			if err := usableAsBaseline(base, head, repo.Name, against); err != nil {
+				_, _ = fmt.Fprintf(stderr, "%v\n", err)
+				return nil, err
+			}
+		} else {
+			// Measured back from the head snapshot, not from now. Measuring from
+			// now would make a repo that has not been collected in ten days
+			// compare against nothing at all.
+			if base, err = st.SnapshotAtOrBefore(ctx, repo.ID, head.CollectedAt.Add(-window)); err != nil {
+				_, _ = fmt.Fprintf(stderr, "%s: %v\n", repo.Name, err)
+				return nil, err
+			}
 		}
 		// A positive window puts the cutoff strictly before the head, so this
 		// guard should never fire. It is here because a head that is its own

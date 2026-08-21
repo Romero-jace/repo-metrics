@@ -27,6 +27,18 @@ const StatusNotCollected = "not collected"
 type View struct {
 	GeneratedAt string  `json:"generated_at"`
 	WindowDays  float64 `json:"window_days"`
+	// BaselineRef is what the caller named the baseline as, and null when the
+	// window picked it. Without it, "compared against seven days ago" and
+	// "compared against the commit you named" are the same bytes, which is the
+	// same failure Scope and Section exist to refuse one axis over: an answer to
+	// one question being unreadable as an answer to a different one.
+	//
+	// Context rather than an input, even though the caller supplied it, because
+	// it is legitimately absent. An input has no unmeasured state and so may
+	// never be null; this is null on every windowed report, which is most of
+	// them. Scope.Repo is the precedent: also caller-supplied, also nullable,
+	// also context.
+	BaselineRef *string `json:"baseline_ref"`
 	// Section says which slice of the report was asked for. It is on the wire
 	// because the three lists below go nil when they were not requested, and a
 	// consumer looking at a null needs to be able to tell "you did not ask for
@@ -97,6 +109,22 @@ type ScopeView struct {
 // template branches on it so the header line can never announce a narrowing that
 // did not happen.
 func (s ScopeView) Narrowed() bool { return s.Repo != nil }
+
+// AgainstNamed reports whether the caller chose the baseline. The template
+// branches on it so the header cannot describe a window that was not used, which
+// it did until --against existed and there was only one way to pick a baseline.
+//
+// A method reading through the nil for the same reason ScopeView's accessors
+// are: the template holds no pointer and cannot dereference one safely.
+func (v View) AgainstNamed() bool { return v.BaselineRef != nil }
+
+// AgainstRef is the named baseline, or the empty string.
+func (v View) AgainstRef() string {
+	if v.BaselineRef == nil {
+		return ""
+	}
+	return *v.BaselineRef
+}
 
 // RepoName reads through the nil so the template cannot dereference it. See the
 // comment on RepoView.Culprits for why these accessors are methods.
@@ -763,6 +791,10 @@ func BuildSection(rep delta.Report, sec Section, scope Scope) View {
 		Section:     sec,
 		Scope:       sv,
 		Signals:     signalCatalog(),
+	}
+	if rep.BaselineRef != "" {
+		ref := rep.BaselineRef
+		v.BaselineRef = &ref
 	}
 	if sec.shows(SectionRepos) {
 		v.Repos = make([]RepoView, 0, len(rep.Repos))

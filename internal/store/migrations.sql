@@ -55,3 +55,12 @@ CREATE TABLE IF NOT EXISTS metrics (
 ) WITHOUT ROWID;
 
 CREATE INDEX IF NOT EXISTS idx_metrics_key_scope ON metrics (metric_key, scope);
+
+-- Resolving a --against argument to a snapshot. Added after the base schema, and
+-- deliberately without a schemaVersion bump: every statement in this file is
+-- IF NOT EXISTS and the whole file re-executes on every Open, so an existing
+-- database grows the index on next use. The version guard exists for shape
+-- changes an older binary would misread, and an extra index is not one: a v0.1.0
+-- binary opening this file reads the same rows, just without the index it never
+-- asked for.
+CREATE INDEX IF NOT EXISTS idx_snapshots_sha ON snapshots (repo_id, git_sha);

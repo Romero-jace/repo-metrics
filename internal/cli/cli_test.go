@@ -223,11 +223,15 @@ type reportRepo struct {
 // Length checks are separately useless here and are not used: len is 0 for
 // null and for [] alike.
 type reportDoc struct {
-	Section  string        `json:"section"`
-	Scope    *scopeDoc     `json:"scope"`
-	Repos    *[]reportRepo `json:"repos"`
-	Movers   *[]reportRepo `json:"movers"`
-	Problems *[]reportRepo `json:"problems"`
+	Section string    `json:"section"`
+	Scope   *scopeDoc `json:"scope"`
+	// BaselineRef is what the caller named the baseline as, null when the window
+	// picked it. A pointer because those are different answers about the same
+	// two snapshots, and an empty string would have to be known to mean one.
+	BaselineRef *string       `json:"baseline_ref"`
+	Repos       *[]reportRepo `json:"repos"`
+	Movers      *[]reportRepo `json:"movers"`
+	Problems    *[]reportRepo `json:"problems"`
 }
 
 // scopeDoc is the envelope's statement of which repos the answer covers.

@@ -130,6 +130,21 @@ defaults to seven days, so collecting again tomorrow still leaves you with no
 baseline: yesterday is too recent to qualify, not too old. Either wait out the
 window, or pass `--window 1d` to compare against yesterday.
 
+Or name the baseline outright. `report --repo api --against <sha>` compares the
+newest snapshot against the one taken at that commit, and `--against <snapshot
+id>` does the same by id, so two collections are enough to get movers, culprits
+and package churn with no history at all. That is the difference between using
+this as a weekly cron and using it as a measuring stick: collect the branch you
+care about, collect the one you are comparing it to, and ask.
+
+`--against` needs `--repo`, because a commit belongs to one repo and there is no
+fleet-wide reading of it, and it refuses to run alongside `--window`, which is an
+instruction for picking the thing `--against` has already picked. A named
+baseline is also exempt from the rule that stops a long-lapsed repo leading the
+report: that rule reads a large gap as evidence nobody was watching, and a
+baseline somebody chose on purpose is not that. Comparing a worktree against a
+release tag from three months back is the question, not a symptom.
+
 ## The commands
 
 | command | what it is for |

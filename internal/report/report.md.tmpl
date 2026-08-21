@@ -1,6 +1,10 @@
 # Repo metrics, {{ .GeneratedAt }}
 
+{{ if .AgainstNamed -}}
+Compared against the snapshot named as `{{ .AgainstRef }}` rather than against one a window back. What moved says the span that comparison actually covers.
+{{- else -}}
 Each repo is compared against the newest snapshot it has from {{ days .WindowDays }} back or earlier, so a repo nobody collected on time is compared against something older than that. What moved says the span each one actually covers.
+{{- end }}
 {{ if .Scope.Narrowed }}
 Only covering the repo `{{ .Scope.RepoName }}`, out of {{ repos .Scope.Configured }} in this config. Anything below is about that repo and nothing else.
 {{ end -}}

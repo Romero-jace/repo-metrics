@@ -217,6 +217,65 @@ func (s *Store) LatestSnapshotAny(ctx context.Context, repoID int64) (*Snapshot,
 		repoID)
 }
 
+// SnapshotByID returns one of a repo's snapshots by its own id, or nil.
+//
+// Scoped to the repo rather than looked up globally, so an id copied from
+// another repo's series cannot become this repo's baseline. Two repos' numbers
+// are not comparable, and subtracting one from the other is arithmetic over
+// unrelated code that would render as a confident delta.
+//
+// Failed snapshots are returned rather than skipped, unlike every selection
+// query above. This one answers "the snapshot you named", and a caller who names
+// one that stored nothing is owed that sentence rather than "no such snapshot".
+func (s *Store) SnapshotByID(ctx context.Context, repoID, id int64) (*Snapshot, error) {
+	return s.querySnapshot(ctx, `
+		SELECT id, repo_id, collected_at, git_sha, git_branch, git_dirty, env, status, error, duration_ms
+		FROM snapshots
+		WHERE repo_id = ? AND id = ?`,
+		repoID, id)
+}
+
+// SnapshotsByGitSHAPrefix returns every snapshot of a repo whose git sha starts
+// with prefix, newest first.
+//
+// A list rather than one row, because an ambiguous prefix has to be reported as
+// ambiguous. Quietly taking the newest match would compare against a commit the
+// caller did not name, which is a wrong answer wearing the shape of a right one.
+//
+// Matched with substr rather than LIKE so that a prefix carrying % or _ cannot
+// become a wildcard. Callers validate the prefix as hex, and a query that is
+// only correct because its callers are careful is one refactor from being wrong.
+// An empty git_sha, which is what a checkout that is not a git repo records,
+// matches no non-empty prefix.
+func (s *Store) SnapshotsByGitSHAPrefix(ctx context.Context, repoID int64, prefix string) ([]Snapshot, error) {
+	if prefix == "" {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, repo_id, collected_at, git_sha, git_branch, git_dirty, env, status, error, duration_ms
+		FROM snapshots
+		WHERE repo_id = ? AND substr(git_sha, 1, ?) = ?
+		ORDER BY collected_at DESC, id DESC`,
+		repoID, len(prefix), prefix)
+	if err != nil {
+		return nil, fmt.Errorf("store: listing snapshots by sha: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []Snapshot
+	for rows.Next() {
+		snap, err := scanSnapshot(rows)
+		if err != nil {
+			return nil, fmt.Errorf("store: scanning snapshot: %w", err)
+		}
+		out = append(out, *snap)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: listing snapshots by sha: %w", err)
+	}
+	return out, nil
+}
+
 // SnapshotAtOrBefore returns the most recent usable snapshot for a repo taken
 // at or before cutoff, or nil if there is none. This is baseline selection: the
 // boundary is inclusive, and failed snapshots are skipped.

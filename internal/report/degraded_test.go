@@ -691,6 +691,11 @@ var envelopeWireFields = map[string]fieldKind{
 	"generated_at": kindContext,
 	"section":      kindContext,
 	"window_days":  kindInput,
+	// Null on every windowed report and a string on one that named its baseline.
+	// Context rather than input despite being caller-supplied, for the reason
+	// scope.repo is: an input has no absent state, and this one is absent most of
+	// the time. It is also not a number, so it could not be an input anyway.
+	"baseline_ref": kindContext,
 
 	// scope descends: it is an object, but not a nullable one, so it is context
 	// rather than a group. A group has to be demonstrated null somewhere, and this

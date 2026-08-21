@@ -55,6 +55,15 @@ type RepoStateView struct {
 	// Coverage is nil in three of the four states, and only one of them is a
 	// failure.
 	Coverage *CoverageTotalsView `json:"coverage"`
+	// CoverageLines is the same thing in lines rather than statements, under the
+	// key the report already publishes it as. Two payloads describing one repo
+	// must not name its state two different ways.
+	//
+	// Without it this command answered "no coverage" for a Python or TypeScript
+	// repo that had measured perfectly well, because the only coverage it knew
+	// about was a Go profile's. Reported from a real fleet, where it read as a
+	// collection that had not worked.
+	CoverageLines *CoverageTotalsView `json:"coverage_lines"`
 }
 
 // CoverageTotalsView is what one snapshot measured about coverage, with nothing
@@ -65,8 +74,13 @@ type RepoStateView struct {
 // permanently null here would dilute "null means nothing measured" into "null
 // means not applicable". Those are different claims and the whole shape depends
 // on them staying different.
+// The rate is published as value rather than as pct, which is the name the
+// report and history both use for the number a signal measured. One walker
+// should read a measurement out of any of the three payloads without knowing
+// which one it is holding, and a second name for one concept is what stops that.
+// This was a wire break, and it is why the release carrying it is v0.2.0.
 type CoverageTotalsView struct {
-	Pct     float64 `json:"pct"`
+	Value   float64 `json:"value"`
 	Covered int     `json:"covered"`
 	Total   int     `json:"total"`
 }
@@ -94,12 +108,29 @@ func (r RepoStateView) CollectedText() string {
 	return *r.CollectedAt
 }
 
-// CoverageText reproduces the three distinct phrases the table has always used
-// for its three coverage-less states, which are three different findings:
-// nobody ran it, the run failed, and the run worked but instrumented nothing.
+// CoverageText is the statement-coverage cell.
 func (r RepoStateView) CoverageText() string {
-	if r.Coverage != nil {
-		return fmt.Sprintf("%.1f%%", r.Coverage.Pct)
+	return r.coverageCell(r.Coverage)
+}
+
+// LineCoverageText is the line-coverage cell, in lines over files.
+func (r RepoStateView) LineCoverageText() string {
+	return r.coverageCell(r.CoverageLines)
+}
+
+// coverageCell keeps the three distinct phrases the table has always used for
+// its three coverage-less states, which are three different findings: nobody ran
+// it, the run failed, and the run worked without measuring this.
+//
+// The third phrase used to be "no coverage", which read as a complaint. With two
+// columns it would be wrong as well: a Go repo has no line coverage and an LCOV
+// repo has no statement coverage, and both of those are the honest answer rather
+// than a problem. "not measured" is the word history's table already uses for
+// exactly this state, and the README calls the difference between it and "not
+// collected" load-bearing, so the two tables now say it the same way.
+func (r RepoStateView) coverageCell(c *CoverageTotalsView) string {
+	if c != nil {
+		return fmt.Sprintf("%.1f%%", c.Value)
 	}
 	switch {
 	case !r.HasSnapshot:
@@ -107,7 +138,7 @@ func (r RepoStateView) CoverageText() string {
 	case r.Status == string(store.StatusFailed):
 		return "not collected"
 	default:
-		return "no coverage"
+		return "not measured"
 	}
 }
 
@@ -133,16 +164,30 @@ func BuildRepos(generatedAt time.Time, inputs []ReposInput) ReposView {
 		// under. A header-only profile stores no package rows, the marker is
 		// absent, and the group stays nil instead of publishing a percentage
 		// computed from a zero denominator.
-		if counts, measured := delta.CoverageCounts(in.Metrics); measured {
-			out.Coverage = &CoverageTotalsView{
-				Pct:     counts.Pct(),
-				Covered: counts.Covered,
-				Total:   counts.Total,
-			}
-		}
+		out.Coverage = coverageTotals(in.Metrics, delta.SigCoverage)
+		out.CoverageLines = coverageTotals(in.Metrics, delta.SigCoverageLines)
 		view.Repos = append(view.Repos, out)
 	}
 	return view
+}
+
+// coverageTotals reads one coverage signal off a snapshot's metrics, or nil.
+//
+// Measured through delta rather than by summing metric keys here, so the
+// presence rule is the one rule instead of a fourth copy of it, and so nothing
+// outside that package needs to know which keys each unit lives under. A
+// header-only profile stores no scoped rows, the marker is absent, and the group
+// stays nil instead of publishing a percentage computed from a zero denominator.
+func coverageTotals(metrics []store.Metric, id delta.SignalID) *CoverageTotalsView {
+	counts, measured := delta.CoverageCountsFor(metrics, id)
+	if !measured {
+		return nil
+	}
+	return &CoverageTotalsView{
+		Value:   counts.Pct(),
+		Covered: counts.Covered,
+		Total:   counts.Total,
+	}
 }
 
 // RenderRepos writes the repo listing in the requested format.
@@ -159,12 +204,13 @@ func RenderRepos(w io.Writer, f Format, v ReposView) error {
 
 	// Buffered until Flush, which is fine here: this is a table, not progress.
 	tw := tabwriter.NewWriter(w, 0, 0, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "REPO\tLAST COLLECTED\tSTATUS\tCOVERAGE"); err != nil {
+	if _, err := fmt.Fprintln(tw, "REPO\tLAST COLLECTED\tSTATUS\tCOVERAGE\tLINE COVERAGE"); err != nil {
 		return fmt.Errorf("report: rendering repos: %w", err)
 	}
 	for _, r := range v.Repos {
-		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n",
-			r.Name, r.CollectedText(), r.StatusText(), r.CoverageText()); err != nil {
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n",
+			r.Name, r.CollectedText(), r.StatusText(),
+			r.CoverageText(), r.LineCoverageText()); err != nil {
 			return fmt.Errorf("report: rendering repos: %w", err)
 		}
 	}

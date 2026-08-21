@@ -72,6 +72,19 @@ type PointView struct {
 // the question the shape of the line already answers.
 type PointMeasurement struct {
 	Value float64 `json:"value"`
+	// Covered and Total are the counts Value was computed from, and they are
+	// null for the twelve signals that are not a rate over counts.
+	//
+	// Pointers rather than plain ints, for the reason every measurement on this
+	// wire is nullable: a test count has no numerator, and rendering 0 for one
+	// would be a number nobody measured. A nested group would have been the other
+	// way to say it and is not allowed, since a group inside a group makes the
+	// null ambiguous about which level went unmeasured.
+	//
+	// They are here because setting a coverage floor needs the denominator, and
+	// without them that meant reconstructing it from a second command.
+	Covered *int `json:"covered"`
+	Total   *int `json:"total"`
 }
 
 // BuildHistory turns a series of snapshots into the render-ready view.
@@ -118,7 +131,16 @@ func BuildHistory(
 			Error:       point.Snapshot.Error,
 		}
 		if value, measured := delta.Measure(point.Metrics)[sig.ID].Value(); measured {
-			out.Measurement = &PointMeasurement{Value: value}
+			m := &PointMeasurement{Value: value}
+			// Read off the same metrics the value came from, so a point can
+			// never carry a rate and a denominator that disagree. Answers false
+			// for the twelve signals that are not a rate over counts, and the
+			// two stay null.
+			if counts, ok := delta.CoverageCountsFor(point.Metrics, sig.ID); ok {
+				covered, total := counts.Covered, counts.Total
+				m.Covered, m.Total = &covered, &total
+			}
+			out.Measurement = m
 		}
 		view.Points = append(view.Points, out)
 	}

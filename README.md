@@ -146,11 +146,18 @@ has, because a repo that quietly stopped being collected looks exactly like a
 repo that has not changed.
 
 ```
-REPO         LAST COLLECTED        STATUS           COVERAGE
-api          2026-08-15 23:47 UTC  ok               80.0%
-worker       2026-08-15 23:47 UTC  ok               80.0%
-old-service  never                 never collected  -
+REPO         LAST COLLECTED        STATUS           COVERAGE      LINE COVERAGE
+api          2026-08-15 23:47 UTC  ok               80.0%         not measured
+webapp       2026-08-15 23:47 UTC  ok               not measured  75.0%
+old-service  never                 never collected  -             -
 ```
+
+Two coverage columns because there are two coverage units and they are never
+summed. A Go repo fills the first, a repo measured through an LCOV tracefile
+fills the second, and `not measured` in either is the honest answer rather than a
+complaint: nobody counted statements in `webapp`, and nobody counted lines in
+`api`. Those words are the same ones `history` uses, and they are not
+interchangeable with `not collected`, which means the run failed outright.
 
 `history` is the one that reads back what is already in the database. `report`
 only ever compares two snapshots, so it tells you how far a number moved and over
@@ -621,26 +628,33 @@ all of it.
 **The other two payloads are their own shapes.** `repos` and `history` both take
 `--format json`, and neither returns anything resembling a report row.
 
-`repos` has two top-level keys, and each of its rows has five:
+`repos` has two top-level keys, and each of its rows has six:
 
 ```json
 {"generated_at": "2026-08-16 20:05 UTC",
  "repos": [
    {"name": "api", "status": "ok", "collected_at": "2026-08-16 20:05 UTC",
-    "has_snapshot": true, "coverage": {"pct": 78, "covered": 1560, "total": 2000}},
-   {"name": "worker", "status": "ok", "collected_at": "2026-08-09 06:00 UTC",
-    "has_snapshot": true, "coverage": {"pct": 80, "covered": 640, "total": 800}},
+    "has_snapshot": true, "coverage": {"value": 78, "covered": 1560, "total": 2000},
+    "coverage_lines": null},
+   {"name": "webapp", "status": "ok", "collected_at": "2026-08-09 06:00 UTC",
+    "has_snapshot": true, "coverage": null,
+    "coverage_lines": {"value": 75, "covered": 640, "total": 853}},
    {"name": "old-service", "status": "not collected", "collected_at": null,
-    "has_snapshot": false, "coverage": null}]}
+    "has_snapshot": false, "coverage": null, "coverage_lines": null}]}
 ```
 
-`name`, `status`, `collected_at`, `has_snapshot`, `coverage`, and that is the
-whole row: no deltas, no baseline, nothing derived from a second snapshot.
-`collected_at` and `coverage` are the two nullables and they answer different
-questions. A null `collected_at` means nobody has ever collected this repo, while
-a null `coverage` covers that case and two more, the run that failed and the run
-that succeeded without instrumenting anything. The `repos` key is always present
-and always an array.
+`name`, `status`, `collected_at`, `has_snapshot`, `coverage`, `coverage_lines`,
+and that is the whole row: no deltas, no baseline, nothing derived from a second
+snapshot. `collected_at` and the two coverage groups are the nullables and they
+answer different questions. A null `collected_at` means nobody has ever collected
+this repo, while a null coverage group covers that case and three more: the run
+that failed, the run that succeeded without instrumenting anything, and the repo
+that measures the other unit. The `repos` key is always present and always an
+array.
+
+The rate is `value` here, the same key the report and history use, so one
+consumer walks a measurement out of any of the three payloads without knowing
+which it is holding. It was `pct` in v0.1.0.
 
 `history` has seven top-level keys:
 
@@ -654,10 +668,12 @@ and always an array.
  "points": [
    {"collected_at": "2026-08-09 06:00 UTC", "status": "ok",
     "git_sha": "0ba66afc6e2a81bb25177b8a55906c041ee11a70",
-    "env": "go=go1.26.5;gowork=on", "measurement": {"value": 80}},
+    "env": "go=go1.26.5;gowork=on",
+    "measurement": {"value": 80, "covered": 1600, "total": 2000}},
    {"collected_at": "2026-08-16 20:05 UTC", "status": "ok",
     "git_sha": "0ba66afc6e2a81bb25177b8a55906c041ee11a70",
-    "env": "go=go1.26.5;gowork=on", "measurement": {"value": 78}}]}
+    "env": "go=go1.26.5;gowork=on",
+    "measurement": {"value": 78, "covered": 1560, "total": 2000}}]}
 ```
 
 `generated_at`, `since`, `since_days`, `scope`, `signal`, `last_collected` and
@@ -668,6 +684,12 @@ empty `points` array meaning "nobody ever ran this" apart from one meaning
 "collection stopped before the window you asked about". A point's `measurement`
 is null for a run that produced nothing for this signal, which is the same rule
 the report's groups follow.
+
+Inside a measurement, `covered` and `total` are the counts `value` was computed
+from, and they are null for the twelve signals that are not a rate over counts: a
+test count has no denominator, and publishing one would be a number nobody
+measured. They are there because setting a coverage floor needs the denominator,
+and without them that meant a second command to recover it.
 
 `scope` is the report envelope's three keys, and there is one difference worth
 knowing if you read both: `scope.repo` is always a name here, because `--repo` is

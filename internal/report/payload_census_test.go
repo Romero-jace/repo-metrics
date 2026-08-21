@@ -50,15 +50,29 @@ var reposWireFields = map[string]fieldKind{
 	"repos[].collected_at": kindContext,
 	"repos[].has_snapshot": kindContext,
 
-	// The one group in this payload, and it is null in three of the listing's
-	// four states: never collected, every run failed, and the run that succeeded
-	// while instrumenting nothing. That third one is why a flat pct here would be
-	// the recurring bug: a header-only profile parses clean, stores no package
-	// rows, and its percentage is zero for want of a denominator.
+	// Null in three of the listing's four states: never collected, every run
+	// failed, and the run that succeeded while instrumenting nothing. That third
+	// one is why a flat rate here would be the recurring bug: a header-only
+	// profile parses clean, stores no package rows, and its percentage is zero
+	// for want of a denominator.
+	//
+	// The rate is value rather than pct so that one walker reads a measurement
+	// out of any of the three payloads without knowing which it is holding.
 	"repos[].coverage":         kindGroup,
-	"repos[].coverage.pct":     kindMeasurement,
+	"repos[].coverage.value":   kindMeasurement,
 	"repos[].coverage.covered": kindMeasurement,
 	"repos[].coverage.total":   kindMeasurement,
+
+	// The same two things in lines over files. A fourth null state for the
+	// statement group and a fourth for this one, since a repo measured only
+	// through LCOV fills this and not that, and a Go repo the other way round.
+	// Both of those are the honest answer rather than a failure, which is why
+	// this payload publishing only the first read as a collection that had not
+	// worked.
+	"repos[].coverage_lines":         kindGroup,
+	"repos[].coverage_lines.value":   kindMeasurement,
+	"repos[].coverage_lines.covered": kindMeasurement,
+	"repos[].coverage_lines.total":   kindMeasurement,
 }
 
 // historyWireFields is the census for one repo's series.
@@ -109,6 +123,14 @@ var historyWireFields = map[string]fieldKind{
 	// which is this project's recurring bug rendered as a chart.
 	"points[].measurement":       kindGroup,
 	"points[].measurement.value": kindMeasurement,
+	// The counts value was computed from, and null for the twelve signals that
+	// are not a rate over counts. A measurement is allowed to render null, which
+	// is what makes this the right shape rather than a nested group: a group
+	// inside a group would leave a consumer unable to say which level went
+	// unmeasured. The third walk below charts a count signal so both of these
+	// are seen null while the group around them is filled.
+	"points[].measurement.covered": kindMeasurement,
+	"points[].measurement.total":   kindMeasurement,
 }
 
 // reposFixture covers all four states the repos listing distinguishes, which is
@@ -138,8 +160,22 @@ func reposFixture() []report.ReposInput {
 			Snapshot: snap(81, 8, "go1.26.5", store.StatusOK, ""),
 			Metrics:  metrics(cov(pkgAlpha, 80, 100), testStream(1, testCount(pkgAlpha, 9))),
 		},
+		// The control for the other unit, and the state this listing used to get
+		// wrong: a repo measured through an LCOV tracefile and never through a Go
+		// profile. It fills coverage_lines and leaves coverage null, which is the
+		// mirror of every row above it, and before there were two groups it
+		// answered "no coverage" for a repo that had measured perfectly well.
+		{
+			Name:     repoLinesOnly,
+			Snapshot: snap(91, 9, "node=v26.1.0", store.StatusOK, ""),
+			Metrics:  covLines("src/alpha.ts", 45, 60),
+		},
 	}
 }
+
+// repoLinesOnly measures lines and not statements. Named so it shares no
+// substring with the table's own wording for an absent measurement.
+const repoLinesOnly = "linesonlyrepo"
 
 // mustReposJSON renders the repos payload the way the repos subcommand does and
 // decodes it as map[string]any.
@@ -200,7 +236,10 @@ func TestEveryReposFieldIsDeclared(t *testing.T) {
 			measurements = append(measurements, path)
 		}
 	}
-	want := []string{"repos[].coverage.covered", "repos[].coverage.pct", "repos[].coverage.total"}
+	want := []string{
+		"repos[].coverage.covered", "repos[].coverage.total", "repos[].coverage.value",
+		"repos[].coverage_lines.covered", "repos[].coverage_lines.total", "repos[].coverage_lines.value",
+	}
 	if got := strings.Join(sortedNames(measurements), ","); got != strings.Join(want, ",") {
 		t.Errorf("measurement paths: got %v, want %v. A number moved buckets, which is a decision worth making on purpose rather than to quiet a test.", sortedNames(measurements), want)
 	}
@@ -265,6 +304,14 @@ func TestEveryHistoryFieldIsDeclared(t *testing.T) {
 		fixedNow(), since, 90, repoHealthy, 4, sig, historyFixture(), last)), false)
 	census.walk("", mustHistoryJSON(t, report.BuildHistory(
 		fixedNow(), since, 90, repoNever, 4, sig, nil, nil)), false)
+	// The third walk charts a count rather than a rate, so covered and total are
+	// seen as nulls inside a group that is filled. Without it the only state
+	// those two paths ever reach is populated, and a build that handed every
+	// signal a denominator would pass: a test count would publish the coverage
+	// numbers of whatever else the snapshot stored.
+	census.walk("", mustHistoryJSON(t, report.BuildHistory(
+		fixedNow(), since, 90, repoHealthy, 4, delta.SignalByID(delta.SigTests),
+		historyFixture(), last)), false)
 
 	for _, problem := range census.problems {
 		t.Error(problem)
@@ -294,7 +341,12 @@ func TestEveryHistoryFieldIsDeclared(t *testing.T) {
 			measurements = append(measurements, path)
 		}
 	}
-	if got, want := strings.Join(sortedNames(measurements), ","), "points[].measurement.value"; got != want {
+	wantMeasurements := strings.Join([]string{
+		"points[].measurement.covered",
+		"points[].measurement.total",
+		"points[].measurement.value",
+	}, ",")
+	if got, want := strings.Join(sortedNames(measurements), ","), wantMeasurements; got != want {
 		t.Errorf("measurement paths: got %v, want [%v]. A number moved buckets, which is a decision worth making on purpose rather than to quiet a test.", sortedNames(measurements), want)
 	}
 

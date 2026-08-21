@@ -179,19 +179,52 @@ func Measure(metrics []store.Metric) map[SignalID]Measurement {
 	return measureAll(newSide(nil, metrics))
 }
 
-// CoverageCounts returns one snapshot's statement counts, and whether anything
-// measured them.
+// CoverageSignals lists the signals whose value is a rate over stored counts, in
+// the order a reader should be offered them.
 //
-// It exists so that nothing outside this package has to know which metric keys
-// coverage is stored under, or to re-implement summing them. The counts are the
-// authority, and the second return is what stops a caller dividing by a zero
-// denominator and publishing the result as a percentage.
-func CoverageCounts(metrics []store.Metric) (Coverage, bool) {
-	side := newSide(nil, metrics)
-	if !side.Measured(SignalByID(SigCoverage)) {
+// Two today, and they are not interchangeable: a Go profile counts statements
+// and an LCOV tracefile counts lines, and several statements on one source line
+// collapse to one line there. The list exists because three separate callers
+// need to ask which of them a repo actually stored, and each answering that for
+// itself is how the repos table came to know about only the first. A repo
+// normally fills exactly one, and a Go service emitting a tracefile beside its
+// profile legitimately fills both.
+func CoverageSignals() []SignalID { return []SignalID{SigCoverage, SigCoverageLines} }
+
+// CoverageCountsFor returns one snapshot's counts for a coverage signal, and
+// whether anything measured them.
+//
+// It exists so that nothing outside this package has to know which metric keys a
+// coverage signal is stored under, or to re-implement summing them. The counts
+// are the authority, and the second return is what stops a caller dividing by a
+// zero denominator and publishing the result as a percentage.
+//
+// An id that is not a coverage signal answers not measured. There is no counts
+// answer to give for one, and guessing at a pair of keys for it would be the
+// fabricated zero this package is arranged against.
+func CoverageCountsFor(metrics []store.Metric, id SignalID) (Coverage, bool) {
+	return newSide(nil, metrics).coverageCounts(id)
+}
+
+// coverageCounts is the same question asked of a Side that already exists, so a
+// caller holding one does not index the same metrics a second time.
+func (s Side) coverageCounts(id SignalID) (Coverage, bool) {
+	var counts Coverage
+	switch id {
+	case SigCoverage:
+		counts = s.Coverage
+	case SigCoverageLines:
+		counts = s.CoverageLines
+	default:
 		return Coverage{}, false
 	}
-	return side.Coverage, true
+	// Presence, not a non-zero denominator. A repo whose every package is
+	// uninstrumented measured nothing, and a repo of empty packages measured zero
+	// of zero, and only the marker tells those apart.
+	if !s.Measured(SignalByID(id)) {
+		return Coverage{}, false
+	}
+	return counts, true
 }
 
 // measureAll reads every registered signal off one side. It ranges the registry

@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
+	"github.com/Romero-jace/repo-metrics/internal/config"
 	"github.com/Romero-jace/repo-metrics/internal/store"
 )
 
@@ -18,22 +20,23 @@ type reposDoc struct {
 }
 
 type repoStateDoc struct {
-	Name        string        `json:"name"`
-	Status      string        `json:"status"`
-	CollectedAt *string       `json:"collected_at"`
-	HasSnapshot bool          `json:"has_snapshot"`
-	Coverage    *coverageOnly `json:"coverage"`
+	Name          string        `json:"name"`
+	Status        string        `json:"status"`
+	CollectedAt   *string       `json:"collected_at"`
+	HasSnapshot   bool          `json:"has_snapshot"`
+	Coverage      *coverageOnly `json:"coverage"`
+	CoverageLines *coverageOnly `json:"coverage_lines"`
 }
 
-// coverageOnly is the repos payload's coverage group, which spells its
-// measurement pct rather than value.
+// coverageOnly is a repos coverage group: the rate and the counts it came from,
+// and nothing derived from a second snapshot.
 //
-// That differs from the report and history on purpose. Those two publish
-// whichever signal was asked for, so the key cannot name it and the envelope
-// carries a catalog instead. Repos publishes exactly one thing, always coverage,
-// so the key says which and no catalog is needed.
+// The rate is spelled value, the same as the report's and history's, so one
+// walker reads a measurement out of any of the three payloads without knowing
+// which it is holding. It was pct until v0.2.0, and the divergence cost real
+// parse mistakes.
 type coverageOnly struct {
-	Pct     float64 `json:"pct"`
+	Value   float64 `json:"value"`
 	Covered int     `json:"covered"`
 	Total   int     `json:"total"`
 }
@@ -107,8 +110,8 @@ func TestReposJSONTellsAllFourStatesApart(t *testing.T) {
 	// renderer that published nothing at all.
 	if got := repoStateNamed(t, rows, "measured"); got.Coverage == nil {
 		t.Errorf("measured: coverage is null for a repo that measured 60 percent")
-	} else if got.Coverage.Pct != 60 {
-		t.Errorf("measured: coverage.pct = %v, want 60", got.Coverage.Pct)
+	} else if got.Coverage.Value != 60 {
+		t.Errorf("measured: coverage.value = %v, want 60", got.Coverage.Value)
 	}
 
 	// State one: configured, never collected.
@@ -204,5 +207,86 @@ func TestReposJSONSurvivesAStoreWithNothingInIt(t *testing.T) {
 	row := repoStateNamed(t, decodeRepos(t, stdout), "fresh")
 	if row.HasSnapshot || row.CollectedAt != nil || row.Coverage != nil {
 		t.Errorf("a repo upserted but never collected reports %+v, want no snapshot and no measurements", row)
+	}
+}
+
+// sampleLCOV is one source file with 3 of its 4 executable lines covered, which
+// is 75.0 percent. Lines rather than statements, and never summed with a Go
+// profile's counts.
+const sampleLCOV = "SF:src/app.ts\nDA:1,1\nDA:2,1\nDA:3,0\nDA:4,2\nend_of_record\n"
+
+// ingestLCOVEntry is ingestRepoEntry for a repo measured through an LCOV
+// tracefile rather than a Go profile, which is what pytest-cov, istanbul and nyc
+// leave behind.
+func ingestLCOVEntry(name, path, artifact string) string {
+	return fmt.Sprintf(
+		"  - name: %s\n    path: %q\n    signals:\n      - name: coverage\n        artifact: %s\n        artifact_format: %s\n",
+		name, path, artifact, config.FormatLCOV)
+}
+
+// A repo measured only through LCOV reports a number, in both renderings.
+//
+// This is the failure that prompted the second column. The listing knew about
+// statement coverage alone, so a Python or TypeScript repo that had measured
+// perfectly well answered "no coverage" in the table and a null group in the
+// JSON, and on a mixed fleet that reads as a collection which did not work
+// rather than as a different unit. The repo has no Go profile at all, so its
+// statement group must stay null while the line group fills: the two are
+// separate units and neither ever stands in for the other.
+func TestReposReportsLineCoverageWhenThatIsWhatLanded(t *testing.T) {
+	dir := t.TempDir()
+	lines := repoDir(t, dir, "webapp", "")
+	writeFile(t, filepath.Join(lines, "coverage.lcov"), sampleLCOV)
+	stmts := repoDir(t, dir, "service", sampleProfile)
+	dbPath := filepath.Join(dir, "metrics.db")
+
+	cfgPath := writeConfig(t, dir, fmt.Sprintf("database: %q\nrepos:\n%s%s",
+		dbPath,
+		ingestLCOVEntry("webapp", lines, "coverage.lcov"),
+		ingestRepoEntry("service", stmts, "coverage.out")))
+
+	if _, stderr, err := runCLI(t, "collect", "--config", cfgPath); err != nil {
+		t.Fatalf("collect: %v (stderr: %s)", err, stderr)
+	}
+
+	stdout, stderr, err := runCLI(t, "repos", "--config", cfgPath, "--format", "json")
+	if err != nil {
+		t.Fatalf("repos --format json: %v (stderr: %s)", err, stderr)
+	}
+	rows := decodeRepos(t, stdout)
+
+	web := repoStateNamed(t, rows, "webapp")
+	if web.CoverageLines == nil {
+		t.Fatalf("webapp: coverage_lines is null for a repo whose tracefile measured 75 percent of 4 lines")
+	}
+	if web.CoverageLines.Value != 75 {
+		t.Errorf("webapp: coverage_lines.value = %v, want 75", web.CoverageLines.Value)
+	}
+	if web.CoverageLines.Covered != 3 || web.CoverageLines.Total != 4 {
+		t.Errorf("webapp: coverage_lines counts = %d/%d, want 3/4. The counts are the authority and the rate is derived from them",
+			web.CoverageLines.Covered, web.CoverageLines.Total)
+	}
+	if web.Coverage != nil {
+		t.Errorf("webapp: coverage = %+v, want null. Nothing measured statements here, and a line count standing in for one would be the two units summed",
+			web.Coverage)
+	}
+
+	// The mirror, and the control. A build that filled both groups from whichever
+	// counts it found would pass every assertion above.
+	svc := repoStateNamed(t, rows, "service")
+	if svc.Coverage == nil || svc.Coverage.Value != 60 {
+		t.Errorf("service: coverage = %+v, want 60 percent", svc.Coverage)
+	}
+	if svc.CoverageLines != nil {
+		t.Errorf("service: coverage_lines = %+v, want null for a repo measured by a Go profile", svc.CoverageLines)
+	}
+
+	// And the table says it too, in its own column rather than only in the JSON.
+	table, stderr, err := runCLI(t, "repos", "--config", cfgPath)
+	if err != nil {
+		t.Fatalf("repos: %v (stderr: %s)", err, stderr)
+	}
+	if row := rowFor(t, table, "webapp"); !strings.Contains(row, "75.0%") {
+		t.Errorf("webapp row does not carry its line coverage: %q", row)
 	}
 }

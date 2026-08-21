@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"strings"
 	"time"
 
 	"github.com/Romero-jace/repo-metrics/internal/report"
@@ -16,8 +15,9 @@ import (
 func runRepos(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	set := newFlagSet("repos", stderr)
 	configPath := set.String("config", defaultConfigPath, "config file to read")
+	dbPath := set.String("database", "", "database to read instead of the one the config names")
 	format := set.String("format", string(report.FormatMarkdown),
-		"which format to render: "+strings.Join(report.Formats(), ", "))
+		"which format to render: "+report.FormatChoice())
 	proceed, err := parseFlags(set, args, stderr)
 	if !proceed || err != nil {
 		return err
@@ -34,7 +34,7 @@ func runRepos(ctx context.Context, args []string, stdout, stderr io.Writer) erro
 		return err
 	}
 
-	st, err := openStore(cfg.Database, stderr)
+	st, err := openStore(databasePath(cfg, *dbPath), stderr)
 	if err != nil {
 		return err
 	}

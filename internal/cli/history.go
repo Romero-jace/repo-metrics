@@ -25,12 +25,13 @@ const defaultLookback = 90 * 24 * time.Hour
 func runHistory(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	set := newFlagSet("history", stderr)
 	configPath := set.String("config", defaultConfigPath, "config file to read")
+	dbPath := set.String("database", "", "database to read instead of the one the config names")
 	only := set.String("repo", "", "which repo to chart, required")
 	signalFlag := set.String("signal", string(delta.SigCoverage),
-		"which measurement to chart: "+strings.Join(delta.SignalNames(), ", "))
+		"which measurement to chart, one of: "+strings.Join(delta.SignalNames(), ", "))
 	sinceFlag := set.String("since", "", "how far back to look, like 90d (default 90d)")
 	format := set.String("format", string(report.FormatMarkdown),
-		"which format to render: "+strings.Join(report.Formats(), ", "))
+		"which format to render: "+report.FormatChoice())
 	proceed, err := parseFlags(set, args, stderr)
 	if !proceed || err != nil {
 		return err
@@ -80,7 +81,7 @@ func runHistory(ctx context.Context, args []string, stdout, stderr io.Writer) er
 		}
 	}
 
-	st, err := openStore(cfg.Database, stderr)
+	st, err := openStore(databasePath(cfg, *dbPath), stderr)
 	if err != nil {
 		return err
 	}

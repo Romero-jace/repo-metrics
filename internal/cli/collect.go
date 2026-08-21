@@ -15,6 +15,7 @@ import (
 func runCollect(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	set := newFlagSet("collect", stderr)
 	configPath := set.String("config", defaultConfigPath, "config file to read")
+	dbPath := set.String("database", "", "database to write instead of the one the config names")
 	only := set.String("repo", "", "collect just this one repo, by name")
 	proceed, err := parseFlags(set, args, stderr)
 	if !proceed || err != nil {
@@ -32,7 +33,7 @@ func runCollect(ctx context.Context, args []string, stdout, stderr io.Writer) er
 		return err
 	}
 
-	st, err := openStore(cfg.Database, stderr)
+	st, err := openStore(databasePath(cfg, *dbPath), stderr)
 	if err != nil {
 		return err
 	}

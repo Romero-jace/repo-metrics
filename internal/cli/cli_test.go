@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -1961,5 +1962,79 @@ func TestInitPinsEachFormatNameToItsKey(t *testing.T) {
 	}
 	if strings.Contains(got, "artifact_format: "+string(config.FormatSARIF)) {
 		t.Error("sarif appears as an artifact_format, which is the signature of a shifted verb")
+	}
+}
+
+// --database moves where a run reads and writes, and moves nothing else.
+//
+// The case it exists for is a coverage floor measured once, which must not land
+// in the history a schedule is keeping. Before it, that meant copying a whole
+// config file to change one line, which is how two configs drift apart.
+//
+// Two failures are worth telling apart, so there are two assertions. Confirmed
+// by mutation: with databasePath returning cfg.Database unconditionally, the
+// override is never opened, the scratch file comes back empty and repoByName
+// fails first. The stat further down catches the other shape, a run that honors
+// the override and touches the config's database anyway, which would sail past
+// every assertion above it.
+func TestDatabaseFlagOverridesTheConfigAndLeavesItAlone(t *testing.T) {
+	dir := t.TempDir()
+	healthy := repoDir(t, dir, "healthy", sampleProfile)
+	configured := filepath.Join(dir, "configured.db")
+	scratch := filepath.Join(dir, "scratch.db")
+
+	cfgPath := writeConfig(t, dir, fmt.Sprintf("database: %q\nrepos:\n%s",
+		configured, ingestRepoEntry("healthy", healthy, "coverage.out")))
+
+	if _, stderr, err := runCLI(t, "collect", "--config", cfgPath, "--database", scratch); err != nil {
+		t.Fatalf("collect: %v (stderr: %s)", err, stderr)
+	}
+
+	// The snapshot is in the override.
+	st := openStore(t, scratch)
+	repo := repoByName(t, st, "healthy")
+	snap, err := st.LatestSnapshot(context.Background(), repo.ID)
+	if err != nil {
+		t.Fatalf("LatestSnapshot: %v", err)
+	}
+	if snap == nil {
+		t.Fatal("nothing was stored in the database named by --database")
+	}
+
+	// And the config's database was never touched. Checked with a stat rather
+	// than by opening it, since store.Open creates what it is pointed at and
+	// would manufacture the very file this asserts is absent.
+	if _, err := os.Stat(configured); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the config's database at %s exists, so --database did not stand in for it (stat: %v)",
+			configured, err)
+	}
+
+	// The read side has to honor it too, or a scratch collection is write-only.
+	stdout, stderr, err := runCLI(t, "repos", "--config", cfgPath, "--database", scratch, "--format", "json")
+	if err != nil {
+		t.Fatalf("repos: %v (stderr: %s)", err, stderr)
+	}
+	if !strings.Contains(stdout, `"has_snapshot":true`) {
+		t.Errorf("repos --database did not read the scratch database, got %s", stdout)
+	}
+}
+
+// Every subcommand that opens a database takes the flag.
+//
+// Hand-written rather than derived, because the thing worth catching is a fifth
+// subcommand added later that opens a store and forgets it. Deriving the list
+// from the subcommands that call openStore would make this agree automatically,
+// and automatic agreement proves nothing.
+func TestEverySubcommandThatOpensADatabaseTakesTheFlag(t *testing.T) {
+	for _, cmd := range []string{"collect", "report", "repos", "history"} {
+		t.Run(cmd, func(t *testing.T) {
+			_, stderr, err := runCLI(t, cmd, "-h")
+			if err != nil {
+				t.Fatalf("%s -h: %v", cmd, err)
+			}
+			if !strings.Contains(stderr, "-database") {
+				t.Errorf("%s does not offer --database:\n%s", cmd, stderr)
+			}
+		})
 	}
 }

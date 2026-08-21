@@ -141,6 +141,24 @@ func loadConfig(path string, stderr io.Writer) (*config.Config, error) {
 	return cfg, nil
 }
 
+// databasePath is the database a subcommand should open: the --database flag
+// when one was given, and the config's otherwise.
+//
+// An override rather than a replacement, because the config still names the
+// repos and their signals. The case it exists for is a scratch collection, a
+// coverage floor measured once, which must not be written into the history a
+// schedule is keeping. Without it that means copying an entire config file to
+// change one line, which is how two configs drift apart.
+//
+// An explicitly empty value reads as absent rather than as a request to open a
+// file with no name, which is not a path anything could open.
+func databasePath(cfg *config.Config, override string) string {
+	if override != "" {
+		return override
+	}
+	return cfg.Database
+}
+
 func openStore(path string, stderr io.Writer) (*store.Store, error) {
 	st, err := store.Open(path)
 	if err != nil {
@@ -182,8 +200,14 @@ func printUsage(w io.Writer) {
 	// that people will edit, and a stray percent sign in it would otherwise turn
 	// into a formatting verb.
 	sections := strings.Join(report.Sections(), ", ")
-	formats := strings.Join(report.Formats(), ", ")
 	signals := strings.Join(delta.SignalNames(), ", ")
+	// Two renderings of one list, both derived. The synopsis wants the compact
+	// alternation a usage line is read in, and the flag detail below wants a
+	// sentence. Neither is typed out: this line used to be spelled three ways,
+	// one of them hand written, and the comma form was read on a real fleet as
+	// though both formats could be passed at once.
+	formatSyntax := strings.Join(report.Formats(), "|")
+	formatChoice := report.FormatChoice()
 
 	// A failed write to the caller's own writer is not actionable, so the
 	// error is deliberately discarded here and everywhere else we print.
@@ -192,12 +216,12 @@ staleness across a pile of repos, and say what got worse this week.
 
 usage:
   repo-metrics init    [--config FILE] [--force]
-  repo-metrics collect [--config FILE] [--repo NAME]
-  repo-metrics report  [--config FILE] [--window 7d] [--out FILE] [--format markdown|json]
-                       [--repo NAME] [--section NAME]
-  repo-metrics repos   [--config FILE] [--format `+formats+`]
-  repo-metrics history --repo NAME [--config FILE] [--signal NAME] [--since 90d]
-                       [--format `+formats+`]
+  repo-metrics collect [--config FILE] [--database FILE] [--repo NAME]
+  repo-metrics report  [--config FILE] [--database FILE] [--window 7d] [--out FILE]
+                       [--format `+formatSyntax+`] [--repo NAME] [--section NAME]
+  repo-metrics repos   [--config FILE] [--database FILE] [--format `+formatSyntax+`]
+  repo-metrics history --repo NAME [--config FILE] [--database FILE] [--signal NAME]
+                       [--since 90d] [--format `+formatSyntax+`]
   repo-metrics version
 
 Flags go AFTER the subcommand, the way git and docker take them:
@@ -210,6 +234,11 @@ init flags:
 
 collect flags:
   --config FILE   config to read (default repo-metrics.yaml)
+  --database FILE database to write instead of the one the config names. The
+                  config still supplies the repos, so this changes where the
+                  snapshot lands and nothing else. It is what a scratch
+                  collection wants: a floor to measure once, taken without
+                  writing into the history a schedule is keeping.
   --repo NAME     collect just this one repo instead of all of them
 
   Each repo runs the signals its config lists, and a signal is the unit of
@@ -223,10 +252,11 @@ collect flags:
 
 report flags:
   --config FILE   config to read (default repo-metrics.yaml)
+  --database FILE database to read instead of the one the config names
   --window DUR    how far back the baseline sits, like 7d or 36h.
                   Defaults to the window in the config, which itself defaults to 7d.
   --out FILE      write the report here instead of to stdout
-  --format FMT    markdown (default) or json
+  --format FMT    `+formatChoice+` (default `+string(report.FormatMarkdown)+`)
   --repo NAME     report on just this one repo instead of all of them. A name
                   that is not in the config is an error, not an empty report.
                   Every report says what it covers, narrowed or not: the json
@@ -246,10 +276,12 @@ report flags:
 
 repos flags:
   --config FILE   config to read (default repo-metrics.yaml)
-  --format FMT    `+formats+` (default `+string(report.FormatMarkdown)+`)
+  --database FILE database to read instead of the one the config names
+  --format FMT    `+formatChoice+` (default `+string(report.FormatMarkdown)+`)
 
 history flags:
   --config FILE   config to read (default repo-metrics.yaml)
+  --database FILE database to read instead of the one the config names
   --repo NAME     which repo to chart. Required: there is no sensible history
                   of nine repos at once, so this is an error rather than a
                   silent pick.
@@ -258,7 +290,7 @@ history flags:
   --since DUR     how far back to look, like 90d or 26w. Default is 90d, which
                   is deliberately not the report's window: that one is the
                   offset to a baseline, and a week of history is not a trend.
-  --format FMT    `+formats+` (default `+string(report.FormatMarkdown)+`)
+  --format FMT    `+formatChoice+` (default `+string(report.FormatMarkdown)+`)
 
   history keeps failed runs in the series instead of filtering them out. A gap
   in collection is the finding, and a chart that silently omits its failures

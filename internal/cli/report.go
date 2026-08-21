@@ -17,13 +17,14 @@ import (
 func runReport(ctx context.Context, args []string, stdout, stderr io.Writer) error {
 	set := newFlagSet("report", stderr)
 	configPath := set.String("config", defaultConfigPath, "config file to read")
+	dbPath := set.String("database", "", "database to read instead of the one the config names")
 	windowFlag := set.String("window", "", "how far back the baseline sits, like 7d (default: the config's window)")
 	outPath := set.String("out", "", "write the report here instead of to stdout")
 	format := set.String("format", string(report.FormatMarkdown),
-		"which format to render: "+strings.Join(report.Formats(), ", "))
+		"which format to render: "+report.FormatChoice())
 	only := set.String("repo", "", "report on just this one repo, by name")
 	sectionFlag := set.String("section", string(report.SectionAll),
-		"which part of the report to render: "+strings.Join(report.Sections(), ", "))
+		"which part of the report to render, one of: "+strings.Join(report.Sections(), ", "))
 	proceed, err := parseFlags(set, args, stderr)
 	if !proceed || err != nil {
 		return err
@@ -74,7 +75,7 @@ func runReport(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		}
 	}
 
-	st, err := openStore(cfg.Database, stderr)
+	st, err := openStore(databasePath(cfg, *dbPath), stderr)
 	if err != nil {
 		return err
 	}

@@ -53,3 +53,25 @@ func formatList() string {
 // Formats lists the valid format names, in the order help text should show them.
 // It exists so the CLI's help cannot drift from what ParseFormat accepts.
 func Formats() []string { return strings.Split(formatList(), ", ") }
+
+// FormatChoice renders the valid names as a choice rather than as a list, for
+// help text.
+//
+// "markdown, json" is a list of two things, and a reader can reasonably take a
+// list as something you may pass more than one of. Exactly one is allowed, so
+// the connective should say so. Reported from a real fleet: the help text was
+// read as though both could be passed at once.
+//
+// Kept here rather than written out at the four call sites for the reason the
+// rest of this file exists: one set of names, one place. A third format changes
+// every rendering of this line without anyone remembering to.
+func FormatChoice() string {
+	names := Formats()
+	switch len(names) {
+	case 0:
+		return ""
+	case 1:
+		return names[0]
+	}
+	return strings.Join(names[:len(names)-1], ", ") + " or " + names[len(names)-1]
+}

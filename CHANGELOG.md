@@ -4,6 +4,74 @@ One `## vX.Y.Z` section per release, newest at the top, so the next one goes
 directly under this paragraph. The notes under a heading describe the release
 rather than replaying the commits in it.
 
+## v0.2.0
+
+The first release shaped by running this against a fleet rather than by
+reasoning about one. Ten mixed Go, Python and TypeScript repos, used to set
+coverage floors, which is a different job from the weekly cron the tool was
+built for and found the places where only the cron had been catered for.
+
+**Breaking, and the reason for the minor bump.** Two changes need a look before
+upgrading.
+
+- `repos --format json` spells its coverage rate `value` rather than `pct`, so
+  one consumer walks a measurement out of any payload without knowing which it is
+  holding. Any v0.1.0 script reading `repos[].coverage.pct` reads null now.
+- The database is schema version 2. A v0.2.0 file cannot be read by a v0.1.0
+  binary, which the version guard reports rather than misreading. Upgrading is
+  automatic and one-way; the wrapper script backs the database up before every
+  run for the reason that has always applied, which is that snapshots cannot be
+  re-collected.
+
+**Coverage is findable in whichever unit a repo records.** `history` defaulted to
+statement coverage, which is Go's, so a repo measured through an LCOV tracefile
+answered with a run of nulls on snapshots that had collected perfectly well, and
+you had to already know to ask for `coverage_lines`. It now charts what the repo
+records and says so on stderr; naming a signal explicitly is never overridden.
+`repos` publishes and prints both units, and the `collect` progress line names
+the unit it measured. Its third coverage-less phrase is now `not measured`
+rather than `no coverage`, which is the word `history` already used for that
+state.
+
+**A baseline you name.** `report --against <sha|snapshot-id>` compares against
+one chosen snapshot instead of whichever one a window back, so two collections
+are enough for movers, culprits and package churn. It needs `--repo`, refuses to
+run beside `--window`, and is exempt from the rule that stops a long-lapsed repo
+leading the report, since that rule infers nobody was watching from a large gap
+and a baseline somebody chose is not that.
+
+**Collection matches how people re-measure.** `--jobs N` collects several repos
+at once, buffering each repo's output into a block so the table does not shred;
+the default is 1 and its output is byte for byte what it was. `--repo` repeats.
+`--signal` narrows to named steps, and says on every run that the snapshot it
+writes is narrower than the config and will read as unmeasured for everything
+skipped, which is not recoverable.
+
+**A red suite stops looking like a broken collection.** Snapshots record whether
+a run was degraded, so `report --section problems` says which of the two each row
+is: numbers taken under protest, or nothing collected. The column is nullable and
+null on every snapshot written before this release, because nothing recorded it
+then.
+
+**`init` writes the starter for the language it finds**, probing for `go.mod`,
+`pyproject.toml` or `setup.cfg`, and `package.json` or `bun.lock`, and saying
+which it detected. The generated configs write their artifacts outside the
+checkout, so a second collection does not set `git_dirty` on a repo you do not
+own.
+
+**Smaller things.** `--database PATH` on every command that opens one, so a
+scratch collection does not need a second config. `report --fail-on
+problems|movers` exits 1 on what it finds, since `report` otherwise exits 0
+whatever it found. A new `show` command prints everything one repo's newest
+snapshot recorded, with the counts behind the coverage rates. `history` points
+carry `covered` and `total`. The LCOV parser names Cobertura and JUnit XML when
+one is handed to it, rather than only saying the input is not a tracefile.
+`--format` help reads as a choice rather than as a list you could pass both of.
+
+Known limits are unchanged from v0.1.0 and are listed below, with one addition:
+the thresholds are still first guesses. This release is the first fleet feedback
+acted on, not the calibration.
+
 ## v0.1.0
 
 Tagged 2026-08-18. `repo-metrics version` reads the stamp the Go toolchain

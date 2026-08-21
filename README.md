@@ -13,8 +13,10 @@ Self-hosted, one binary, no account, no SaaS.
 
 The core is built: multi-signal collection, SQLite storage, delta computation
 against a baseline snapshot, history over the whole series, and the markdown and
-JSON report. It has not been run against a fleet for long enough to have opinions
-about it yet, so treat it as working but young.
+JSON report. It has now been run against one mixed Go, Python and TypeScript
+fleet, and v0.2.0 is what that produced: mostly places where the tool was right
+and unreadable. Treat it as working, and as having one fleet's worth of opinions
+rather than none.
 
 Eight formats, three of them not tied to a language at all. SARIF carries lint
 findings from golangci-lint, eslint, ruff, semgrep, clippy and CodeQL; JUnit XML
@@ -155,6 +157,7 @@ release tag from three months back is the question, not a symptom.
 | `report` | compare the newest snapshot against one from a window ago |
 | `history` | one repo, one signal, every snapshot in a range |
 | `repos` | list every configured repo and when it was last collected |
+| `show` | everything one repo's newest snapshot recorded |
 
 `repos` is the one that is not obvious. It answers "did the cron job actually
 run", and it lists repos the database has never heard of alongside the ones it
@@ -475,6 +478,7 @@ repo-metrics report --format json --section problems   # just what failed to col
 repo-metrics report --format json --repo my-service    # just one repo
 repo-metrics history --repo my-service --format json   # one signal over time
 repo-metrics repos --format json                       # did the cron run
+repo-metrics show --repo my-service --format json      # everything one snapshot holds
 ```
 
 Measured on a three-repo config with `tiktoken` (`cl100k_base`), so these are
@@ -686,7 +690,7 @@ that measures the other unit. The `repos` key is always present and always an
 array.
 
 The rate is `value` here, the same key the report and history use, so one
-consumer walks a measurement out of any of the three payloads without knowing
+consumer walks a measurement out of any of the four payloads without knowing
 which it is holding. It was `pct` in v0.1.0.
 
 `history` has seven top-level keys:
@@ -812,15 +816,25 @@ cost the run nothing: drop `legacy` from the config and the same collection exit
 |---|---|---|---|
 | `init` | `wrote PATH`, then a one-line next step | why it refused to write | 0, or 1 if the file is already there and you did not pass `--force` |
 | `collect` | one line per repo as it starts, one more when it lands | each repo's diagnostics as they happen, then a line naming the repos that failed | 0 for any number of partials, 1 if a repo failed outright |
-| `report` | the report, or `wrote PATH` when `--out` is set | why it refused | 0, or 1 on a bad flag value, an unknown `--repo`, an unwritable `--out`, or a config or database problem |
+| `report` | the report, or `wrote PATH` when `--out` is set | why it refused | 0, or 1 on a bad flag value, an unknown `--repo`, an unwritable `--out`, or a config or database problem, or on what `--fail-on` asked about |
 | `repos` | the table or the JSON | why it refused | 0, or 1 on a bad `--format` or a config or database problem |
 | `history` | the table or the JSON | why it refused | 0, or 1 on a missing or unknown `--repo`, a bad `--signal`, `--format` or `--since`, or a config or database problem |
+| `show` | the table or the JSON | why it refused | 0, or 1 on a missing or unknown `--repo`, a bad `--format`, or a config or database problem |
 | `version` | two lines, the version and the toolchain it was built with | the complaint about the argument | 0, or 1 given any argument at all |
 | `help`, `-h`, `--help` | nothing | the usage block | 0 |
 | no arguments | nothing | the usage block, and nothing else | 1 |
 | an unknown command | nothing | `unknown command "x"`, then the usage block | 1 |
 
-`--format json` is pure JSON on stdout and nothing else. All three payloads go
+One exit code on that table is new and is opt-in. `report --fail-on problems`
+exits 1 when a repo in scope did not collect cleanly, and `--fail-on movers`
+when one cleared the reporting threshold. Without the flag `report` exits 0
+whatever it found, which is why a scheduled job chaining `collect` and `report`
+takes its status from `report` alone and goes on looking healthy long after
+collection stopped working. The report is still written either way: the check
+runs after the rendering, because the answer is the thing you ran the command
+for.
+
+`--format json` is pure JSON on stdout and nothing else. All four payloads go
 through one encoder, which is why the same four things hold for each of them. The
 document is written in a single call, so a failure part way through encoding
 yields zero bytes rather than truncated JSON. It is not indented. HTML escaping

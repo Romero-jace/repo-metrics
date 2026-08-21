@@ -6,10 +6,11 @@ rather than replaying the commits in it.
 
 ## v0.2.0
 
-The first release shaped by running this against a fleet rather than by
-reasoning about one. Ten mixed Go, Python and TypeScript repos, used to set
-coverage floors, which is a different job from the weekly cron the tool was
-built for and found the places where only the cron had been catered for.
+Tagged 2026-08-21. The first release shaped by running this against a fleet
+rather than by reasoning about one. Ten mixed Go, Python and TypeScript repos,
+used to set coverage floors, which is a different job from the weekly cron the
+tool was built for and found the places where only the cron had been catered
+for.
 
 **Breaking, and the reason for the minor bump.** Two changes need a look before
 upgrading.

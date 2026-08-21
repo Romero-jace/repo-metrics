@@ -95,34 +95,35 @@ repo-metrics collect              # one pass over all of them, then exits
 repo-metrics report               # markdown to stdout
 ```
 
-`init` writes a config that already works **if you run it inside a Go module**:
-the first repo entry points at the current directory, and its two live signals
-are `go test` and `go list`, so you can run the rest immediately and see real
-output before editing anything. Run it anywhere else and it still loads, and
-`collect` still exits 0 — what you get is a *partial* snapshot with nothing in it
-worth reading: the coverage step finds no instrumented packages and records none,
-the dependency step cannot find a `go.mod` and records nothing, and the result
-arrives as a wall of warnings rather than as a clean failure. That is not the
-tool declining to measure your language; it is a
-starter config written for the language the tool is written in. Every
-language-neutral format named under [Status](#status) is reachable from a config
-you write yourself, and the Python and TypeScript entries in
-[`examples/repo-metrics.yaml`](examples/repo-metrics.yaml) are the ones to copy —
-note in particular their `fingerprint:` lines, which a non-Go repo needs and a Go
-repo gets for free.
+`init` probes the directory it is writing into and writes the starter for what
+it finds: `go.mod` gets the Go one, `pyproject.toml` or `setup.cfg` the Python
+one, `package.json` or `bun.lock` the TypeScript one. It says on stderr which it
+detected and from which file. Find none of them and you get the Go starter with a
+line saying so, rather than silently.
+
+Each one already works: its first repo entry points at the current directory and
+its steps are live, so you can run `collect` and `report` straight away and see
+real output before editing anything. The non-Go starters carry a `fingerprint:`
+line, which a repo running no Go format needs and a Go repo gets for free, and
+they read the three language-neutral formats named under [Status](#status): JUnit
+XML for test results, LCOV for coverage, SARIF for lint findings.
+[`examples/repo-metrics.yaml`](examples/repo-metrics.yaml) is still the fully
+commented version, with every field annotated and a `unittest` adapter beside the
+pytest one.
 
 Two smaller things worth knowing before the first run. Every repo `path:` is
 checked when the config loads, so a file full of `/path/to/your-repo`
 placeholders is a load error rather than a mystery later; an `artifact:` path is
 not checked then, because the file it names is usually something a later command
-produces. And every artifact written to a relative path lands inside the repo
-being measured — the generated coverage entry writes `coverage.out` there, and
-the examples write into `reports/`. Whatever you do not gitignore will show up as
-an uncommitted change from the second run onward, which sets the `git_dirty` flag
-and earns every future snapshot a warning saying its numbers belong to no commit.
-The alternative is to point the command's output flag and the matching
-`artifact:` at an absolute path outside the tree, which costs one line and makes
-the dirty-tree warning mean something again.
+produces. And an artifact written to a relative path lands inside the repo being
+measured, where anything you do not gitignore shows up as an uncommitted change
+from the second run onward. That sets `git_dirty` and earns every later snapshot
+a warning saying its numbers belong to no commit, which is true of a genuinely
+dirty tree and false here, so the warning stops meaning anything precisely when
+you would want it to. The generated configs avoid it by writing their artifacts
+to absolute paths outside the checkout, with the command's own output flag and
+the matching `artifact:` naming the same file; nothing in the tool couples those
+two, so if you edit one, edit the other.
 
 The report needs two snapshots to compare, and the second one has to be far
 enough back. The baseline is the newest snapshot at or before your window, which

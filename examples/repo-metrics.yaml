@@ -164,9 +164,9 @@ repos:
         # repo: 623 findings capped, 2760 uncapped, from the same run.
         # `stdout` here is the simplest thing that works and it warns on every
         # single run. golangci-lint appends its own human summary after the SARIF
-        # document when the log goes to stdout — literally "0 issues.\n" on a clean
-        # repo — so the parser reports "ignored N bytes of non-JSON text after the
-        # SARIF log" each time. That is the parser being right, and it is also a
+        # document when the log goes to stdout, which on a clean repo is
+        # literally "0 issues.\n", so the parser reports "ignored N bytes of
+        # non-JSON text after the SARIF log" each time. That is the parser being right, and it is also a
         # line of noise per Go repo per night: four of them on a fleet of four,
         # forever, which is how a reader learns to skim past warnings.
         #
@@ -280,7 +280,7 @@ repos:
   # directory created INSIDE that checkout, run after run. If the repo does not
   # gitignore it, the second collection onward sets git_dirty and every snapshot
   # from then on carries a warning saying its numbers belong to no commit and
-  # nobody can reproduce them from one — which is true of a genuinely dirty tree
+  # nobody can reproduce them from one, which is true of a genuinely dirty tree
   # and false here, so the warning stops meaning anything precisely when you
   # would want it to. Two ways out, and the choice is yours: gitignore the
   # directory in each measured repo, or give every artifact an absolute path
@@ -324,6 +324,46 @@ repos:
         #
         # And coverage here counts LINES, not statements. It is reported as its
         # own signal for that reason, never summed with a Go profile's.
+
+      # The same step for a suite that runs on unittest rather than pytest.
+      # unittest-xml-reporting is a third-party package that wraps the standard
+      # runner and writes JUnit XML, so it needs nothing new here: it is read by
+      # the junit-xml format the entry above already uses. Swap it for that
+      # entry rather than adding it: two steps in one repo cannot share a
+      # name, so uncommenting this without deleting the other fails at load.
+      #
+      # --output-file is what makes it ONE document. Given -o and a directory
+      # instead, it writes a file per test class, named after the class and the
+      # time it ran, and there is no single path an artifact could point at.
+      #
+      # There is no first-party unittest-json format and there is not going to
+      # be one. unittest has no machine-readable output of its own, so a format
+      # for it would mean inventing one and shipping the tool that emits it,
+      # rather than reading something an established runner already publishes.
+      # That is the line the format table is closed on: every name it accepts is
+      # somebody else's published output with a parser behind it, and a name it
+      # accepts without a parser lets a step run a whole suite and record
+      # silence.
+      #
+      # Coverage is a second command this way, since unittest has no --cov of
+      # its own. Verified: `coverage run -m xmlrunner discover --output-file
+      # reports/junit.xml` then `coverage lcov -o reports/coverage.lcov`
+      # produces both files. command is an argv slice with no shell in it, so
+      # running the pair from one signal means a script the repo owns. Reading
+      # the tracefile from a second signal with no command works too, and costs
+      # the this-run-wrote-it check, exactly as the comment above this entry
+      # says.
+      # - name: tests
+      #   command:
+      #     - python3
+      #     - -m
+      #     - xmlrunner
+      #     - discover
+      #     - --output-file
+      #     - reports/junit.xml
+      #   artifact: reports/junit.xml
+      #   artifact_format: junit-xml
+      #   timeout: 15m
 
       - name: lint
         command: ["ruff", "check", "--output-format", "sarif"]
@@ -375,7 +415,7 @@ repos:
       #
       # Deliberately not `bun outdated` or `npm outdated`. Those resolve through
       # the installed tree, so on a checkout where nothing has been installed they
-      # return an empty result and exit 0 — a repo nobody installed and a repo
+      # return an empty result and exit 0: a repo nobody installed and a repo
       # with nothing outdated produce the same output, which is the trap the Go
       # entry above spends a paragraph on. The lockfile either lists the packages
       # or it is not a lockfile.

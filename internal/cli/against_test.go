@@ -215,3 +215,90 @@ func TestReportAgainstRefusesTheAmbiguousAndTheImpossible(t *testing.T) {
 		})
 	}
 }
+
+// ambiguousSeed gives one repo two snapshots whose shas share a seven character
+// prefix, which is the shortest --against will read as a sha.
+func ambiguousSeed(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	repo := repoDir(t, dir, "service", sampleProfile)
+	dbPath := filepath.Join(dir, "metrics.db")
+	cfgPath := writeConfig(t, dir, fmt.Sprintf("database: %q\nrepos:\n%s",
+		dbPath, ingestRepoEntry("service", repo, "coverage.out")))
+
+	ctx := context.Background()
+	seed := openStore(t, dbPath)
+	repoID, err := seed.UpsertRepo(ctx, "service", repo)
+	if err != nil {
+		t.Fatalf("seeding the repo: %v", err)
+	}
+	for i, sha := range []string{
+		"abc1234aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"abc1234bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"ffffffffffffffffffffffffffffffffffffffff",
+	} {
+		if _, err := seed.InsertSnapshot(ctx, store.Snapshot{
+			RepoID:      repoID,
+			CollectedAt: time.Now().Add(-time.Duration(10-i) * time.Hour),
+			GitSHA:      sha,
+			Status:      store.StatusOK,
+		}, []store.Metric{
+			{Key: collect.KeyCoveredStmts, Scope: "example.com/demo/a", Value: float64(50 + i)},
+			{Key: collect.KeyTotalStmts, Scope: "example.com/demo/a", Value: 100},
+		}); err != nil {
+			t.Fatalf("seeding a snapshot: %v", err)
+		}
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatalf("closing the seed store: %v", err)
+	}
+	return cfgPath
+}
+
+// A prefix matching more than one snapshot is refused, not resolved to whichever
+// is newest.
+//
+// Quietly taking the newest match would compare against a commit the caller did
+// not name, which is a wrong answer wearing the shape of a right one. The message
+// has to carry enough to pick with, or the refusal is a dead end.
+func TestReportAgainstRefusesAnAmbiguousSHAPrefix(t *testing.T) {
+	cfgPath := ambiguousSeed(t)
+
+	stdout, stderr, err := runCLI(t, "report", "--config", cfgPath, "--repo", "service",
+		"--against", "abc1234")
+	if err == nil {
+		t.Fatalf("accepted a prefix matching two snapshots, rendering %q", stdout)
+	}
+	if !strings.Contains(stderr, "matches 2 snapshots") {
+		t.Errorf("stderr does not say the prefix is ambiguous: %q", stderr)
+	}
+	if !strings.Contains(stderr, "id ") {
+		t.Errorf("stderr names no snapshot ids, so there is nothing to disambiguate with: %q", stderr)
+	}
+	if stdout != "" {
+		t.Errorf("a refused report still wrote to stdout: %q", stdout)
+	}
+}
+
+// Lengthening the prefix resolves it, which is what the refusal above tells you
+// to do. Without this the message could be advice that does not work.
+func TestReportAgainstResolvesAnExtendedSHAPrefix(t *testing.T) {
+	cfgPath := ambiguousSeed(t)
+
+	stdout, stderr, err := runCLI(t, "report", "--config", cfgPath, "--repo", "service",
+		"--against", "abc1234a", "--format", "json")
+	if err != nil {
+		t.Fatalf("report --against abc1234a: %v (stderr: %s)", err, stderr)
+	}
+	row := jsonRepo(t, *decodeReport(t, stdout).Repos, "service")
+	if row.Coverage == nil || row.Coverage.Delta == nil {
+		t.Fatalf("no delta from an unambiguous prefix: %+v", row.Coverage)
+	}
+	// Head is the ffffff snapshot at 52 percent, the named baseline is the
+	// abc1234a one at 50, so the move is +2 rather than the +1 the other
+	// abc1234 snapshot would give. That is the assertion that proves the right
+	// one of the two was chosen.
+	if *row.Coverage.Delta != 2 {
+		t.Errorf("coverage.delta = %v, want 2 against the abc1234a baseline. A different value means the other abc1234 snapshot was picked", *row.Coverage.Delta)
+	}
+}

@@ -27,6 +27,8 @@ func runReport(ctx context.Context, args []string, stdout, stderr io.Writer) err
 		"compare against this snapshot instead of one a window back, by commit sha or snapshot id")
 	sectionFlag := set.String("section", string(report.SectionAll),
 		"which part of the report to render, one of: "+strings.Join(report.Sections(), ", "))
+	failOnFlag := set.String("fail-on", string(report.FailOnNothing),
+		"exit 1 when the report finds this, one of: "+strings.Join(report.FailOns(), ", "))
 	proceed, err := parseFlags(set, args, stderr)
 	if !proceed || err != nil {
 		return err
@@ -50,6 +52,12 @@ func runReport(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	// refuses an unknown name and names the valid ones, and two validators over
 	// one set of names is one of them going stale.
 	sec, err := report.ParseSection(*sectionFlag)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "%v\n", err)
+		return err
+	}
+
+	failOn, err := report.ParseFailOn(*failOnFlag)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "%v\n", err)
 		return err
@@ -125,7 +133,53 @@ func runReport(ctx context.Context, args []string, stdout, stderr io.Writer) err
 	// caller to infer it from a list that may not even be rendered.
 	scope := report.Scope{Repo: *only, Configured: len(cfg.Repos)}
 
-	return writeReport(rep, renderFormat, sec, scope, *outPath, stdout, stderr)
+	if err := writeReport(rep, renderFormat, sec, scope, *outPath, stdout, stderr); err != nil {
+		return err
+	}
+	// Decided after the report is written, never instead of writing it. The
+	// answer is the thing you ran this for, and withholding it because it turned
+	// out to be bad news would make the flag cost information rather than carry
+	// it. This is the same order examples/repo-metrics-daily.sh already uses:
+	// render regardless, then exit with what the data says.
+	return failOnFinding(rep, failOn, stderr)
+}
+
+// failOnFinding turns what the report found into an exit status, or nil.
+//
+// report has always exited 0 unconditionally, which is documented and is still
+// how a scheduled collect-then-report job goes on looking healthy after
+// collection stops working. An agent reads exit 0 as success and never opens the
+// document. The default is unchanged, because a flag that altered exit codes by
+// existing would break every wrapper already parsing this command.
+//
+// The error text names what was found rather than restating the flag, and lands
+// on stderr, because exit 1 from this binary always leaves a line there
+// explaining itself and main never prints the error it is handed.
+func failOnFinding(rep delta.Report, on report.FailOn, stderr io.Writer) error {
+	var (
+		found []string
+		what  string
+	)
+	switch on {
+	case report.FailOnProblems:
+		what = "did not collect cleanly"
+		for _, r := range rep.Problems() {
+			found = append(found, r.Repo.Name)
+		}
+	case report.FailOnMovers:
+		what = "moved"
+		for _, r := range rep.Movers() {
+			found = append(found, r.Repo.Name)
+		}
+	default:
+		return nil
+	}
+	if len(found) == 0 {
+		return nil
+	}
+	err := fmt.Errorf("%d of %d repos %s: %s", len(found), len(rep.Repos), what, strings.Join(found, ", "))
+	_, _ = fmt.Fprintf(stderr, "%v\n", err)
+	return err
 }
 
 // reportInputs pairs each repo it is given with its newest snapshot and the

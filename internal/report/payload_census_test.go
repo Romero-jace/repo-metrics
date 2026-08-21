@@ -365,3 +365,140 @@ func TestEveryHistoryFieldIsDeclared(t *testing.T) {
 		t.Errorf("input paths: got %v, want %v. A number became an input, which means it left the only rule that keeps an unmeasured figure off the wire. That is a decision to make on purpose.", sortedNames(inputs), want)
 	}
 }
+
+// showWireFields is the census for one snapshot rendered whole.
+//
+// Hand-written for the reason the other three are: deriving it from the struct
+// would make it agree automatically, and automatic agreement proves nothing. The
+// point is that a human decides what a new number means before it can ship.
+//
+// This payload publishes all fourteen signals, so unlike repos it carries the
+// catalog, and unlike history it carries more than one measurement group. That
+// makes it the payload where a new signal reaches the wire with the least
+// ceremony, which is exactly why it needs a census of its own.
+var showWireFields = map[string]fieldKind{
+	"generated_at": kindContext,
+	"repo":         kindContext,
+	"status":       kindContext,
+	// Nullable and not a number: null says nobody has ever collected this repo,
+	// which is a real answer rather than a withheld measurement.
+	"collected_at": kindContext,
+	"has_snapshot": kindContext,
+	// Null on a snapshot taken over a directory that is not a git checkout,
+	// which collection allows and reports rather than refusing.
+	"git_sha":    kindContext,
+	"git_branch": kindContext,
+	"git_dirty":  kindContext,
+	// Null when nothing identified the toolchain. An empty string here would
+	// read as a toolchain named "", and the whole point of the fingerprint is
+	// that it refuses to guess.
+	"env": kindContext,
+	// Three-state, and null on every snapshot written before v0.2.0.
+	"degraded": kindContext,
+
+	"signals":             kindContext,
+	"signals[].id":        kindContext,
+	"signals[].label":     kindContext,
+	"signals[].unit":      kindContext,
+	"signals[].direction": kindContext,
+
+	"measurements":          kindContext,
+	"measurements[].signal": kindContext,
+
+	// The group, null for every signal this snapshot did not measure, which on a
+	// typical repo is most of the fourteen.
+	"measurements[].measurement":         kindGroup,
+	"measurements[].measurement.value":   kindMeasurement,
+	"measurements[].measurement.covered": kindMeasurement,
+	"measurements[].measurement.total":   kindMeasurement,
+
+	// omitempty, so only a snapshot carrying an error reaches this path.
+	"error": kindContext,
+}
+
+// mustShowJSON renders the show payload through the real path and decodes it.
+func mustShowJSON(t *testing.T, in report.ShowInput) map[string]any {
+	t.Helper()
+	var b strings.Builder
+	if err := report.RenderShow(&b, report.FormatJSON, report.BuildShow(fixedNow(), in)); err != nil {
+		t.Fatalf("rendering the show payload as json: %v", err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal([]byte(b.String()), &doc); err != nil {
+		t.Fatalf("decoding the rendered show json: %v\n%s", err, b.String())
+	}
+	return doc
+}
+
+// TestEveryShowFieldIsDeclared is the show payload's field census.
+//
+// Same four rules as the other three: every key classified, no number outside a
+// nullable group, every group demonstrated both null and filled, and the walk
+// recurses so the rule cannot be dodged one level down.
+func TestEveryShowFieldIsDeclared(t *testing.T) {
+	census := newWireCensus(showWireFields)
+	// A repo that measured statement coverage, which fills the group for one
+	// signal and leaves it null for the other thirteen, so both sides of the
+	// nullable rule are seen in one render.
+	census.walk("", mustShowJSON(t, report.ShowInput{
+		Name:     repoHealthy,
+		Snapshot: snap(81, 8, "go1.26.5", store.StatusOK, ""),
+		Metrics:  metrics(cov(pkgAlpha, 80, 100), testStream(1, testCount(pkgAlpha, 9))),
+	}), false)
+	// A repo the database has never heard of, which is the answer a first-time
+	// caller gets and the only render that reaches the null timestamp and the
+	// null git fields.
+	census.walk("", mustShowJSON(t, report.ShowInput{Name: repoNever}), false)
+	// A failed run, which is the only render carrying error text at all, since
+	// that key is omitempty.
+	census.walk("", mustShowJSON(t, report.ShowInput{
+		Name:     repoFailedOnly,
+		Snapshot: snap(21, 2, "go1.26.5", store.StatusFailed, "test command exited 2"),
+	}), false)
+
+	for _, problem := range census.problems {
+		t.Error(problem)
+	}
+
+	for path := range showWireFields {
+		if !census.paths[path] {
+			t.Errorf("showWireFields classifies %q but no render carries it, so the classification is rot. Either the field was removed or the fixtures no longer reach the state that emits it.", path)
+		}
+	}
+
+	for path, kind := range showWireFields {
+		if kind != kindGroup {
+			continue
+		}
+		if !census.nulled[path] {
+			t.Errorf("%q is declared a group but no render shows it null, so nothing here proves it is nullable. Most of the fourteen signals are unmeasured on any real repo and every one of them has to reach the wire as an absent group rather than a zero.", path)
+		}
+		if !census.filled[path] {
+			t.Errorf("%q is declared a group but no render fills it, so the measured case is untested and the null above proves nothing.", path)
+		}
+	}
+
+	var measurements []string
+	for path, kind := range showWireFields {
+		if kind == kindMeasurement {
+			measurements = append(measurements, path)
+		}
+	}
+	want := []string{
+		"measurements[].measurement.covered",
+		"measurements[].measurement.total",
+		"measurements[].measurement.value",
+	}
+	if got := strings.Join(sortedNames(measurements), ","); got != strings.Join(want, ",") {
+		t.Errorf("measurement paths: got %v, want %v. A number moved buckets, which is a decision worth making on purpose rather than to quiet a test.", sortedNames(measurements), want)
+	}
+
+	// The same ban repos carries. Everything here is something a collection
+	// found, and everything a collection finds can fail to be found, so the
+	// envelope's escape hatch has no business in this payload.
+	for path, kind := range showWireFields {
+		if kind == kindInput {
+			t.Errorf("%q is classified an input, but this payload carries only what one collection found.", path)
+		}
+	}
+}

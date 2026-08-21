@@ -59,6 +59,8 @@ func Run(args []string, stdout, stderr io.Writer) error {
 		return runRepos(ctx, args[1:], stdout, stderr)
 	case "history":
 		return runHistory(ctx, args[1:], stdout, stderr)
+	case "show":
+		return runShow(ctx, args[1:], stdout, stderr)
 	// Spelled three ways because people type all three, and a version check
 	// that answers "unknown command" is a small insult at the exact moment
 	// someone is trying to tell you what they are running. Deliberately not -v:
@@ -219,6 +221,7 @@ func printUsage(w io.Writer) {
 	// though both formats could be passed at once.
 	formatSyntax := strings.Join(report.Formats(), "|")
 	formatChoice := report.FormatChoice()
+	failOns := strings.Join(report.FailOns(), ", ")
 
 	// A failed write to the caller's own writer is not actionable, so the
 	// error is deliberately discarded here and everywhere else we print.
@@ -234,6 +237,8 @@ usage:
   repo-metrics repos   [--config FILE] [--database FILE] [--format `+formatSyntax+`]
   repo-metrics history --repo NAME [--config FILE] [--database FILE] [--signal NAME]
                        [--since 90d] [--format `+formatSyntax+`]
+  repo-metrics show    --repo NAME [--config FILE] [--database FILE]
+                       [--format `+formatSyntax+`]
   repo-metrics version
 
 Flags go AFTER the subcommand, the way git and docker take them:
@@ -315,6 +320,17 @@ report flags:
                   It applies to markdown and json alike. In json, a section you
                   did not ask for comes back null rather than empty, so you can
                   tell "not requested" from "nothing to report".
+  --fail-on NAME  exit 1 when the report finds this. One of: `+failOns+`.
+                  Default is none, which is what report has always done.
+                    problems a repo in scope did not collect cleanly
+                    movers   a repo in scope cleared the reporting threshold
+                  The report is still written either way: the answer is the
+                  thing you ran this for, and withholding it because it turned
+                  out to be bad news would make the flag cost information rather
+                  than carry it. Without it report exits 0 whatever it found, so
+                  a scheduled job chaining collect and report takes its status
+                  from report alone and goes on looking healthy long after
+                  collection stopped working.
 
 repos flags:
   --config FILE   config to read (default repo-metrics.yaml)
@@ -342,6 +358,20 @@ history flags:
   history keeps failed runs in the series instead of filtering them out. A gap
   in collection is the finding, and a chart that silently omits its failures
   draws a straight line through the week nobody was looking.
+
+show flags:
+  --config FILE   config to read (default repo-metrics.yaml)
+  --database FILE database to read instead of the one the config names
+  --repo NAME     which repo to show. Required, for history's reason: every
+                  repo's every signal at once is the report.
+  --format FMT    `+formatChoice+` (default `+string(report.FormatMarkdown)+`)
+
+  show is one snapshot rather than a comparison: every signal the newest
+  collection recorded, the counts behind the coverage rates, the commit it was
+  taken at, whether the tree was dirty, and what went wrong. repos answers
+  whether a repo was collected, report answers what moved and needs two
+  snapshots to answer anything, and history charts one signal over time. This is
+  the one that says what a repo measures right now.
 
 version takes no flags. It reports the module version when this binary was
 installed from a tag, the commit when it was built from a checkout, and says
